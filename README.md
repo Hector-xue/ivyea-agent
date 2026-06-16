@@ -161,8 +161,11 @@ ivyea audit rollback <审计ID>        # 回滚某次写操作
 - 架构与方法论：见 IvyeaOps 知识库 `ivyea-agent/架构方案`、`amazon-ops/*`。
 - LLM Provider 层：多模型统一接口（P1 接 DeepSeek，预留 OpenAI/Anthropic/Gemini/Ollama）。⚠️ apimart 只生图、不能做 agent 主脑。
 - MCP：P1.5 接入「领星 ERP MCP」直接读广告报表（替代手动导 CSV）；写操作走网关 + 审核制（P2）。
-- 路线：P1 只读巡检 → P2 审核制执行（一键确认改 bid/否词）→ P3 记忆(GBrain)+实时触发 → P4 嵌入 IvyeaOps → P5 多 ASIN/多店规模化。
+- 设计 v2（架构学 Hermes、交互学 Claude Code）：见知识库 `ivyea-agent/设计v2`。
+- 记忆（P3）：**SQLite FTS5 + 策展 markdown + 摘要**（Hermes 同款，自有，不用向量库/GBrain）。
+- 路线：P1 只读巡检 ✅ → P1.5 通用 MCP ✅ → P2 审核制执行 ✅ → P2.5 对话式+权限审批 ✅ → P3 记忆 → P4 嵌入 IvyeaOps → P5 多 ASIN/多店 + 自学习。
 
 ## 状态
 
-P1 MVP（只读巡检）。写操作、自动调度、对话模式、嵌入控制台均为后续阶段。
+P1/P1.5/P2/P2.5 已完成（只读巡检、通用 MCP、审核制执行、对话模式+权限审批）。
+待验证真链路：DeepSeek 主脑 key（对话/复核）、真实 MCP 读写。P3 记忆进行中。
