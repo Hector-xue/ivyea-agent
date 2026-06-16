@@ -277,6 +277,90 @@ def _cmd_patrol(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_apply(args: argparse.Namespace) -> int:
+    from . import actions as act_mod, executor, guardrails
+    from pathlib import Path
+
+    detail = args.source
+    if Path(args.source).is_dir():
+        detail = act_mod.load_detail_from_dir(args.source)
+    if not detail or not Path(detail).exists():
+        print(f"找不到巡检明细 CSV（传入巡检输出目录或 *明细*.csv）：{args.source}", file=sys.stderr)
+        return 2
+
+    protected = [w for w in (args.protected or "").split(",") if w.strip()]
+    acts = guardrails.annotate(act_mod.extract_actions(detail), protected_terms=protected)
+    blocked = [a for a in acts if a.blocked]
+    pending = [a for a in acts if not a.blocked]
+
+    mode = "真实执行" if args.execute else "DRY-RUN（仅预览，不写）"
+    print(f"== 审核制执行（{mode}）==")
+    print(f"可执行 {len(pending)} 个，护栏拦截 {len(blocked)} 个。\n")
+    if blocked:
+        print("【护栏拦截，不会执行】")
+        for a in blocked:
+            print(f"  ✗ {a.summary()}  — {a.block_reason}")
+        print()
+    if args.execute and not args.from_mcp:
+        print("真实执行需要 --from-mcp <服务器>（且该服务器配好 writeActions 映射）。", file=sys.stderr)
+        return 2
+
+    confirmed: list = []
+    auto = args.yes
+    for a in pending:
+        note = "" if a.executable else "（缺当前bid，仅建议，跳过执行）"
+        print(f"● {a.summary()} {note}")
+        print(f"    分类:{a.term_category} 置信:{a.confidence} | 30d {a.clicks30:.0f}点击/{a.orders30:.0f}单/ACOS {a.acos30}")
+        print(f"    理由:{a.reason}")
+        if not a.executable:
+            continue
+        if auto:
+            confirmed.append(a); continue
+        try:
+            ans = input("    确认? [y=是 / n=否 / a=以下全部 / q=退出]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print(); ans = "q"
+        if ans == "q":
+            break
+        if ans == "a":
+            auto = True; confirmed.append(a); continue
+        if ans == "y":
+            confirmed.append(a)
+
+    print(f"\n已确认 {len(confirmed)} 个，开始{'执行' if args.execute else '预演'}：")
+    from .mcp_client import MCPError
+    for a in confirmed:
+        try:
+            r = executor.execute(a, args.from_mcp or "", dry_run=not args.execute)
+            print(f"  {'✓' if r['ok'] else '✗'} {r['detail']}")
+        except MCPError as e:
+            print(f"  ✗ {a.summary()} — {e}")
+    if not args.execute:
+        print("\n（这是 DRY-RUN。确认无误后加 --execute --from-mcp <服务器> 真实执行。）")
+    return 0
+
+
+def _cmd_audit(args: argparse.Namespace) -> int:
+    from . import audit, executor
+    if args.action == "list":
+        rows = audit.load_all()
+        if not rows:
+            print("(暂无审计记录)")
+            return 0
+        for e in rows:
+            print(f"  {e.get('id','?')}  {e.get('ts','')}  {e.get('kind','')}  "
+                  f"{e.get('search_term','')}  [{e.get('server','')}]")
+        return 0
+    if args.action == "rollback":
+        if not args.id:
+            print("用法: ivyea audit rollback <审计ID>", file=sys.stderr)
+            return 2
+        r = executor.rollback(args.id)
+        print(("✓ " if r["ok"] else "✗ ") + r["detail"])
+        return 0 if r["ok"] else 1
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ivyea", description="Ivyea Agent — 亚马逊运营 CLI Agent")
     p.add_argument("--version", action="version", version=f"ivyea-agent {__version__}")
@@ -306,6 +390,19 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--output-dir", dest="output_dir", help="输出目录")
     pp.add_argument("--no-llm", action="store_true", help="只跑规则引擎，跳过 AI 复核")
     pp.set_defaults(func=_cmd_patrol)
+
+    pa = sub.add_parser("apply", help="审核制执行巡检建议（默认 dry-run；--execute 才真写）")
+    pa.add_argument("source", help="巡检输出目录 或 *明细*.csv 路径")
+    pa.add_argument("--from-mcp", dest="from_mcp", help="执行用的 MCP 服务器（需配 writeActions）")
+    pa.add_argument("--execute", action="store_true", help="真实执行（默认仅 dry-run 预览）")
+    pa.add_argument("--protected", help="保护词清单，逗号分隔（这些词不否/不动）")
+    pa.add_argument("--yes", action="store_true", help="跳过逐条确认，批准所有未被护栏拦截的动作")
+    pa.set_defaults(func=_cmd_apply)
+
+    pu = sub.add_parser("audit", help="执行审计 / 回滚")
+    pu.add_argument("action", choices=["list", "rollback"])
+    pu.add_argument("id", nargs="?", help="rollback 的审计ID")
+    pu.set_defaults(func=_cmd_audit)
     return p
 
 

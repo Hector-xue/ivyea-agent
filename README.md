@@ -119,6 +119,31 @@ ivyea patrol 报告.csv --no-llm        # 只跑规则引擎，跳过 AI 复核
 
 未配置模型 key 时会自动降级为「仅规则引擎」结论，不报错。报告同时保存为 `.md`。
 
+## 审核制执行（P2）
+
+巡检给出建议后，用 `ivyea apply` 走**审核制执行**：逐条确认 → 经 MCP 写工具落地 → 审计可回滚。**默认 dry-run（只预览不写）**，真实执行需显式 `--execute --from-mcp`。
+
+```bash
+ivyea apply /巡检输出目录            # dry-run：列出否词/调价动作 + 护栏拦截，逐条确认
+ivyea apply 巡检目录 --protected "我的核心词,品牌词"   # 指定保护词
+ivyea apply 巡检目录 --execute --from-mcp 领星        # 真实执行（需配 writeActions）
+ivyea audit list                     # 看执行记录
+ivyea audit rollback <审计ID>        # 回滚某次写操作
+```
+
+**硬护栏（违反即阻断，不交给模型判断）**：不否品牌词/竞品词/核心品类词/保护词；置信度低不自动执行；单次调 bid ≤20%；小类目核心词不降 bid。
+
+**写操作映射（approach c，配在 mcp.json 的服务器下）**：
+```json
+"writeActions": {
+  "negative":          {"tool":"add_negative_keyword",    "args":{"keyword":"{search_term}","match_type":"{negate_match}"}},
+  "negative_rollback": {"tool":"remove_negative_keyword", "args":{"keyword":"{search_term}"}},
+  "bid":               {"tool":"update_bid",              "args":{"keyword":"{search_term}","bid":"{new_bid}"}},
+  "bid_rollback":      {"tool":"update_bid",              "args":{"keyword":"{search_term}","bid":"{current_bid}"}}
+}
+```
+> 调 bid 需要"当前 bid"才能算绝对值；搜索词报告里没有，所以 bid 动作默认作建议、不执行，除非另接 bid 数据。否词最干净，是 P2 主力。
+
 ## 设计 / 路线图
 
 - 架构与方法论：见 IvyeaOps 知识库 `ivyea-agent/架构方案`、`amazon-ops/*`。
