@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ivyea-agent"
+version = "0.1.0"
+description = "Ivyea Agent — 自托管的亚马逊运营 CLI Agent（P1: 只读广告巡检）"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+ivyea = "ivyea_agent.cli:main"
+
+[tool.setuptools]
+packages = ["ivyea_agent", "ivyea_agent.providers", "ivyea_agent.rule_engine_scripts"]
+
+[tool.setuptools.package-data]
+"ivyea_agent.rule_engine_scripts" = ["*.csv"]
