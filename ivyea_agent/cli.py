@@ -87,9 +87,16 @@ def _cmd_config(args: argparse.Namespace) -> int:
     if args.action is None:
         return _config_wizard()
     if args.action == "edit":
-        editor = os.environ.get("EDITOR", "nano")
+        default_editor = "notepad" if sys.platform.startswith("win") else "nano"
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or default_editor
         config.ENV_FILE.touch(exist_ok=True)
-        subprocess.call([editor, str(config.SETTINGS_FILE if args.key == "settings" else config.ENV_FILE)])
+        target = config.SETTINGS_FILE if args.key == "settings" else config.ENV_FILE
+        try:
+            subprocess.call([editor, str(target)])
+        except FileNotFoundError:
+            print(f"找不到编辑器 '{editor}'。设置环境变量 EDITOR 后重试，或直接编辑: {target}",
+                  file=sys.stderr)
+            return 1
         return 0
     if args.action == "show":
         return _print_config()
