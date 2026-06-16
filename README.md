@@ -89,6 +89,12 @@ ivyea config edit       # 用 $EDITOR 直接编辑 .env
 
 主脑模型 P1 用 DeepSeek（OpenAI 兼容、便宜、够用）；密钥存 `~/.ivyea/.env`（权限 600）。
 
+配置模型也可单独用：
+```bash
+ivyea model                      # 交互配置 provider/模型/key
+ivyea model deepseek:deepseek-chat   # 直接切
+```
+
 ### MCP 服务器（对话式配置 + 自动拉数）
 
 ```bash
@@ -138,7 +144,8 @@ ivyea patrol 报告.csv --no-llm        # 只跑规则引擎，跳过 AI 复核
 像跟 Claude Code 对话一样用它：自然语言 + 人工审批 + 斜杠命令。
 
 ```bash
-ivyea chat                       # dry-run 对话
+ivyea                            # 直接敲 ivyea = 进对话模式（像 claude/hermes）
+ivyea chat                       # 同上，dry-run 对话
 ivyea chat --execute --from-mcp 领星 --protected "核心词,品牌词"   # 允许真写
 ```
 - 直接说："看下 B0XXXXXXXX 这周广告"——Agent 自动 巡检→提动作→**逐条弹人工审批**(预览+`[1]是[2]本会话都允许[3]否[4]改[5]全停`)→执行→可回滚。

@@ -356,16 +356,60 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 2
 
 
-_CHAT_HELP = """斜杠命令：
-  /help              显示帮助
-  /model [p:model]   查看/切换主脑模型（如 /model deepseek:deepseek-chat）
-  /mcp               列出已配置的 MCP 服务器
-  /tools             列出 Agent 可用工具
-  /clear             清空当前对话上下文
-  /memory            记忆（P3 规划中）
-  /exit | /quit      退出
-直接输入自然语言即可（如：看下 B0XXXXXXXX 这周广告，数据用 sample CSV）。
-写操作会逐条弹出人工审批，未确认不会执行。"""
+_C = {"g": "\033[32m", "c": "\033[36m", "d": "\033[2m", "b": "\033[1m", "x": "\033[0m"}
+
+_BANNER = r"""
+ ___                          _                    _
+|_ _|_   ___   _ ___  __ _   / \   __ _  ___ _ __ | |_
+ | |\ \ / / | | / _ \/ _` | / _ \ / _` |/ _ \ '_ \| __|
+ | | \ V /| |_| |  __/ (_| |/ ___ \ (_| |  __/ | | | |_
+|___| \_/  \__, |\___|\__,_/_/   \_\__, |\___|_| |_|\__|
+           |___/                   |___/"""
+
+# (命令, 说明)
+SLASH_COMMANDS = [
+    ("/help", "显示帮助与命令"),
+    ("/model", "查看/切换主脑模型 (如 /model deepseek:deepseek-chat)"),
+    ("/mcp", "列出已配置的 MCP 服务器"),
+    ("/tools", "列出 Agent 可用工具"),
+    ("/memory", "记忆系统 (P3 规划中)"),
+    ("/clear", "清空当前对话上下文"),
+    ("/exit", "退出 (亦可 /quit)"),
+]
+
+
+def _help_text() -> str:
+    lines = [f"{_C['b']}斜杠命令{_C['x']}（输入 / 后按 Tab 可补全）："]
+    for cmd, desc in SLASH_COMMANDS:
+        lines.append(f"  {_C['c']}{cmd:<9}{_C['x']} {desc}")
+    lines.append("")
+    lines.append(f"{_C['b']}直接说人话就行{_C['x']}，例如：")
+    lines.append(f"  {_C['d']}· 看下 B0XXXXXXXX 这周广告，数据用 sample CSV{_C['x']}")
+    lines.append(f"  {_C['d']}· 帮我分析这份搜索词报告 /path/report.csv，asin B0...{_C['x']}")
+    lines.append(f"{_C['d']}写操作会逐条弹人工审批，未确认不会执行。{_C['x']}")
+    return "\n".join(lines)
+
+
+def _setup_readline() -> None:
+    """斜杠命令 Tab 补全（stdlib readline；Windows 无则静默跳过）。"""
+    try:
+        import readline
+    except Exception:
+        return
+    cmds = [c for c, _ in SLASH_COMMANDS] + ["/quit"]
+
+    def completer(text, state):
+        if not text.startswith("/"):
+            return None
+        opts = [c + " " for c in cmds if c.startswith(text)]
+        return opts[state] if state < len(opts) else None
+
+    readline.set_completer(completer)
+    readline.parse_and_bind("tab: complete")
+    try:
+        readline.set_completer_delims(" ")
+    except Exception:
+        pass
 
 
 def _cmd_chat(args: argparse.Namespace) -> int:
@@ -379,11 +423,18 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         from_mcp=args.from_mcp, execute=args.execute,
         protected=[w for w in (args.protected or "").split(",") if w.strip()])
     messages = [{"role": "system", "content": agent_loop.SYSTEM_PROMPT}]
+    _setup_readline()
 
-    print("Ivyea Agent · 对话模式（输入 /help 看命令，/exit 退出）")
-    print(f"主脑: {provider_name}:{model} ({'已配置' if api_key else '未配置 key — 自然语言对话不可用，斜杠命令可用'}) "
-          f"| 执行: {'真实写(--execute)' if args.execute else 'dry-run'}"
-          f"{' via '+args.from_mcp if args.from_mcp else ''}\n")
+    keyst = (f"{_C['g']}已配置{_C['x']}" if api_key
+             else f"{_C['d']}未配 key — 配 ivyea model 后可对话{_C['x']}")
+    mode = (f"{_C['g']}真实写{_C['x']}" if args.execute else "dry-run")
+    print(f"{_C['g']}{_BANNER}{_C['x']}")
+    print(f"  {_C['b']}亚马逊运营 Agent{_C['x']} · 自托管 · 规则引擎+LLM复核+审核制执行")
+    print(f"  我能：{_C['c']}广告巡检{_C['x']}(否词/调价建议) → {_C['c']}审核制执行{_C['x']}(人工确认才写) → 审计回滚")
+    print(f"  {_C['d']}主脑 {provider_name}:{model}（{keyst}） | 执行 {mode}"
+          f"{' via '+args.from_mcp if args.from_mcp else ''}{_C['x']}")
+    print(f"  {_C['d']}输入 {_C['x']}{_C['c']}/help{_C['x']}{_C['d']} 看命令（/ 后按 Tab 补全），或直接说需求；{_C['x']}"
+          f"{_C['c']}/exit{_C['x']}{_C['d']} 退出{_C['x']}\n")
 
     while True:
         try:
@@ -396,8 +447,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if line in ("/exit", "/quit"):
             print("再见。")
             return 0
-        if line == "/help":
-            print(_CHAT_HELP); continue
+        if line in ("/help", "/", "/?"):
+            print(_help_text()); continue
         if line == "/clear":
             messages = [{"role": "system", "content": agent_loop.SYSTEM_PROMPT}]
             print("（已清空对话上下文）"); continue
@@ -423,7 +474,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 print(f"已切换主脑: {provider_name}:{model} ({'已配置' if api_key else '未配置 key'})")
             continue
         if line.startswith("/"):
-            print(f"未知命令 {line}，/help 看帮助"); continue
+            hits = [c for c, _ in SLASH_COMMANDS if c.startswith(line.split()[0])]
+            tip = ("，你是否想用：" + " ".join(hits)) if hits else "，输入 /help 看全部"
+            print(f"未知命令 {line.split()[0]}{tip}"); continue
 
         # 自然语言 → Agent 循环
         if not api_key:
@@ -440,10 +493,44 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             messages.pop()  # 撤回这条 user，避免污染上下文
 
 
+def _cmd_model(args: argparse.Namespace) -> int:
+    from . import config as cfg
+    cfg.ensure_dirs()
+    s = cfg.load_settings()
+    if args.spec:  # ivyea model deepseek:deepseek-chat
+        prov, _, m = args.spec.partition(":")
+        cfg.set_setting("provider", prov)
+        if m:
+            cfg.set_setting("model", m)
+        print(f"已切换主脑: {prov}:{m or s.get('model')}"
+              f"（{'已配置 key' if cfg.get_api_key(prov) else '未配置 key，运行 ivyea model 交互配置'}）")
+        return 0
+    # 交互配置
+    print(f"当前主脑: {s.get('provider')}:{s.get('model')}"
+          f"（{'已配置 key' if cfg.get_api_key(s.get('provider', 'deepseek')) else '未配置 key'}）\n")
+    provider = _ask("主脑 provider (deepseek/openai/anthropic)", s.get("provider", "deepseek"))
+    defmodel = {"deepseek": "deepseek-chat", "openai": "gpt-4o-mini",
+                "anthropic": "claude-3-7-sonnet"}.get(provider, s.get("model", ""))
+    model = _ask("模型名", s.get("model") if provider == s.get("provider") else defmodel)
+    cfg.set_setting("provider", provider)
+    cfg.set_setting("model", model)
+    has = cfg.get_api_key(provider)
+    newkey = _ask_secret(f"{provider} API key（回车跳过；输入 - 清空）当前:{'已配置' if has else '未配置'}")
+    if newkey == "-":
+        cfg.set_api_key(provider, ""); print("  已清空。")
+    elif newkey:
+        cfg.set_api_key(provider, newkey); print("  已保存到 ~/.ivyea/.env")
+    ok = cfg.get_api_key(provider)
+    print(f"\n✓ 主脑: {provider}:{model}（{'已配置 key' if ok else '未配置 key'}）")
+    if provider != "deepseek" and ok:
+        print("  注：当前仅 deepseek 适配器已接入；openai/anthropic 适配预留中。")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ivyea", description="Ivyea Agent — 亚马逊运营 CLI Agent")
     p.add_argument("--version", action="version", version=f"ivyea-agent {__version__}")
-    sub = p.add_subparsers(dest="command", required=True)
+    sub = p.add_subparsers(dest="command")  # 无子命令 → 默认进对话模式(见 main)
 
     pc = sub.add_parser("config", help="配置向导（无参=交互式）/ show / set / edit")
     pc.add_argument("action", nargs="?", choices=["show", "set", "edit"], default=None)
@@ -483,6 +570,10 @@ def build_parser() -> argparse.ArgumentParser:
     pu.add_argument("id", nargs="?", help="rollback 的审计ID")
     pu.set_defaults(func=_cmd_audit)
 
+    pmo = sub.add_parser("model", help="查看/配置主脑模型（交互；或 ivyea model deepseek:deepseek-chat）")
+    pmo.add_argument("spec", nargs="?", help="provider:model，如 deepseek:deepseek-chat")
+    pmo.set_defaults(func=_cmd_model)
+
     pch = sub.add_parser("chat", help="对话式 Agent（自然语言 + 斜杠命令 + 人工审批）")
     pch.add_argument("--from-mcp", dest="from_mcp", help="执行/拉数用的 MCP 服务器")
     pch.add_argument("--execute", action="store_true", help="允许真实写（默认 dry-run）")
@@ -495,6 +586,9 @@ def main(argv: list[str] | None = None) -> int:
     config.load_env()
     parser = build_parser()
     args = parser.parse_args(argv)
+    if not getattr(args, "command", None):
+        # 像 claude/hermes：直接敲 `ivyea` 进对话模式（dry-run 默认）
+        args = parser.parse_args(["chat"])
     return args.func(args)
 
 
