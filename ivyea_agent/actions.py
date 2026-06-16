@@ -22,6 +22,7 @@ EXECUTABLE_TAGS = {"negative_candidate", "reduce_bid", "scale_up"}
 class Action:
     kind: str                       # negative | reduce_bid | scale_up
     search_term: str
+    asin: str = ""
     term_category: str = ""
     match_type: str = ""
     confidence: str = ""
@@ -76,7 +77,8 @@ def _f(v: Any) -> float:
         return 0.0
 
 
-def extract_actions(detail_csv: str, current_bids: Optional[dict[str, float]] = None) -> list[Action]:
+def extract_actions(detail_csv: str, current_bids: Optional[dict[str, float]] = None,
+                    asin: str = "") -> list[Action]:
     """从明细 CSV 抽出可执行动作。current_bids: {search_term: 当前bid}（可选，用于算 bid 绝对值）。"""
     import pandas as pd
     df = pd.read_csv(detail_csv)
@@ -90,7 +92,7 @@ def extract_actions(detail_csv: str, current_bids: Optional[dict[str, float]] = 
         kind = _TAG_TO_KIND[tag]
         term = str(r.get("search_term", "")).strip()
         a = Action(
-            kind=kind, search_term=term,
+            kind=kind, search_term=term, asin=asin,
             term_category=str(r.get("term_category", "")).strip(),
             match_type=str(r.get("match_type", "")).strip(),
             confidence=str(r.get("confidence_level", "")).strip(),
@@ -113,3 +115,14 @@ def load_detail_from_dir(patrol_dir: str) -> Optional[str]:
     for p in Path(patrol_dir).glob("*明细*.csv"):
         return str(p)
     return None
+
+
+def asin_from_dir(patrol_dir: str) -> str:
+    """从巡检输出目录的 run_summary.json 读 ASIN（记忆按 ASIN 归档需要）。"""
+    import json
+    for p in Path(patrol_dir).glob("*run_summary.json"):
+        try:
+            return str(json.loads(p.read_text(encoding="utf-8")).get("asin", "") or "")
+        except Exception:
+            return ""
+    return ""

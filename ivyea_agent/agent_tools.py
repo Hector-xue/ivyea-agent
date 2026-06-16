@@ -9,7 +9,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from . import actions as act_mod, executor, guardrails, permission, patrol as patrol_mod
+from . import actions as act_mod, executor, guardrails, memory, permission, patrol as patrol_mod
 from .rule_engine import RuleEngineError
 
 
@@ -20,6 +20,7 @@ class ToolContext:
     protected: list = field(default_factory=list)
     last_report: str = ""
     last_detail_csv: str = ""
+    asin: str = ""
     actions: list = field(default_factory=list)
     perm: permission.PermissionState = field(default_factory=permission.PermissionState)
 
@@ -47,6 +48,16 @@ TOOL_SCHEMAS = [
         "description": "回滚一条审计记录的写操作。",
         "parameters": {"type": "object", "properties": {
             "audit_id": {"type": "string"}}, "required": ["audit_id"]}}},
+    {"type": "function", "function": {
+        "name": "remember",
+        "description": "把一条值得长期记住的运营要点写入记忆(可按 ASIN 归档)。",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string"}, "asin": {"type": "string"}}, "required": ["text"]}}},
+    {"type": "function", "function": {
+        "name": "recall",
+        "description": "检索历史记忆(过往巡检、决策、记的要点)，跨会话回忆。",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string"}}, "required": ["query"]}}},
 ]
 
 
@@ -73,6 +84,7 @@ def _t_run_patrol(args: dict, ctx: ToolContext) -> str:
     ro = res["rule_output"]
     ctx.last_detail_csv = ro.get("files", {}).get("details_csv", "")
     s = ro.get("summary", {})
+    ctx.asin = s.get("asin") or asin or ""
     return (f"巡检完成 ASIN={s.get('asin')}。否词候选 {s.get('negative_candidate_count')}，"
             f"放量 {s.get('scale_up_count')}，控bid {s.get('reduce_bid_count')}。"
             f"报告已生成（{res['md_path']}）。可调用 propose_actions 看可执行动作。")
@@ -81,7 +93,9 @@ def _t_run_patrol(args: dict, ctx: ToolContext) -> str:
 def _t_propose_actions(args: dict, ctx: ToolContext) -> str:
     if not ctx.last_detail_csv:
         return "还没有巡检明细，请先 run_patrol。"
-    acts = guardrails.annotate(act_mod.extract_actions(ctx.last_detail_csv), protected_terms=ctx.protected)
+    acts = guardrails.annotate(act_mod.extract_actions(ctx.last_detail_csv, asin=ctx.asin),
+                               protected_terms=ctx.protected)
+    acts = memory.annotate(acts, ctx.asin)   # 记忆护栏：历史否决/5天稳定期
     ctx.actions = acts
     ex = [a for a in acts if a.executable]
     bl = [a for a in acts if a.blocked]
@@ -107,11 +121,25 @@ def _t_execute_actions(args: dict, ctx: ToolContext) -> str:
             results.append("用户终止。")
             break
         if decision == permission.DENY:
+            memory.record_decision(ctx.asin, a.search_term, a.kind, "reject")
             results.append(f"跳过：{a.summary()}")
             continue
+        memory.record_decision(ctx.asin, a.search_term, a.kind, "approve")
         r = executor.execute(a, ctx.from_mcp or "", dry_run=not ctx.execute)
         results.append(("✓ " if r["ok"] else "✗ ") + r["detail"])
     return "\n".join(results) if results else "无操作。"
+
+
+def _t_remember(args: dict, ctx: ToolContext) -> str:
+    return memory.remember(args.get("text", ""), args.get("asin") or ctx.asin)
+
+
+def _t_recall(args: dict, ctx: ToolContext) -> str:
+    hits = memory.search(args.get("query", ""), limit=8)
+    if not hits:
+        return "（记忆里没有相关记录）"
+    import time as _t
+    return "\n".join(f"  · {_t.strftime('%m-%d', _t.localtime(h['ts']))} {h['text']}" for h in hits)
 
 
 def _t_rollback(args: dict, ctx: ToolContext) -> str:
@@ -124,6 +152,8 @@ _DISPATCH = {
     "propose_actions": _t_propose_actions,
     "execute_actions": _t_execute_actions,
     "rollback": _t_rollback,
+    "remember": _t_remember,
+    "recall": _t_recall,
 }
 
 

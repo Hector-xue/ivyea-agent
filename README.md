@@ -180,6 +180,22 @@ ivyea audit rollback <审计ID>        # 回滚某次写操作
 ```
 > 调 bid 需要"当前 bid"才能算绝对值；搜索词报告里没有，所以 bid 动作默认作建议、不执行，除非另接 bid 数据。否词最干净，是 P2 主力。
 
+## 记忆（P3）
+
+Hermes 同款：**SQLite FTS5 + 策展 markdown + 自策展**，本地自有（不依赖向量库/GBrain），存 `~/.ivyea/memory.db`、`~/.ivyea/MEMORY.md`、`~/.ivyea/account/<ASIN>.md`。
+
+作用：
+- **尊重历史否决**：你否过的否词/调价，下次巡检自动拦截、不再反复建议。
+- **5 天稳定期**：刚调过 bid 的词，5 天内不重复调。
+- **跨会话回忆**：`ivyea memory search <词>` / 对话里让它"回忆"。
+
+```bash
+ivyea memory                 # 状态 + 最近巡检
+ivyea memory search 关键词    # 全文检索历史决策/巡检/要点
+ivyea memory note B0XXXX     # 看某 ASIN 的运营记忆笔记
+```
+对话里：`/memory`、或直接说"记住…/回忆…"（remember / recall 工具）。
+
 ## 设计 / 路线图
 
 - 架构与方法论：见 IvyeaOps 知识库 `ivyea-agent/架构方案`、`amazon-ops/*`。
@@ -187,9 +203,9 @@ ivyea audit rollback <审计ID>        # 回滚某次写操作
 - MCP：P1.5 接入「领星 ERP MCP」直接读广告报表（替代手动导 CSV）；写操作走网关 + 审核制（P2）。
 - 设计 v2（架构学 Hermes、交互学 Claude Code）：见知识库 `ivyea-agent/设计v2`。
 - 记忆（P3）：**SQLite FTS5 + 策展 markdown + 摘要**（Hermes 同款，自有，不用向量库/GBrain）。
-- 路线：P1 只读巡检 ✅ → P1.5 通用 MCP ✅ → P2 审核制执行 ✅ → P2.5 对话式+权限审批 ✅ → P3 记忆 → P4 嵌入 IvyeaOps → P5 多 ASIN/多店 + 自学习。
+- 路线：P1 只读巡检 ✅ → P1.5 通用 MCP ✅ → P2 审核制执行 ✅ → P2.5 对话式+权限审批 ✅ → P3 记忆 ✅ → P4 嵌入 IvyeaOps → P5 多 ASIN/多店 + 自学习。
 
 ## 状态
 
-P1/P1.5/P2/P2.5 已完成（只读巡检、通用 MCP、审核制执行、对话模式+权限审批）。
+P1/P1.5/P2/P2.5/P3 已完成（只读巡检、通用 MCP、审核制执行、对话+权限审批、记忆）。
 待验证真链路：DeepSeek 主脑 key（对话/复核）、真实 MCP 读写。P3 记忆进行中。

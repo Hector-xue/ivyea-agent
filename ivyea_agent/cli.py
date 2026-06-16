@@ -301,18 +301,21 @@ def _cmd_patrol(args: argparse.Namespace) -> int:
 
 
 def _cmd_apply(args: argparse.Namespace) -> int:
-    from . import actions as act_mod, executor, guardrails
+    from . import actions as act_mod, executor, guardrails, memory
     from pathlib import Path
 
     detail = args.source
+    asin = ""
     if Path(args.source).is_dir():
         detail = act_mod.load_detail_from_dir(args.source)
+        asin = act_mod.asin_from_dir(args.source)
     if not detail or not Path(detail).exists():
         print(f"找不到巡检明细 CSV（传入巡检输出目录或 *明细*.csv）：{args.source}", file=sys.stderr)
         return 2
 
     protected = [w for w in (args.protected or "").split(",") if w.strip()]
-    acts = guardrails.annotate(act_mod.extract_actions(detail), protected_terms=protected)
+    acts = guardrails.annotate(act_mod.extract_actions(detail, asin=asin), protected_terms=protected)
+    acts = memory.annotate(acts, asin)   # 记忆护栏：历史否决 / 5天稳定期
     blocked = [a for a in acts if a.blocked]
     pending = [a for a in acts if not a.blocked]
 
@@ -342,8 +345,11 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         if decision == permission.ABORT:
             print("  已全部停止。")
             break
+        if decision == permission.DENY:
+            memory.record_decision(asin, a.search_term, a.kind, "reject")  # 记住否决
         if decision == permission.APPROVE:
             confirmed.append(a)
+            memory.record_decision(asin, a.search_term, a.kind, "approve")
 
     print(f"\n已确认 {len(confirmed)} 个，开始{'执行' if args.execute else '预演'}：")
     from .mcp_client import MCPError
@@ -398,7 +404,7 @@ SLASH_COMMANDS = [
     ("/status", "查看当前配置与状态"),
     ("/mcp", "列出已配置的 MCP 服务器"),
     ("/tools", "列出 Agent 可用工具"),
-    ("/memory", "记忆系统 (P3 规划中)"),
+    ("/memory", "记忆：状态/最近巡检；/memory <词> 检索"),
     ("/clear", "清空当前对话上下文"),
     ("/exit", "退出 (亦可 /quit)"),
 ]
@@ -510,8 +516,22 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             for t in agent_tools.TOOL_SCHEMAS:
                 f = t["function"]; print(f"  {f['name']} — {f['description']}")
             continue
-        if line == "/memory":
-            print("记忆系统（SQLite FTS5 + 策展 markdown）在 P3 实现，敬请期待。"); continue
+        if line == "/memory" or line.startswith("/memory "):
+            from . import memory
+            q = line[7:].strip() if line.startswith("/memory ") else ""
+            if q:
+                hits = memory.search(q, limit=10)
+                print("\n".join(f"  · {h['text']}" for h in hits) or "（无匹配记忆）")
+            else:
+                st = memory.stats()
+                print(f"记忆：决策 {st['decisions']}（批准{st['approved']}/否决{st['rejected']}）· "
+                      f"巡检 {st['runs']} 次 · FTS5={'on' if st['fts'] else 'off(LIKE)'}")
+                for r in memory.recent_runs(limit=5):
+                    import time as _t
+                    print(f"  · {_t.strftime('%m-%d %H:%M', _t.localtime(r['ts']))} {r['asin']} "
+                          f"否{r['negatives']}/放{r['scale']}/降{r['reduce']}")
+                print(f"  {_C['d']}/memory <关键词> 检索；对话里也可让我 记住/回忆{_C['x']}")
+            continue
         if line == "/status":
             _print_config(); continue
         if line in ("/config", "/model"):
@@ -569,6 +589,30 @@ def _cmd_model(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_memory(args: argparse.Namespace) -> int:
+    from . import memory
+    import time as _t
+    if args.action == "search":
+        if not args.query:
+            print("用法: ivyea memory search <关键词>", file=sys.stderr); return 2
+        hits = memory.search(args.query, limit=15)
+        print("\n".join(f"  · {_t.strftime('%Y-%m-%d', _t.localtime(h['ts']))} {h['text']}" for h in hits)
+              or "（无匹配）")
+        return 0
+    if args.action == "note":
+        print(memory.read_note(args.query or "") or "（暂无记忆笔记）"); return 0
+    # 默认 status
+    st = memory.stats()
+    print(f"记忆库: {st['db']}")
+    print(f"决策 {st['decisions']}（批准 {st['approved']} / 否决 {st['rejected']}）· "
+          f"巡检 {st['runs']} 次 · 全文检索 FTS5={'on' if st['fts'] else 'off(LIKE 兜底)'}")
+    print("最近巡检：")
+    for r in memory.recent_runs(limit=8):
+        print(f"  · {_t.strftime('%Y-%m-%d %H:%M', _t.localtime(r['ts']))} {r['asin'] or '-'} "
+              f"否{r['negatives']}/放{r['scale']}/降{r['reduce']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ivyea", description="Ivyea Agent — 亚马逊运营 CLI Agent")
     p.add_argument("--version", action="version", version=f"ivyea-agent {__version__}")
@@ -615,6 +659,11 @@ def build_parser() -> argparse.ArgumentParser:
     pmo = sub.add_parser("model", help="查看/配置主脑模型（交互；或 ivyea model deepseek:deepseek-chat）")
     pmo.add_argument("spec", nargs="?", help="provider:model，如 deepseek:deepseek-chat")
     pmo.set_defaults(func=_cmd_model)
+
+    pmem = sub.add_parser("memory", help="记忆：status（默认）/ search <词> / note [asin]")
+    pmem.add_argument("action", nargs="?", choices=["status", "search", "note"], default="status")
+    pmem.add_argument("query", nargs="?")
+    pmem.set_defaults(func=_cmd_memory)
 
     pch = sub.add_parser("chat", help="对话式 Agent（自然语言 + 斜杠命令 + 人工审批）")
     pch.add_argument("--from-mcp", dest="from_mcp", help="执行/拉数用的 MCP 服务器")

@@ -33,5 +33,15 @@ def patrol(csv_path: str, asin: Optional[str] = None, site: Optional[str] = None
         rev = {"ok": False, "markdown": "", "note": "已用 --no-llm 跳过 AI 复核。"}
 
     text = report.build(rule_output, rev)
-    md_path = report.write_md(text, out_dir, asin=(rule_output.get("summary", {}).get("asin") or asin or ""))
+    sm = rule_output.get("summary", {})
+    run_asin = sm.get("asin") or asin or ""
+    md_path = report.write_md(text, out_dir, asin=run_asin)
+    try:
+        from . import memory
+        memory.record_run(run_asin,
+                          negatives=int(sm.get("negative_candidate_count") or 0),
+                          scale=int(sm.get("scale_up_count") or 0),
+                          reduce=int(sm.get("reduce_bid_count") or 0))
+    except Exception:
+        pass
     return {"text": text, "md_path": md_path, "rule_output": rule_output, "review": rev}
