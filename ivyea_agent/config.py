@@ -12,6 +12,7 @@ from typing import Any
 IVYEA_DIR = Path(os.environ.get("IVYEA_HOME", str(Path.home() / ".ivyea")))
 ENV_FILE = IVYEA_DIR / ".env"
 SETTINGS_FILE = IVYEA_DIR / "settings.json"
+MCP_FILE = IVYEA_DIR / "mcp.json"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "provider": "deepseek",      # 主脑模型 provider
@@ -75,3 +76,73 @@ def get_api_key(provider: str) -> str:
     load_env()
     env_name = PROVIDER_ENV_KEYS.get(provider, "")
     return os.environ.get(env_name, "") if env_name else ""
+
+
+def set_env_key(name: str, value: str) -> None:
+    """在 ~/.ivyea/.env 写入/更新一个键（保留其它键）。value 为空则删除该键。"""
+    ensure_dirs()
+    lines: list[str] = []
+    if ENV_FILE.exists():
+        lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
+    out, found = [], False
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped \
+                and stripped.split("=", 1)[0].strip() == name:
+            found = True
+            if value:
+                out.append(f"{name}={value}")
+            # value 为空则丢弃该行 = 删除
+        else:
+            out.append(line)
+    if value and not found:
+        out.append(f"{name}={value}")
+    ENV_FILE.write_text("\n".join(out).strip() + "\n", encoding="utf-8")
+    try:
+        ENV_FILE.chmod(0o600)
+    except OSError:
+        pass
+    os.environ[name] = value  # 当前进程即时生效
+
+
+def set_api_key(provider: str, value: str) -> None:
+    env_name = PROVIDER_ENV_KEYS.get(provider)
+    if not env_name:
+        raise ValueError(f"未知 provider: {provider}")
+    set_env_key(env_name, value)
+
+
+# ── MCP 配置 ────────────────────────────────────────────────────────────────
+
+def load_mcp() -> dict[str, Any]:
+    if MCP_FILE.exists():
+        try:
+            return json.loads(MCP_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"mcpServers": {}}
+
+
+def save_mcp(data: dict[str, Any]) -> None:
+    ensure_dirs()
+    MCP_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        MCP_FILE.chmod(0o600)
+    except OSError:
+        pass
+
+
+def mcp_set_server(name: str, spec: dict[str, Any]) -> None:
+    data = load_mcp()
+    data.setdefault("mcpServers", {})[name] = spec
+    save_mcp(data)
+
+
+def mcp_remove_server(name: str) -> bool:
+    data = load_mcp()
+    servers = data.setdefault("mcpServers", {})
+    if name in servers:
+        del servers[name]
+        save_mcp(data)
+        return True
+    return False

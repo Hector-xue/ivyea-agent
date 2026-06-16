@@ -20,19 +20,26 @@ pipx install ivyea-agent        # 或开发态： pip install -e .
 
 ## 配置
 
-主脑模型 P1 用 DeepSeek（OpenAI 兼容、便宜、够用）。在 `~/.ivyea/.env` 写入：
-
-```
-DEEPSEEK_API_KEY=sk-xxxx
-```
-
-查看/修改配置：
+**一条命令进交互式配置向导**（像 Hermes，逐项回车=保留当前；含密钥隐藏输入）：
 
 ```bash
-ivyea config show
-ivyea config set target_acos 0.3
-ivyea config set site US
+ivyea config            # 交互向导：provider / 模型 / 站点 / 目标ACoS / API key
+ivyea config show       # 查看当前配置
+ivyea config set target_acos 0.3   # 单项设置
+ivyea config edit       # 用 $EDITOR 直接编辑 .env
 ```
+
+主脑模型 P1 用 DeepSeek（OpenAI 兼容、便宜、够用）；密钥存 `~/.ivyea/.env`（权限 600）。
+
+### MCP 服务器（对话式配置）
+
+```bash
+ivyea mcp add           # 对话式添加：名称 / 传输(http·sse·stdio) / URL / 鉴权(header·query)
+ivyea mcp list
+ivyea mcp remove <名称>
+```
+
+配置写入 `~/.ivyea/mcp.json`。P1.5 的 MCP 客户端会读取它直连领星等服务拉广告数据（替代手动导 CSV）。
 
 ## 使用
 
