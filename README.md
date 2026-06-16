@@ -75,15 +75,40 @@ ivyea config edit       # 用 $EDITOR 直接编辑 .env
 
 主脑模型 P1 用 DeepSeek（OpenAI 兼容、便宜、够用）；密钥存 `~/.ivyea/.env`（权限 600）。
 
-### MCP 服务器（对话式配置）
+### MCP 服务器（对话式配置 + 自动拉数）
 
 ```bash
-ivyea mcp add           # 对话式添加：名称 / 传输(http·sse·stdio) / URL / 鉴权(header·query)
+ivyea mcp add               # 对话式添加：名称 / 传输(http·sse·stdio) / URL / 鉴权(header·query)
 ivyea mcp list
+ivyea mcp tools <名称>       # 连上并列出该服务器暴露的工具(发现工具名/入参)
+ivyea mcp call <名称> <工具> --args '{"asin":"B0.."}'   # 看某工具返回结构
+ivyea mcp edit              # 编辑 mcp.json(填 dataSource 映射)
 ivyea mcp remove <名称>
 ```
 
-配置写入 `~/.ivyea/mcp.json`。P1.5 的 MCP 客户端会读取它直连领星等服务拉广告数据（替代手动导 CSV）。
+配置写入 `~/.ivyea/mcp.json`（权限 600，密钥只在你本机）。客户端是**通用的**——不绑死任何厂商工具名，由你配的 `dataSource` 映射驱动（approach c）。
+
+**用 MCP 自动拉数（替代手动导 CSV）的步骤：**
+1. `ivyea mcp add` 加好服务器（如领星）。
+2. `ivyea mcp tools 领星` 看有哪些工具；`ivyea mcp call 领星 <工具> --args '{...}'` 看返回长什么样。
+3. `ivyea mcp edit`，在该服务器下补 `dataSource` 映射：
+   ```json
+   "dataSource": {
+     "tool": "你的广告搜索词报告工具名",
+     "args": {"asin": "{asin}", "site": "{site}", "days": 30},
+     "rows_path": "data.rows",
+     "field_map": {
+       "Date":"date","ASIN":"asin","Campaign Name":"campaign","Match Type":"match_type",
+       "Customer Search Term":"search_term","Impressions":"impressions","Clicks":"clicks",
+       "Spend":"spend","Orders":"orders","Sales":"sales"
+     }
+   }
+   ```
+   （`{asin}/{site}/{days}` 运行时替换；`rows_path` 指向返回里行数组；`field_map` 左=规则引擎列，右=工具返回字段名。）
+4. 跑巡检：
+   ```bash
+   ivyea patrol --from-mcp 领星 --asin B0XXXXXXXX --days 30
+   ```
 
 ## 使用
 

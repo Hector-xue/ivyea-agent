@@ -183,13 +183,87 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
         ok = config.mcp_remove_server(args.name)
         print("已删除。" if ok else f"未找到服务器 '{args.name}'。")
         return 0 if ok else 1
+    if args.action == "edit":
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or \
+            ("notepad" if sys.platform.startswith("win") else "nano")
+        if not config.MCP_FILE.exists():
+            config.save_mcp(config.load_mcp())
+        try:
+            subprocess.call([editor, str(config.MCP_FILE)])
+        except FileNotFoundError:
+            print(f"找不到编辑器；直接编辑: {config.MCP_FILE}", file=sys.stderr)
+            return 1
+        return 0
+    if args.action in ("tools", "call"):
+        from .mcp_client import MCPClient, MCPError
+        servers = config.load_mcp().get("mcpServers", {})
+        spec = servers.get(args.name or "")
+        if not spec:
+            print(f"未找到 MCP 服务器 '{args.name}'（先 ivyea mcp add）", file=sys.stderr)
+            return 2
+        try:
+            client = MCPClient(spec)
+            client.initialize()
+            if args.action == "tools":
+                tools = client.list_tools()
+                if not tools:
+                    print("(该服务器未返回工具)")
+                    return 0
+                print(f"'{args.name}' 暴露 {len(tools)} 个工具：\n")
+                for t in tools:
+                    print(f"● {t.get('name')}")
+                    if t.get("description"):
+                        print(f"    {t['description'][:160]}")
+                    props = ((t.get("inputSchema") or {}).get("properties") or {})
+                    if props:
+                        print(f"    入参: {', '.join(props.keys())}")
+                print("\n提示：用 `ivyea mcp call " + (args.name or "<名称>") +
+                      " <工具> --args '{...}'` 看返回结构，再 `ivyea mcp edit` 填 dataSource 映射。")
+                return 0
+            # call
+            if not args.tool:
+                print("用法: ivyea mcp call <名称> <工具> [--args '{\"k\":\"v\"}']", file=sys.stderr)
+                return 2
+            arguments = {}
+            if args.args:
+                try:
+                    arguments = __import__("json").loads(args.args)
+                except Exception as e:
+                    print(f"--args 不是合法 JSON: {e}", file=sys.stderr)
+                    return 2
+            res = client.call_tool(args.tool, arguments)
+            print(__import__("json").dumps(res, ensure_ascii=False, indent=2)[:4000])
+            return 0
+        except MCPError as e:
+            print(f"[MCP 错误] {e}", file=sys.stderr)
+            return 1
     return 2
 
 
 def _cmd_patrol(args: argparse.Namespace) -> int:
     from . import patrol as patrol_mod
     from .rule_engine import RuleEngineError
+
+    csv_path = args.csv
+    if args.from_mcp:
+        from .mcp_source import fetch_to_csv
+        from .mcp_client import MCPError
+        if not args.asin:
+            print("--from-mcp 需要 --asin（按 ASIN 拉广告搜索词数据）", file=sys.stderr)
+            return 2
+        site = args.site or config.get_setting("site", "US")
+        try:
+            print(f"[MCP] 从 '{args.from_mcp}' 拉取 {args.asin} 近 {args.days} 天广告数据…", file=sys.stderr)
+            csv_path = fetch_to_csv(args.from_mcp, args.asin, site, days=args.days)
+            print(f"[MCP] 已拉取并转换为: {csv_path}", file=sys.stderr)
+        except MCPError as e:
+            print(f"[MCP 错误] {e}", file=sys.stderr)
+            return 1
+    if not csv_path:
+        print("需要提供搜索词报告 CSV，或用 --from-mcp <服务器> 自动拉数。", file=sys.stderr)
+        return 2
     try:
+        args.csv = csv_path
         result = patrol_mod.patrol(
             args.csv, asin=args.asin, site=args.site, target_acos=args.target_acos,
             report_type=args.report_type, output_dir=args.output_dir, use_llm=not args.no_llm)
@@ -214,14 +288,18 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("value", nargs="?")
     pc.set_defaults(func=_cmd_config)
 
-    pm = sub.add_parser("mcp", help="MCP 服务器配置（对话式 add / list / remove）")
-    pm.add_argument("action", choices=["add", "list", "remove"])
-    pm.add_argument("name", nargs="?")
+    pm = sub.add_parser("mcp", help="MCP 配置/自检（add/list/remove/edit/tools/call）")
+    pm.add_argument("action", choices=["add", "list", "remove", "edit", "tools", "call"])
+    pm.add_argument("name", nargs="?", help="服务器名（remove/tools/call 需要）")
+    pm.add_argument("tool", nargs="?", help="工具名（call 需要）")
+    pm.add_argument("--args", help="call 的入参 JSON，如 '{\"asin\":\"B0..\"}'")
     pm.set_defaults(func=_cmd_mcp)
 
-    pp = sub.add_parser("patrol", help="只读广告巡检（输入搜索词报告 CSV）")
-    pp.add_argument("csv", help="搜索词报告路径 (csv/xlsx)")
-    pp.add_argument("--asin", help="指定分析的 ASIN")
+    pp = sub.add_parser("patrol", help="只读广告巡检（输入 CSV 或 --from-mcp 自动拉数）")
+    pp.add_argument("csv", nargs="?", help="搜索词报告路径 (csv/xlsx)；用 --from-mcp 时可省略")
+    pp.add_argument("--from-mcp", dest="from_mcp", help="改用已配置的 MCP 服务器拉广告数据（需该服务器配好 dataSource 映射）")
+    pp.add_argument("--days", type=int, default=30, help="MCP 拉取天数，默认 30")
+    pp.add_argument("--asin", help="指定分析的 ASIN（--from-mcp 时必填）")
     pp.add_argument("--site", help="站点代码，默认取配置/US")
     pp.add_argument("--target-acos", type=float, dest="target_acos", help="目标 ACoS，如 0.3")
     pp.add_argument("--report-type", dest="report_type", help="SP/SB/SD")
