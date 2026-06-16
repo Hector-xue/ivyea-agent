@@ -367,9 +367,12 @@ _BANNER = r"""
            |___/                   |___/"""
 
 # (命令, 说明)
+# 对齐 Claude Code / Hermes 的常用快捷指令集
 SLASH_COMMANDS = [
     ("/help", "显示帮助与命令"),
     ("/model", "查看/切换主脑模型 (如 /model deepseek:deepseek-chat)"),
+    ("/config", "打开配置向导"),
+    ("/status", "查看当前配置与状态"),
     ("/mcp", "列出已配置的 MCP 服务器"),
     ("/tools", "列出 Agent 可用工具"),
     ("/memory", "记忆系统 (P3 规划中)"),
@@ -443,13 +446,12 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         protected=[w for w in (args.protected or "").split(",") if w.strip()])
     messages = [{"role": "system", "content": agent_loop.SYSTEM_PROMPT}]
 
-    keyst = "已配置" if api_key else "未配 key（ivyea model 配置后可对话）"
+    keyst = "已配置" if api_key else "未配 key（/model 配置后可对话）"
     mode = "真实写" if args.execute else "dry-run"
+    print(f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}")
     _print_welcome_box([
-        f"{_C['c']}✻{_C['x']} {_C['b']}Ivyea Agent{_C['x']} · 亚马逊运营",
-        "",
-        f"{_C['d']}规则引擎 + LLM 复核 + 审核制执行 · 自托管{_C['x']}",
-        f"{_C['d']}主脑 {provider_name}:{model}（{keyst}）· {mode}{_C['x']}",
+        f"{_C['c']}✻{_C['x']} {_C['b']}亚马逊运营 Agent{_C['x']} · 规则引擎+LLM复核+审核制执行 · 自托管",
+        f"{_C['d']}主脑 {provider_name}:{model}（{keyst}）· 执行 {mode}{_C['x']}",
         f"{_C['d']}/help 看命令 · 直接说需求 · /exit 退出{_C['x']}",
     ])
     print()
@@ -486,17 +488,28 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             continue
         if line == "/memory":
             print("记忆系统（SQLite FTS5 + 策展 markdown）在 P3 实现，敬请期待。"); continue
+        if line == "/status":
+            _print_config(); continue
+        if line == "/config":
+            _config_wizard()
+            provider_name, model = cfg.get_setting("provider", "deepseek"), cfg.get_setting("model", "deepseek-chat")
+            api_key = cfg.get_api_key(provider_name)
+            continue
         if line.startswith("/model"):
             parts = line.split()
             if len(parts) == 1:
-                print(f"当前主脑: {provider_name}:{model}")
+                # 像 Claude/Hermes：列当前 + 可选 provider + 用法
+                print(f"当前主脑: {_C['c']}{provider_name}:{model}{_C['x']}"
+                      f"（{'已配置 key' if api_key else '未配置 key'}）")
+                print(f"  可切换：{_C['d']}/model deepseek:deepseek-chat | openai:gpt-4o-mini | anthropic:claude-3-7-sonnet{_C['x']}")
+                print(f"  或交互配置（含密钥）：{_C['d']}/config{_C['x']}")
             else:
-                pm = parts[1]
-                provider_name, _, m = pm.partition(":")
+                provider_name, _, m = parts[1].partition(":")
                 model = m or model
                 cfg.set_setting("provider", provider_name); cfg.set_setting("model", model)
                 api_key = cfg.get_api_key(provider_name)
-                print(f"已切换主脑: {provider_name}:{model} ({'已配置' if api_key else '未配置 key'})")
+                print(f"已切换主脑: {provider_name}:{model} "
+                      f"({'已配置 key' if api_key else '未配置 key，用 /config 配置'})")
             continue
         if line.startswith("/"):
             hits = [c for c, _ in SLASH_COMMANDS if c.startswith(line.split()[0])]
