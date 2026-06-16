@@ -436,9 +436,18 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     print(f"  {_C['d']}输入 {_C['x']}{_C['c']}/help{_C['x']}{_C['d']} 看命令（/ 后按 Tab 补全），或直接说需求；{_C['x']}"
           f"{_C['c']}/exit{_C['x']}{_C['d']} 退出{_C['x']}\n")
 
+    from . import chat_input
+
+    def _status() -> str:
+        return (f" ivyea · {provider_name}:{model} · "
+                f"{'真实写' if args.execute else 'dry-run'} · /help 命令、Tab 补全、↑↓历史 ")
+
+    session = chat_input.build_session(SLASH_COMMANDS, _status)
+    prompt_ansi = f"{_C['c']}{_C['b']}ivyea ❯ {_C['x']}"
+
     while True:
         try:
-            line = input("你 › ").strip()
+            line = chat_input.read(session, prompt_ansi, "ivyea ❯ ")
         except (EOFError, KeyboardInterrupt):
             print("\n再见。")
             return 0
