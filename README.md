@@ -12,7 +12,21 @@
 
 ## 安装与部署
 
-跨平台纯 Python（≥3.9），依赖 pandas / openpyxl / httpx，**无需 Node/数据库**。推荐用 `pipx` 装成独立隔离环境，命令全局可用、不污染系统 Python。
+### 一键安装（推荐，装完任意目录敲 `ivyea`）
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash
+```
+```powershell
+# Windows PowerShell
+iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex
+```
+脚本会自动装好 pipx 并把 `ivyea` 装到 PATH。国内慢可加镜像：`PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` 前缀。装完重开终端，`ivyea config` 即可。
+
+> 仓库私有期间 `git+https` 安装需你的 GitHub 凭据；转公开或发 PyPI 后任何人可直接装。
+
+### 手动安装（pipx / venv）
+跨平台纯 Python（≥3.9），依赖 pandas / openpyxl / httpx，**无需 Node/数据库**。
 
 > 私有仓库阶段：从源码安装；转公开或发 PyPI 后可直接 `pipx install ivyea-agent` / `pipx install git+https://...`。
 
