@@ -26,6 +26,13 @@ class LLMProvider:
         """返回模型文本输出（json_mode=True 时尽量返回 JSON 字符串）。"""
         raise NotImplementedError
 
+    def chat(self, messages: list, tools: Optional[list] = None,
+             temperature: float = 0.3, timeout: float = 120.0) -> dict:
+        """工具调用对话。messages 为 OpenAI 格式；tools 为 function 列表。
+        返回助手消息 dict：{role, content, tool_calls}，其中 tool_calls 为
+        [{id, name, arguments(dict)}]（无则空列表）。供对话式 Agent 循环使用。"""
+        raise NotImplementedError
+
 
 def get_provider(provider: str, api_key: str, model: str) -> LLMProvider:
     """工厂：按名字返回 provider 适配器。预留 openai/anthropic 扩展位。"""

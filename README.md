@@ -119,7 +119,19 @@ ivyea patrol 报告.csv --no-llm        # 只跑规则引擎，跳过 AI 复核
 
 未配置模型 key 时会自动降级为「仅规则引擎」结论，不报错。报告同时保存为 `.md`。
 
-## 审核制执行（P2）
+## 对话模式（P2.5，推荐）
+
+像跟 Claude Code 对话一样用它：自然语言 + 人工审批 + 斜杠命令。
+
+```bash
+ivyea chat                       # dry-run 对话
+ivyea chat --execute --from-mcp 领星 --protected "核心词,品牌词"   # 允许真写
+```
+- 直接说："看下 B0XXXXXXXX 这周广告"——Agent 自动 巡检→提动作→**逐条弹人工审批**(预览+`[1]是[2]本会话都允许[3]否[4]改[5]全停`)→执行→可回滚。
+- 斜杠命令：`/help /model /mcp /tools /clear /memory /exit`。
+- 写操作永远经人工审批，模型无法绕过；默认 dry-run。需配主脑模型 key（`ivyea config`）。
+
+## 审核制执行（P2，命令式）
 
 巡检给出建议后，用 `ivyea apply` 走**审核制执行**：逐条确认 → 经 MCP 写工具落地 → 审计可回滚。**默认 dry-run（只预览不写）**，真实执行需显式 `--execute --from-mcp`。
 

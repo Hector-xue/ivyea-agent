@@ -7,3 +7,4 @@ dist/
 venv/
 outputs/
 .DS_Store
+ivyea_patrol_out/

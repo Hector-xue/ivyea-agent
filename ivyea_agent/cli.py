@@ -305,26 +305,21 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         print("真实执行需要 --from-mcp <服务器>（且该服务器配好 writeActions 映射）。", file=sys.stderr)
         return 2
 
+    from . import permission
+    state = permission.PermissionState()
+    if args.yes:  # --yes：批准所有未被护栏拦截的（等于对每类都"本会话允许"）
+        state.session_allow.update({"negative", "reduce_bid", "scale_up"})
     confirmed: list = []
-    auto = args.yes
     for a in pending:
-        note = "" if a.executable else "（缺当前bid，仅建议，跳过执行）"
-        print(f"● {a.summary()} {note}")
-        print(f"    分类:{a.term_category} 置信:{a.confidence} | 30d {a.clicks30:.0f}点击/{a.orders30:.0f}单/ACOS {a.acos30}")
-        print(f"    理由:{a.reason}")
         if not a.executable:
+            print(f"● {a.summary()}（缺当前bid，仅建议，跳过执行）")
+            print(f"    理由:{a.reason}")
             continue
-        if auto:
-            confirmed.append(a); continue
-        try:
-            ans = input("    确认? [y=是 / n=否 / a=以下全部 / q=退出]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print(); ans = "q"
-        if ans == "q":
+        decision = permission.request(a, state)
+        if decision == permission.ABORT:
+            print("  已全部停止。")
             break
-        if ans == "a":
-            auto = True; confirmed.append(a); continue
-        if ans == "y":
+        if decision == permission.APPROVE:
             confirmed.append(a)
 
     print(f"\n已确认 {len(confirmed)} 个，开始{'执行' if args.execute else '预演'}：")
@@ -359,6 +354,90 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         print(("✓ " if r["ok"] else "✗ ") + r["detail"])
         return 0 if r["ok"] else 1
     return 2
+
+
+_CHAT_HELP = """斜杠命令：
+  /help              显示帮助
+  /model [p:model]   查看/切换主脑模型（如 /model deepseek:deepseek-chat）
+  /mcp               列出已配置的 MCP 服务器
+  /tools             列出 Agent 可用工具
+  /clear             清空当前对话上下文
+  /memory            记忆（P3 规划中）
+  /exit | /quit      退出
+直接输入自然语言即可（如：看下 B0XXXXXXXX 这周广告，数据用 sample CSV）。
+写操作会逐条弹出人工审批，未确认不会执行。"""
+
+
+def _cmd_chat(args: argparse.Namespace) -> int:
+    from . import agent_loop, agent_tools, config as cfg
+    from .providers import get_provider, LLMError
+
+    s = cfg.load_settings()
+    provider_name, model = s.get("provider", "deepseek"), s.get("model", "deepseek-chat")
+    api_key = cfg.get_api_key(provider_name)
+    ctx = agent_tools.ToolContext(
+        from_mcp=args.from_mcp, execute=args.execute,
+        protected=[w for w in (args.protected or "").split(",") if w.strip()])
+    messages = [{"role": "system", "content": agent_loop.SYSTEM_PROMPT}]
+
+    print("Ivyea Agent · 对话模式（输入 /help 看命令，/exit 退出）")
+    print(f"主脑: {provider_name}:{model} ({'已配置' if api_key else '未配置 key — 自然语言对话不可用，斜杠命令可用'}) "
+          f"| 执行: {'真实写(--execute)' if args.execute else 'dry-run'}"
+          f"{' via '+args.from_mcp if args.from_mcp else ''}\n")
+
+    while True:
+        try:
+            line = input("你 › ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n再见。")
+            return 0
+        if not line:
+            continue
+        if line in ("/exit", "/quit"):
+            print("再见。")
+            return 0
+        if line == "/help":
+            print(_CHAT_HELP); continue
+        if line == "/clear":
+            messages = [{"role": "system", "content": agent_loop.SYSTEM_PROMPT}]
+            print("（已清空对话上下文）"); continue
+        if line == "/mcp":
+            servers = cfg.load_mcp().get("mcpServers", {})
+            print("MCP 服务器: " + (", ".join(servers) if servers else "(无，ivyea mcp add)")); continue
+        if line == "/tools":
+            for t in agent_tools.TOOL_SCHEMAS:
+                f = t["function"]; print(f"  {f['name']} — {f['description']}")
+            continue
+        if line == "/memory":
+            print("记忆系统（SQLite FTS5 + 策展 markdown）在 P3 实现，敬请期待。"); continue
+        if line.startswith("/model"):
+            parts = line.split()
+            if len(parts) == 1:
+                print(f"当前主脑: {provider_name}:{model}")
+            else:
+                pm = parts[1]
+                provider_name, _, m = pm.partition(":")
+                model = m or model
+                cfg.set_setting("provider", provider_name); cfg.set_setting("model", model)
+                api_key = cfg.get_api_key(provider_name)
+                print(f"已切换主脑: {provider_name}:{model} ({'已配置' if api_key else '未配置 key'})")
+            continue
+        if line.startswith("/"):
+            print(f"未知命令 {line}，/help 看帮助"); continue
+
+        # 自然语言 → Agent 循环
+        if not api_key:
+            print(f"⚠️ 未配置 {provider_name} 的 API key，自然语言对话不可用。"
+                  f"先 `ivyea config` 配置，或用斜杠命令。")
+            continue
+        messages.append({"role": "user", "content": line})
+        try:
+            provider = get_provider(provider_name, api_key, model)
+            reply = agent_loop.run_turn(provider, ctx, messages)
+            print(f"\nIvyea › {reply}\n")
+        except LLMError as e:
+            print(f"[模型错误] {e}")
+            messages.pop()  # 撤回这条 user，避免污染上下文
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -403,6 +482,12 @@ def build_parser() -> argparse.ArgumentParser:
     pu.add_argument("action", choices=["list", "rollback"])
     pu.add_argument("id", nargs="?", help="rollback 的审计ID")
     pu.set_defaults(func=_cmd_audit)
+
+    pch = sub.add_parser("chat", help="对话式 Agent（自然语言 + 斜杠命令 + 人工审批）")
+    pch.add_argument("--from-mcp", dest="from_mcp", help="执行/拉数用的 MCP 服务器")
+    pch.add_argument("--execute", action="store_true", help="允许真实写（默认 dry-run）")
+    pch.add_argument("--protected", help="保护词清单，逗号分隔")
+    pch.set_defaults(func=_cmd_chat)
     return p
 
 

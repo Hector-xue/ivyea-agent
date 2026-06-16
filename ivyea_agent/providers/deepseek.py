@@ -52,3 +52,31 @@ class DeepSeekProvider(LLMProvider):
             except Exception as exc:  # noqa: BLE001
                 last_err = str(exc)
         raise LLMError(f"DeepSeek 调用失败（已重试）：{last_err}")
+
+    def chat(self, messages, tools=None, temperature=0.3, timeout=120.0):
+        if not self.api_key:
+            raise LLMError("DeepSeek API key 未配置")
+        payload = {"model": self.model or "deepseek-chat", "messages": messages,
+                   "temperature": temperature, "stream": False}
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        try:
+            resp = httpx.post(
+                f"{DEEPSEEK_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                json=payload, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            raise LLMError(f"DeepSeek 连接失败：{exc}") from exc
+        if resp.status_code != 200:
+            raise LLMError(f"DeepSeek HTTP {resp.status_code}: {resp.text[:200]}")
+        msg = (resp.json().get("choices") or [{}])[0].get("message", {}) or {}
+        tool_calls = []
+        for tc in (msg.get("tool_calls") or []):
+            fn = tc.get("function", {})
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except Exception:
+                args = {}
+            tool_calls.append({"id": tc.get("id", ""), "name": fn.get("name", ""), "arguments": args})
+        return {"role": "assistant", "content": msg.get("content") or "", "tool_calls": tool_calls}
