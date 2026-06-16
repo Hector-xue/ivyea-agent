@@ -89,11 +89,14 @@ ivyea config edit       # 用 $EDITOR 直接编辑 .env
 
 主脑模型 P1 用 DeepSeek（OpenAI 兼容、便宜、够用）；密钥存 `~/.ivyea/.env`（权限 600）。
 
-配置模型也可单独用：
+配置模型（像 Hermes/Claude 列出主流模型选）：
 ```bash
-ivyea model                      # 交互配置 provider/模型/key
-ivyea model deepseek:deepseek-chat   # 直接切
+ivyea model            # 交互：列出国内外主流模型 + 登录制，选编号配置(含 key)
+ivyea model list       # 只列清单
+ivyea model deepseek-chat   # 按 id 直接切
 ```
+已接入（OpenAI 兼容，可直接用）：OpenAI(GPT-4o)、DeepSeek、通义千问、Kimi/Moonshot、智谱GLM、豆包、MiniMax、OpenRouter、自定义端点。
+规划中：Anthropic Claude / Google Gemini（原生 API）、Codex（ChatGPT 会员登录）/ Claude（订阅登录）等登录制。
 
 ### MCP 服务器（对话式配置 + 自动拉数）
 

@@ -15,8 +15,12 @@ SETTINGS_FILE = IVYEA_DIR / "settings.json"
 MCP_FILE = IVYEA_DIR / "mcp.json"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "provider": "deepseek",      # 主脑模型 provider
+    "provider": "deepseek-chat",  # 选中的模型 id（见 models.py）
+    "label": "DeepSeek V3（deepseek-chat）",
+    "kind": "openai",             # openai 兼容 / native / login
     "model": "deepseek-chat",
+    "base_url": "https://api.deepseek.com",
+    "key_env": "DEEPSEEK_API_KEY",
     "target_acos": 0.30,          # 默认目标 ACoS（≤毛利率）
     "site": "US",
 }
@@ -76,6 +80,39 @@ def get_api_key(provider: str) -> str:
     load_env()
     env_name = PROVIDER_ENV_KEYS.get(provider, "")
     return os.environ.get(env_name, "") if env_name else ""
+
+
+def get_model_config() -> dict[str, Any]:
+    """当前主脑模型配置（供 providers.from_settings 使用）。"""
+    s = load_settings()
+    return {
+        "provider": s.get("provider", "deepseek-chat"),
+        "label": s.get("label", s.get("provider", "")),
+        "kind": s.get("kind", "openai"),
+        "model": s.get("model", "deepseek-chat"),
+        "base_url": s.get("base_url", "https://api.deepseek.com"),
+        "key_env": s.get("key_env", "DEEPSEEK_API_KEY"),
+    }
+
+
+def get_active_key() -> str:
+    """当前主脑模型对应的 API key（从 ~/.ivyea/.env / 环境读取）。"""
+    load_env()
+    s = load_settings()
+    env_name = s.get("key_env") or PROVIDER_ENV_KEYS.get(s.get("provider", ""), "")
+    return os.environ.get(env_name, "") if env_name else ""
+
+
+def apply_model(entry: dict[str, Any], model: str = "", base_url: str = "") -> None:
+    """把 models.py 的一个条目（或自定义）写入 settings。"""
+    s = load_settings()
+    s["provider"] = entry.get("id", s.get("provider"))
+    s["label"] = entry.get("label", s.get("label"))
+    s["kind"] = entry.get("kind", "openai")
+    s["model"] = model or entry.get("model", s.get("model"))
+    s["base_url"] = base_url or entry.get("base", s.get("base_url"))
+    s["key_env"] = entry.get("key_env", s.get("key_env"))
+    save_settings(s)
 
 
 def set_env_key(name: str, value: str) -> None:

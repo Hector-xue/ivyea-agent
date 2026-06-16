@@ -61,8 +61,9 @@ class ChatInput:
     def _read_boxed(self) -> object:
         from prompt_toolkit.application import Application
         from prompt_toolkit.layout import Layout
-        from prompt_toolkit.layout.containers import HSplit, Window
+        from prompt_toolkit.layout.containers import HSplit, Window, FloatContainer, Float
         from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.layout.menus import CompletionsMenu
         from prompt_toolkit.widgets import Frame, TextArea
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.styles import Style
@@ -72,6 +73,12 @@ class ChatInput:
                       history=self._history)
         frame = Frame(ta)
         hint = Window(FormattedTextControl(lambda: self.status_fn()), height=1, style="class:hint")
+        # 关键：补全下拉需要一个 CompletionsMenu 浮层，否则输入 / 不弹候选
+        root = FloatContainer(
+            content=HSplit([frame, hint]),
+            floats=[Float(xcursor=True, ycursor=True,
+                          content=CompletionsMenu(max_height=10, scroll_offset=1))],
+        )
         kb = KeyBindings()
 
         @kb.add("enter")
@@ -83,8 +90,14 @@ class ChatInput:
         def _(event):
             event.app.exit(result=EXIT)
 
-        style = Style.from_dict({"frame.border": "ansicyan", "hint": "ansibrightblack"})
-        app = Application(layout=Layout(HSplit([frame, hint])), key_bindings=kb,
+        style = Style.from_dict({
+            "frame.border": "ansicyan",
+            "hint": "ansibrightblack",
+            "completion-menu.completion": "bg:#1f2937 #e5e7eb",
+            "completion-menu.completion.current": "bg:#06b6d4 #001018",
+            "completion-menu.meta.completion": "bg:#111827 #9ca3af",
+        })
+        app = Application(layout=Layout(root), key_bindings=kb,
                           style=style, full_screen=False, mouse_support=False)
         return app.run()
 

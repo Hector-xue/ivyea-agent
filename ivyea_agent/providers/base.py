@@ -34,11 +34,21 @@ class LLMProvider:
         raise NotImplementedError
 
 
-def get_provider(provider: str, api_key: str, model: str) -> LLMProvider:
-    """工厂：按名字返回 provider 适配器。预留 openai/anthropic 扩展位。"""
-    provider = (provider or "").lower()
-    if provider == "deepseek":
-        from .deepseek import DeepSeekProvider
-        return DeepSeekProvider(api_key, model)
-    # 预留：openai / anthropic / gemini / ollama —— 同接口实现即可接入。
-    raise LLMError(f"暂不支持的 provider: {provider}（P1 已接入: deepseek）")
+def from_settings(model_cfg: dict, api_key: str) -> LLMProvider:
+    """按模型配置(models.py 条目/settings)构造 provider。
+
+    kind=openai → 通用 OpenAI 兼容（OpenAI/DeepSeek/通义/Kimi/GLM/豆包/MiniMax/
+    OpenRouter/自定义，现已可用）。native(Anthropic/Gemini)/login(Codex/Claude订阅)
+    给清晰"规划中"提示，不假装可用。"""
+    kind = (model_cfg.get("kind") or "openai").lower()
+    model = model_cfg.get("model") or "deepseek-chat"
+    base_url = model_cfg.get("base_url") or model_cfg.get("base") or "https://api.deepseek.com"
+    if kind == "openai":
+        from .openai_compat import OpenAICompatProvider
+        return OpenAICompatProvider(api_key, model, base_url)
+    if kind == "native":
+        raise LLMError(f"{model_cfg.get('label', model)} 走厂商原生 API，适配规划中；"
+                       "当前可用：OpenAI 兼容类（OpenAI/DeepSeek/通义/Kimi/GLM/豆包/MiniMax/OpenRouter/自定义）。")
+    if kind == "login":
+        raise LLMError(f"{model_cfg.get('label', model)} 为登录制（免 API key），登录接入规划中。")
+    raise LLMError(f"未知模型类型 kind={kind}")

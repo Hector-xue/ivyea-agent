@@ -20,10 +20,15 @@ def patrol(csv_path: str, asin: Optional[str] = None, site: Optional[str] = None
     out_dir = output_dir or str(__import__("pathlib").Path(csv_path).resolve().parent / "ivyea_patrol_out")
 
     if use_llm:
-        provider = settings.get("provider", "deepseek")
-        model = settings.get("model", "deepseek-chat")
-        api_key = config.get_api_key(provider)
-        rev = review.review(rule_output, provider, api_key, model, target_acos=target_acos)
+        from .providers import from_settings, LLMError
+        api_key = config.get_active_key()
+        provider_obj = None
+        if api_key:
+            try:
+                provider_obj = from_settings(config.get_model_config(), api_key)
+            except LLMError:
+                provider_obj = None
+        rev = review.review(rule_output, provider_obj, target_acos=target_acos)
     else:
         rev = {"ok": False, "markdown": "", "note": "已用 --no-llm 跳过 AI 复核。"}
 

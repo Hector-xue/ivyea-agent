@@ -1,3 +1,3 @@
-from .base import LLMError, LLMProvider, get_provider
+from .base import LLMError, LLMProvider, from_settings
 
-__all__ = ["LLMError", "LLMProvider", "get_provider"]
+__all__ = ["LLMError", "LLMProvider", "from_settings"]

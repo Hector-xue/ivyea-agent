@@ -35,35 +35,60 @@ def _ask_secret(prompt: str) -> str:
         return ""
 
 
-def _config_wizard() -> int:
-    """交互式配置向导（一条 `ivyea config` 即进）。"""
+def _model_picker() -> None:
+    """像 Hermes/Claude：列出国内外主流模型 + 登录制，选编号配置。"""
+    from . import models
     config.ensure_dirs()
     s = config.load_settings()
-    print("── Ivyea Agent 配置向导（回车=保留当前值）──\n")
-    provider = _ask("主脑模型 provider (deepseek/openai/anthropic)", s.get("provider", "deepseek"))
-    model = _ask("模型名", s.get("model", "deepseek-chat"))
-    site = _ask("默认站点", s.get("site", "US"))
+    print(f"\n当前主脑: {_C['c']}{s.get('label', s.get('provider'))}{_C['x']} "
+          f"（{s.get('model')}，{'已配 key' if config.get_active_key() else '未配 key'}）\n")
+    idx, n = {}, 1
+    for group, items in models.grouped():
+        print(f"{_C['b']}{group}{_C['x']}")
+        for m in items:
+            tag = {"openai": "",
+                   "native": f"{_C['d']} (原生API·规划中){_C['x']}",
+                   "login": f"{_C['d']} (登录制·规划中){_C['x']}"}.get(m["kind"], "")
+            print(f"  {_C['c']}{n:>2}{_C['x']}) {m['label']}{tag}")
+            idx[str(n)] = m; n += 1
+    choice = _ask("\n选择编号（回车取消）")
+    m = idx.get(choice)
+    if not m:
+        print("已取消。"); return
+    model, base = m.get("model", ""), m.get("base", "")
+    if m["id"] == "custom":
+        base = _ask("base_url（OpenAI 兼容，如 https://xxx/v1）", base)
+        model = _ask("model 名", model)
+    elif m["kind"] == "openai":
+        model = _ask("model 名（回车用默认）", model)
+    config.apply_model(m, model=model, base_url=base)
+    if m["kind"] == "openai":
+        cur = "已配置" if config.get_active_key() else "未配置"
+        nk = _ask_secret(f"{m['label']} 的 API key（{m['key_env']}，当前{cur}；回车跳过 / - 清空）")
+        if nk == "-":
+            config.set_env_key(m["key_env"], "")
+        elif nk:
+            config.set_env_key(m["key_env"], nk)
+        print(f"✓ 已切换主脑：{m['label']}（{model or m.get('model')}），"
+              f"{'已配 key' if config.get_active_key() else '未配 key'}")
+    else:
+        print(f"已选 {m['label']}，但{m.get('note', '该类型规划中')}。"
+              f"当前可直接用：OpenAI 兼容类（DeepSeek/通义/Kimi/GLM/豆包/MiniMax/OpenRouter/OpenAI/自定义）。")
+
+
+def _config_wizard() -> int:
+    """配置向导：站点 + 目标 ACoS + 模型选择（含密钥）。"""
+    config.ensure_dirs()
+    s = config.load_settings()
+    print("── Ivyea Agent 配置向导（回车=保留当前）──")
+    config.set_setting("site", _ask("默认站点", s.get("site", "US")))
     acos_raw = _ask("目标 ACoS (如 0.3)", str(s.get("target_acos", 0.3)))
     try:
-        target_acos = float(acos_raw)
+        config.set_setting("target_acos", float(acos_raw))
     except ValueError:
         print(f"  (target_acos '{acos_raw}' 非数字，保留 {s.get('target_acos')})")
-        target_acos = s.get("target_acos", 0.3)
-    config.save_settings({**s, "provider": provider, "model": model, "site": site,
-                          "target_acos": target_acos})
-
-    has_key = bool(config.get_api_key(provider))
-    status = "已配置" if has_key else "未配置"
-    print(f"\n{provider} API key 当前：{status}")
-    newkey = _ask_secret(f"输入 {provider} API key（回车跳过；输入 - 清空）")
-    if newkey == "-":
-        config.set_api_key(provider, "")
-        print("  已清空。")
-    elif newkey:
-        config.set_api_key(provider, newkey)
-        print("  已保存到 ~/.ivyea/.env")
-
-    print("\n✓ 配置已保存。再看一眼：\n")
+    _model_picker()
+    print("\n✓ 配置已保存。\n")
     return _print_config()
 
 
@@ -72,11 +97,9 @@ def _print_config() -> int:
     print(f"配置目录: {config.IVYEA_DIR}")
     print(f".env:      {config.ENV_FILE} ({'存在' if config.ENV_FILE.exists() else '缺失'})")
     print(f"mcp.json:  {config.MCP_FILE} ({'存在' if config.MCP_FILE.exists() else '缺失'})")
-    print("settings:")
-    for k, v in s.items():
-        print(f"  {k} = {v}")
-    provider = s.get("provider", "deepseek")
-    print(f"主脑 key ({provider}): {'已配置' if config.get_api_key(provider) else '未配置'}")
+    print(f"主脑模型: {s.get('label', s.get('provider'))} · {s.get('model')} · kind={s.get('kind')}"
+          f" · key {'已配置' if config.get_active_key() else '未配置'}")
+    print(f"站点: {s.get('site')}　目标 ACoS: {s.get('target_acos')}")
     servers = config.load_mcp().get("mcpServers", {})
     print(f"MCP 服务器: {', '.join(servers) if servers else '(无，用 ivyea mcp add 添加)'}")
     return 0
@@ -436,22 +459,23 @@ def _print_welcome_box(lines: list, width: int = 58) -> None:
 
 def _cmd_chat(args: argparse.Namespace) -> int:
     from . import agent_loop, agent_tools, config as cfg
-    from .providers import get_provider, LLMError
+    from .providers import from_settings, LLMError
 
-    s = cfg.load_settings()
-    provider_name, model = s.get("provider", "deepseek"), s.get("model", "deepseek-chat")
-    api_key = cfg.get_api_key(provider_name)
+    def _label() -> str:
+        s = cfg.load_settings()
+        return s.get("label", s.get("provider", "deepseek"))
+
     ctx = agent_tools.ToolContext(
         from_mcp=args.from_mcp, execute=args.execute,
         protected=[w for w in (args.protected or "").split(",") if w.strip()])
     messages = [{"role": "system", "content": agent_loop.SYSTEM_PROMPT}]
 
-    keyst = "已配置" if api_key else "未配 key（/model 配置后可对话）"
+    keyst = "已配置" if cfg.get_active_key() else "未配 key（/model 配置后可对话）"
     mode = "真实写" if args.execute else "dry-run"
     print(f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}")
     _print_welcome_box([
         f"{_C['c']}✻{_C['x']} {_C['b']}亚马逊运营 Agent{_C['x']} · 规则引擎+LLM复核+审核制执行 · 自托管",
-        f"{_C['d']}主脑 {provider_name}:{model}（{keyst}）· 执行 {mode}{_C['x']}",
+        f"{_C['d']}主脑 {_label()}（{keyst}）· 执行 {mode}{_C['x']}",
         f"{_C['d']}/help 看命令 · 直接说需求 · /exit 退出{_C['x']}",
     ])
     print()
@@ -459,7 +483,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     from . import chat_input
 
     def _status() -> str:
-        return (f" ivyea · {provider_name}:{model} · "
+        return (f" ivyea · {_label()} · "
                 f"{'真实写' if args.execute else 'dry-run'} · /help 命令、Tab 补全、↑↓历史 ")
 
     ci = chat_input.ChatInput(SLASH_COMMANDS, _status)
@@ -490,26 +514,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             print("记忆系统（SQLite FTS5 + 策展 markdown）在 P3 实现，敬请期待。"); continue
         if line == "/status":
             _print_config(); continue
-        if line == "/config":
-            _config_wizard()
-            provider_name, model = cfg.get_setting("provider", "deepseek"), cfg.get_setting("model", "deepseek-chat")
-            api_key = cfg.get_api_key(provider_name)
+        if line in ("/config", "/model"):
+            _model_picker() if line == "/model" else _config_wizard()
             continue
-        if line.startswith("/model"):
-            parts = line.split()
-            if len(parts) == 1:
-                # 像 Claude/Hermes：列当前 + 可选 provider + 用法
-                print(f"当前主脑: {_C['c']}{provider_name}:{model}{_C['x']}"
-                      f"（{'已配置 key' if api_key else '未配置 key'}）")
-                print(f"  可切换：{_C['d']}/model deepseek:deepseek-chat | openai:gpt-4o-mini | anthropic:claude-3-7-sonnet{_C['x']}")
-                print(f"  或交互配置（含密钥）：{_C['d']}/config{_C['x']}")
+        if line.startswith("/model "):  # /model <id> 直接切
+            mid = line.split(None, 1)[1].strip()
+            m = __import__("ivyea_agent.models", fromlist=["by_id"]).by_id(mid)
+            if m:
+                cfg.apply_model(m)
+                print(f"已切换主脑: {m['label']}（{'已配 key' if cfg.get_active_key() else '未配 key，用 /model 配置'}）")
             else:
-                provider_name, _, m = parts[1].partition(":")
-                model = m or model
-                cfg.set_setting("provider", provider_name); cfg.set_setting("model", model)
-                api_key = cfg.get_api_key(provider_name)
-                print(f"已切换主脑: {provider_name}:{model} "
-                      f"({'已配置 key' if api_key else '未配置 key，用 /config 配置'})")
+                print(f"未知模型 id：{mid}。用 /model 看清单。")
             continue
         if line.startswith("/"):
             hits = [c for c, _ in SLASH_COMMANDS if c.startswith(line.split()[0])]
@@ -517,13 +532,13 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             print(f"未知命令 {line.split()[0]}{tip}"); continue
 
         # 自然语言 → Agent 循环
+        api_key = cfg.get_active_key()
         if not api_key:
-            print(f"⚠️ 未配置 {provider_name} 的 API key，自然语言对话不可用。"
-                  f"先 `ivyea config` 配置，或用斜杠命令。")
+            print(f"⚠️ 未配置主脑模型 key，自然语言对话不可用。用 {_C['c']}/model{_C['x']} 选模型并配 key，或用斜杠命令。")
             continue
         messages.append({"role": "user", "content": line})
         try:
-            provider = get_provider(provider_name, api_key, model)
+            provider = from_settings(cfg.get_model_config(), api_key)
             reply = agent_loop.run_turn(provider, ctx, messages)
             print(f"\n{_C['c']}●{_C['x']} {reply}\n")
         except LLMError as e:
@@ -532,36 +547,25 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
 
 def _cmd_model(args: argparse.Namespace) -> int:
-    from . import config as cfg
+    from . import config as cfg, models
     cfg.ensure_dirs()
-    s = cfg.load_settings()
-    if args.spec:  # ivyea model deepseek:deepseek-chat
-        prov, _, m = args.spec.partition(":")
-        cfg.set_setting("provider", prov)
-        if m:
-            cfg.set_setting("model", m)
-        print(f"已切换主脑: {prov}:{m or s.get('model')}"
-              f"（{'已配置 key' if cfg.get_api_key(prov) else '未配置 key，运行 ivyea model 交互配置'}）")
+    if args.spec == "list":
+        for group, items in models.grouped():
+            print(group)
+            for m in items:
+                print(f"  {m['id']:<16} {m['label']}")
         return 0
-    # 交互配置
-    print(f"当前主脑: {s.get('provider')}:{s.get('model')}"
-          f"（{'已配置 key' if cfg.get_api_key(s.get('provider', 'deepseek')) else '未配置 key'}）\n")
-    provider = _ask("主脑 provider (deepseek/openai/anthropic)", s.get("provider", "deepseek"))
-    defmodel = {"deepseek": "deepseek-chat", "openai": "gpt-4o-mini",
-                "anthropic": "claude-3-7-sonnet"}.get(provider, s.get("model", ""))
-    model = _ask("模型名", s.get("model") if provider == s.get("provider") else defmodel)
-    cfg.set_setting("provider", provider)
-    cfg.set_setting("model", model)
-    has = cfg.get_api_key(provider)
-    newkey = _ask_secret(f"{provider} API key（回车跳过；输入 - 清空）当前:{'已配置' if has else '未配置'}")
-    if newkey == "-":
-        cfg.set_api_key(provider, ""); print("  已清空。")
-    elif newkey:
-        cfg.set_api_key(provider, newkey); print("  已保存到 ~/.ivyea/.env")
-    ok = cfg.get_api_key(provider)
-    print(f"\n✓ 主脑: {provider}:{model}（{'已配置 key' if ok else '未配置 key'}）")
-    if provider != "deepseek" and ok:
-        print("  注：当前仅 deepseek 适配器已接入；openai/anthropic 适配预留中。")
+    if args.spec:  # ivyea model <id>
+        m = models.by_id(args.spec)
+        if not m:
+            print(f"未知模型 id：{args.spec}。`ivyea model list` 看清单，或 `ivyea model` 交互选。",
+                  file=sys.stderr)
+            return 2
+        cfg.apply_model(m)
+        print(f"已切换主脑: {m['label']}"
+              f"（{'已配置 key' if cfg.get_active_key() else '未配置 key，运行 ivyea model 配置'}）")
+        return 0
+    _model_picker()   # 无参 → 交互选择清单
     return 0
 
 

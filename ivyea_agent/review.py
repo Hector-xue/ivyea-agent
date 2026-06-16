@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from .knowledge import METHODOLOGY
-from .providers import LLMError, get_provider
+from .providers import LLMError
 
 REVIEW_INSTRUCTION = """\
 下面是「规则引擎」对一份亚马逊搜索词报告产出的确定性结论（报告原文 + 基准数据）。
@@ -24,13 +24,12 @@ REVIEW_INSTRUCTION = """\
 """
 
 
-def review(rule_output: dict[str, Any], provider_name: str, api_key: str, model: str,
-           target_acos: Optional[float] = None) -> dict[str, Any]:
-    """返回 {ok, markdown, note}。无 key 时 ok=False 但不抛异常。"""
-    if not api_key:
+def review(rule_output: dict[str, Any], provider, target_acos: Optional[float] = None) -> dict[str, Any]:
+    """返回 {ok, markdown, note}。provider 为 None（未配模型）时优雅降级，不抛异常。"""
+    if provider is None:
         return {"ok": False, "markdown": "",
-                "note": "未配置模型 API key，已跳过 AI 复核（仅输出规则引擎结论）。"
-                        "配置：ivyea config 或 ~/.ivyea/.env。"}
+                "note": "未配置可用主脑模型，已跳过 AI 复核（仅输出规则引擎结论）。"
+                        "用 `ivyea model` 或 `ivyea config` 配置。"}
     summary = rule_output.get("summary", {})
     report_md = rule_output.get("report_md", "")
     tgt = f"\n- 目标 ACoS：{target_acos:.0%}" if target_acos else ""
@@ -43,7 +42,6 @@ def review(rule_output: dict[str, Any], provider_name: str, api_key: str, model:
         f"{REVIEW_INSTRUCTION}"
     )
     try:
-        provider = get_provider(provider_name, api_key, model)
         md = provider.complete(METHODOLOGY, user, json_mode=False, temperature=0.2)
         return {"ok": True, "markdown": md.strip(), "note": ""}
     except LLMError as e:
