@@ -1,6 +1,7 @@
-"""聊天输入框（prompt_toolkit）—— 支持粘贴、历史(↑↓)、斜杠命令下拉补全、底部状态栏。
+"""Claude Code 风格的输入框（prompt_toolkit）。
 
-无 prompt_toolkit 或非 TTY（管道/无终端）时优雅降级为内置 input()。
+带边框的输入区（Frame）+ ❯ 提示 + 斜杠下拉补全 + ↑↓历史 + 粘贴(bracketed paste)。
+三级降级：带框 Application → 普通 PromptSession → 内置 input()，保证任何环境可用。
 """
 from __future__ import annotations
 
@@ -9,58 +10,101 @@ from typing import Callable, Optional
 
 from . import config
 
+EXIT = object()  # 哨兵：用户在框内 Ctrl+C/Ctrl+D 退出
 
-def build_session(slash_commands: list, status_fn: Callable[[], str]):
-    """构造 PromptSession；不可用则返回 None（调用方回退 input()）。"""
-    if not sys.stdin.isatty():
-        return None
-    try:
-        from prompt_toolkit import PromptSession
+
+class ChatInput:
+    def __init__(self, slash_commands: list, status_fn: Callable[[], str]):
+        self.slash = slash_commands
+        self.status_fn = status_fn
+        self._app_factory = None      # 带框 Application（每次新建）
+        self._session = None          # 普通 PromptSession 兜底
+        self._mode = "plain"
+        if sys.stdin.isatty():
+            self._try_setup()
+
+    def _completer(self):
         from prompt_toolkit.completion import Completer, Completion
-        from prompt_toolkit.history import FileHistory
-        from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-        from prompt_toolkit.key_binding import KeyBindings
-    except Exception:
-        return None
 
-    class _SlashCompleter(Completer):
-        def get_completions(self, document, complete_event):
-            text = document.text_before_cursor
-            if not text.startswith("/"):
-                return
-            for cmd, desc in slash_commands:
-                if cmd.startswith(text):
-                    yield Completion(cmd, start_position=-len(text),
-                                     display=cmd, display_meta=desc)
+        class _C(Completer):
+            def __init__(s, cmds): s.cmds = cmds
+            def get_completions(s, document, complete_event):
+                t = document.text_before_cursor
+                if not t.startswith("/"):
+                    return
+                for cmd, desc in s.cmds:
+                    if cmd.startswith(t):
+                        yield Completion(cmd, start_position=-len(t), display=cmd, display_meta=desc)
+        return _C(self.slash)
 
-    config.ensure_dirs()
-    kb = KeyBindings()
-
-    @kb.add("c-j")  # Ctrl+J 插入换行（多行输入），Enter 仍发送
-    def _(event):
-        event.current_buffer.insert_text("\n")
-
-    try:
-        return PromptSession(
-            history=FileHistory(str(config.IVYEA_DIR / "chat_history")),
-            completer=_SlashCompleter(),
-            complete_while_typing=True,
-            auto_suggest=AutoSuggestFromHistory(),
-            bottom_toolbar=lambda: status_fn(),
-            key_bindings=kb,
-            multiline=False,           # Enter 发送；粘贴多行由 bracketed paste 处理
-            mouse_support=False,
-        )
-    except Exception:
-        return None
-
-
-def read(session, prompt_str: str, plain_prompt: str) -> str:
-    """读一行输入。session 为 None 时回退 input()。"""
-    if session is not None:
+    def _try_setup(self):
         try:
-            from prompt_toolkit.formatted_text import ANSI
-            return session.prompt(ANSI(prompt_str)).strip()
+            from prompt_toolkit.history import FileHistory
+            config.ensure_dirs()
+            self._history = FileHistory(str(config.IVYEA_DIR / "chat_history"))
+            # 探测带框组件是否可用
+            from prompt_toolkit.widgets import Frame, TextArea  # noqa: F401
+            from prompt_toolkit.application import Application   # noqa: F401
+            self._mode = "boxed"
         except Exception:
+            try:
+                from prompt_toolkit import PromptSession
+                from prompt_toolkit.history import FileHistory
+                config.ensure_dirs()
+                self._session = PromptSession(
+                    history=FileHistory(str(config.IVYEA_DIR / "chat_history")),
+                    completer=self._completer(), complete_while_typing=True)
+                self._mode = "session"
+            except Exception:
+                self._mode = "plain"
+
+    def _read_boxed(self) -> object:
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.layout import Layout
+        from prompt_toolkit.layout.containers import HSplit, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.widgets import Frame, TextArea
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.styles import Style
+
+        ta = TextArea(prompt="❯ ", multiline=False, wrap_lines=True,
+                      completer=self._completer(), complete_while_typing=True,
+                      history=self._history)
+        frame = Frame(ta)
+        hint = Window(FormattedTextControl(lambda: self.status_fn()), height=1, style="class:hint")
+        kb = KeyBindings()
+
+        @kb.add("enter")
+        def _(event):
+            event.app.exit(result=ta.text)
+
+        @kb.add("c-c")
+        @kb.add("c-d")
+        def _(event):
+            event.app.exit(result=EXIT)
+
+        style = Style.from_dict({"frame.border": "ansicyan", "hint": "ansibrightblack"})
+        app = Application(layout=Layout(HSplit([frame, hint])), key_bindings=kb,
+                          style=style, full_screen=False, mouse_support=False)
+        return app.run()
+
+    def read(self, plain_prompt: str = "❯ ") -> object:
+        """返回输入字符串；用户退出返回 EXIT 哨兵。"""
+        if self._mode == "boxed":
+            try:
+                r = self._read_boxed()
+                return r if r is EXIT else (r or "").strip()
+            except (EOFError, KeyboardInterrupt):
+                return EXIT
+            except Exception:
+                self._mode = "session" if self._session else "plain"  # 出错降级
+        if self._mode == "session" and self._session is not None:
+            try:
+                from prompt_toolkit.formatted_text import ANSI
+                return self._session.prompt(ANSI(plain_prompt)).strip()
+            except (EOFError, KeyboardInterrupt):
+                return EXIT
+        try:
             return input(plain_prompt).strip()
-    return input(plain_prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            return EXIT

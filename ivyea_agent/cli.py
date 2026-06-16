@@ -412,6 +412,25 @@ def _setup_readline() -> None:
         pass
 
 
+def _strip_ansi(s: str) -> str:
+    import re
+    return re.sub(r"\033\[[0-9;]*m", "", s)
+
+
+def _print_welcome_box(lines: list, width: int = 58) -> None:
+    """Claude Code 风格圆角欢迎框（按显示宽度对齐中英文混排）。"""
+    try:
+        from prompt_toolkit.utils import get_cwidth
+    except Exception:
+        def get_cwidth(ch): return 1
+    inner, cy, x = width - 2, _C["c"], _C["x"]
+    print(f"{cy}╭{'─' * inner}╮{x}")
+    for ln in lines:
+        w = sum(get_cwidth(ch) for ch in _strip_ansi(ln))
+        print(f"{cy}│{x} {ln}{' ' * max(0, inner - 1 - w)}{cy}│{x}")
+    print(f"{cy}╰{'─' * inner}╯{x}")
+
+
 def _cmd_chat(args: argparse.Namespace) -> int:
     from . import agent_loop, agent_tools, config as cfg
     from .providers import get_provider, LLMError
@@ -423,18 +442,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         from_mcp=args.from_mcp, execute=args.execute,
         protected=[w for w in (args.protected or "").split(",") if w.strip()])
     messages = [{"role": "system", "content": agent_loop.SYSTEM_PROMPT}]
-    _setup_readline()
 
-    keyst = (f"{_C['g']}已配置{_C['x']}" if api_key
-             else f"{_C['d']}未配 key — 配 ivyea model 后可对话{_C['x']}")
-    mode = (f"{_C['g']}真实写{_C['x']}" if args.execute else "dry-run")
-    print(f"{_C['g']}{_BANNER}{_C['x']}")
-    print(f"  {_C['b']}亚马逊运营 Agent{_C['x']} · 自托管 · 规则引擎+LLM复核+审核制执行")
-    print(f"  我能：{_C['c']}广告巡检{_C['x']}(否词/调价建议) → {_C['c']}审核制执行{_C['x']}(人工确认才写) → 审计回滚")
-    print(f"  {_C['d']}主脑 {provider_name}:{model}（{keyst}） | 执行 {mode}"
-          f"{' via '+args.from_mcp if args.from_mcp else ''}{_C['x']}")
-    print(f"  {_C['d']}输入 {_C['x']}{_C['c']}/help{_C['x']}{_C['d']} 看命令（/ 后按 Tab 补全），或直接说需求；{_C['x']}"
-          f"{_C['c']}/exit{_C['x']}{_C['d']} 退出{_C['x']}\n")
+    keyst = "已配置" if api_key else "未配 key（ivyea model 配置后可对话）"
+    mode = "真实写" if args.execute else "dry-run"
+    _print_welcome_box([
+        f"{_C['c']}✻{_C['x']} {_C['b']}Ivyea Agent{_C['x']} · 亚马逊运营",
+        "",
+        f"{_C['d']}规则引擎 + LLM 复核 + 审核制执行 · 自托管{_C['x']}",
+        f"{_C['d']}主脑 {provider_name}:{model}（{keyst}）· {mode}{_C['x']}",
+        f"{_C['d']}/help 看命令 · 直接说需求 · /exit 退出{_C['x']}",
+    ])
+    print()
 
     from . import chat_input
 
@@ -442,13 +460,11 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         return (f" ivyea · {provider_name}:{model} · "
                 f"{'真实写' if args.execute else 'dry-run'} · /help 命令、Tab 补全、↑↓历史 ")
 
-    session = chat_input.build_session(SLASH_COMMANDS, _status)
-    prompt_ansi = f"{_C['c']}{_C['b']}ivyea ❯ {_C['x']}"
+    ci = chat_input.ChatInput(SLASH_COMMANDS, _status)
 
     while True:
-        try:
-            line = chat_input.read(session, prompt_ansi, "ivyea ❯ ")
-        except (EOFError, KeyboardInterrupt):
+        line = ci.read("❯ ")
+        if line is chat_input.EXIT:
             print("\n再见。")
             return 0
         if not line:
@@ -496,7 +512,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         try:
             provider = get_provider(provider_name, api_key, model)
             reply = agent_loop.run_turn(provider, ctx, messages)
-            print(f"\nIvyea › {reply}\n")
+            print(f"\n{_C['c']}●{_C['x']} {reply}\n")
         except LLMError as e:
             print(f"[模型错误] {e}")
             messages.pop()  # 撤回这条 user，避免污染上下文
