@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from . import config, memory
-from .lingxing_datasets import fetch_dataset
+from .lingxing_cache import fetch_dataset   # 带缓存的取数（签名同 lingxing_datasets）
 from .lingxing_openapi import LingXingError
 
 # settings 键 → 默认值（移植自 ivyea-ops hub_settings）
@@ -67,10 +67,13 @@ def _metrics(b: dict[str, float]) -> dict[str, Any]:
 
 
 def _agg(sid: int, dataset: str, dates: list[str], key_fn: Callable[[dict], Any],
-         capture: tuple[str, ...]) -> dict[Any, dict[str, Any]]:
+         capture: tuple[str, ...], progress: Optional[Callable] = None, label: str = "") -> dict[Any, dict[str, Any]]:
     """窗口逐日聚合一个报表，按 key_fn 分桶，记录静态字段。缺某日静默跳过。"""
     out: dict[Any, dict[str, Any]] = {}
-    for day in dates:
+    total = len(dates)
+    for i, day in enumerate(dates, 1):
+        if progress:
+            progress(label, i, total)
         try:
             rows = fetch_dataset(dataset, {"sid": sid, "report_date": day, "length": 300})
         except LingXingError:
@@ -156,7 +159,7 @@ def _in_cooldown(sid: int, name: str, cooldown_days: int) -> bool:
         return False
 
 
-def run_store(sid: int, days: Optional[int] = None) -> dict[str, Any]:
+def run_store(sid: int, days: Optional[int] = None, progress: Optional[Callable] = None) -> dict[str, Any]:
     """对一个店铺跑只读规则引擎，返回 {sid, window_days, margin, target_acos, candidates...}。"""
     factor = _f(_cfg("lingxing_target_acos_factor")) or 0.7
     neg_clicks = int(_cfg("lingxing_neg_min_clicks") or 15)
@@ -206,7 +209,8 @@ def run_store(sid: int, days: Optional[int] = None) -> dict[str, Any]:
     try:
         st = _agg(sid, "sp_search_term_report", dates,
                   lambda r: (str(r.get("campaign_id")), str(r.get("query") or "")) if r.get("query") else None,
-                  capture=("query", "campaign_id", "ad_group_id", "match_type"))
+                  capture=("query", "campaign_id", "ad_group_id", "match_type"),
+                  progress=progress, label="搜索词报表")
         for (cid, q), bk in st.items():
             m = _metrics(bk["_b"])
             if m["clicks"] >= neg_clicks and m["orders"] == 0:
@@ -238,7 +242,8 @@ def run_store(sid: int, days: Optional[int] = None) -> dict[str, Any]:
     try:
         kr = _agg(sid, "sp_keyword_report", dates,
                   lambda r: str(r.get("keyword_id")) if r.get("keyword_id") else None,
-                  capture=("keyword_id", "keyword_text", "match_type", "campaign_id"))
+                  capture=("keyword_id", "keyword_text", "match_type", "campaign_id"),
+                  progress=progress, label="关键词报表")
         bids = _bid_map(sid) if kr else {}
         for kid, bk in kr.items():
             m = _metrics(bk["_b"])
@@ -277,7 +282,7 @@ def run_store(sid: int, days: Optional[int] = None) -> dict[str, Any]:
     try:
         cr = _agg(sid, "sp_campaign_report", dates,
                   lambda r: str(r.get("campaign_id")) if r.get("campaign_id") else None,
-                  capture=("campaign_id",))
+                  capture=("campaign_id",), progress=progress, label="活动报表")
         budgets = _campaign_budgets(sid) if cr else {}
         for cid, bk in cr.items():
             m = _metrics(bk["_b"])
