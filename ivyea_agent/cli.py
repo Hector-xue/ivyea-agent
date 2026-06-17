@@ -325,6 +325,53 @@ def _patrol_lingxing(args: argparse.Namespace) -> int:
     out_dir = args.output_dir or str(config.IVYEA_DIR / "patrol_out")
     md_path = report.write_md(lrep.render_md(result), out_dir, asin=f"sid{args.sid}")
     print(f"\n[已保存] {md_path}", file=sys.stderr)
+
+    if getattr(args, "execute", False):
+        return _execute_lingxing_candidates(result, yes=getattr(args, "yes", False))
+    return 0
+
+
+def _execute_lingxing_candidates(result: dict, yes: bool = False) -> int:
+    """对巡检候选逐条人工审批 → 写入（默认 dry-run；真写需 operate 开关）。"""
+    from . import lingxing_write as lw, permission
+
+    writable = []
+    for c in result.get("candidates", []):
+        if c.get("blocked"):
+            continue
+        intent = lw.candidate_to_intent(c)
+        if intent and all(intent.get(k) is not None for k in ("sid",)):
+            writable.append(intent)
+    if not writable:
+        print("没有可写入的候选（收割为建议项、被拦截项不写）。", file=sys.stderr)
+        return 0
+
+    live = lw.operate_active()
+    print(f"\n共 {len(writable)} 个可写动作。operate 开关：{'开（将真实写入）' if live else '关（dry-run 预览）'}。",
+          file=sys.stderr)
+    state = permission.PermissionState()
+    done = 0
+    for intent in writable:
+        if not yes:
+            decision = permission.request_intent(intent, lw.preview(intent), state)
+            if decision == permission.ABORT:
+                print("已全部停止。", file=sys.stderr)
+                break
+            if decision == permission.DENY:
+                from . import memory
+                memory.record_decision(f"sid:{intent.get('sid')}",
+                                       intent.get("keyword_text") or str(intent.get("target_name")),
+                                       lw._kind_for_memory(intent["op_type"]), "reject")
+                print(f"  跳过：{lw.preview(intent)}", file=sys.stderr)
+                continue
+        r = lw.execute(intent, dry_run=not live)
+        print(("  ✓ " if r["ok"] else "  ✗ ") + r["detail"])
+        if r["ok"] and not r.get("dry_run"):
+            done += 1
+    if not live:
+        print("\n（以上为 dry-run 预览。真实写入需 `ivyea lingxing operate on`。）", file=sys.stderr)
+    elif done:
+        print(f"\n已写入 {done} 条。回滚用 `ivyea audit rollback <ID>`。", file=sys.stderr)
     return 0
 
 
@@ -361,6 +408,18 @@ def _cmd_lingxing(args: argparse.Namespace) -> int:
         print(f"共 {len(sellers)} 个店铺：")
         for s in sellers:
             print(f"  sid={s.get('sid')}  {s.get('name')}  {s.get('country') or ''}")
+        return 0
+    if args.action == "operate":
+        from . import lingxing_write as lw
+        sub = (args.value or "status").lower()
+        if sub == "on":
+            lw.set_operate(True)
+            print("⚠️ 领星写入开关已开启（默认 120 分钟后自动关）。写动作仍需逐条人工审批。")
+        elif sub == "off":
+            lw.set_operate(False)
+            print("领星写入开关已关闭（回到 dry-run）。")
+        else:
+            print(f"领星写入开关：{'开' if lw.operate_active() else '关'}")
         return 0
     return 2
 
@@ -437,14 +496,20 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             print("(暂无审计记录)")
             return 0
         for e in rows:
+            src = e.get("source") or e.get("server") or ""
             print(f"  {e.get('id','?')}  {e.get('ts','')}  {e.get('kind','')}  "
-                  f"{e.get('search_term','')}  [{e.get('server','')}]")
+                  f"{e.get('search_term','')}  [{src}]")
         return 0
     if args.action == "rollback":
         if not args.id:
             print("用法: ivyea audit rollback <审计ID>", file=sys.stderr)
             return 2
-        r = executor.rollback(args.id)
+        entry = audit.get(args.id)
+        if entry and entry.get("source") == "lingxing":
+            from . import lingxing_write as lw
+            r = lw.rollback(args.id)
+        else:
+            r = executor.rollback(args.id)
         print(("✓ " if r["ok"] else "✗ ") + r["detail"])
         return 0 if r["ok"] else 1
     return 2
@@ -709,6 +774,9 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--report-type", dest="report_type", help="SP/SB/SD")
     pp.add_argument("--output-dir", dest="output_dir", help="输出目录")
     pp.add_argument("--no-llm", action="store_true", help="只跑规则引擎，跳过 AI 复核")
+    pp.add_argument("--execute", action="store_true",
+                    help="（仅 --from-lingxing）巡检后对候选逐条人工审批并写入；默认 dry-run，真写需 ivyea lingxing operate on")
+    pp.add_argument("--yes", action="store_true", help="跳过逐条确认（仍受 operate 开关约束）")
     pp.set_defaults(func=_cmd_patrol)
 
     pa = sub.add_parser("apply", help="审核制执行巡检建议（默认 dry-run；--execute 才真写）")
@@ -719,8 +787,9 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--yes", action="store_true", help="跳过逐条确认，批准所有未被护栏拦截的动作")
     pa.set_defaults(func=_cmd_apply)
 
-    plx = sub.add_parser("lingxing", help="领星 OpenAPI：setup（配凭据）/ probe（自检）/ sellers（列店铺）")
-    plx.add_argument("action", choices=["setup", "probe", "sellers"])
+    plx = sub.add_parser("lingxing", help="领星 OpenAPI：setup / probe / sellers / operate <on|off|status>")
+    plx.add_argument("action", choices=["setup", "probe", "sellers", "operate"])
+    plx.add_argument("value", nargs="?", help="operate 的 on/off/status")
     plx.set_defaults(func=_cmd_lingxing)
 
     pu = sub.add_parser("audit", help="执行审计 / 回滚")

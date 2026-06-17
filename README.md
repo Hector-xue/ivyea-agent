@@ -213,7 +213,22 @@ ivyea lingxing sellers      # 列店铺，拿 sid
 ivyea patrol --from-lingxing --sid 1863 --days 30   # 店铺维度只读巡检
 ```
 窗口逐日聚合（丢最近 N 天归因），按否词/收割/降bid/加bid/加预算分区出候选，每条带规则+
-指标+理由，历史否决/冷却自动拦截。**只读**：不写广告（写入是后续里程碑）。
+指标+理由，历史否决/冷却自动拦截。
+
+### 写入执行（审批制，默认 dry-run）
+
+```bash
+ivyea patrol --from-lingxing --sid 1863 --days 30 --execute   # 巡检 + 逐条人工审批
+ivyea lingxing operate status      # 看写入总开关（默认 关）
+ivyea lingxing operate on          # 开启真写（默认 120 分钟后自动关）
+ivyea lingxing operate off         # 关回 dry-run
+ivyea audit list                   # 看写入审计
+ivyea audit rollback <审计ID>      # 一键回滚（否词→归档；调bid/预算→还原旧值）
+```
+写入支持：**否词 / 关键词调bid / 活动预算**（收割为建议项，不自动写）。三重硬闸：
+① 每条**人工逐条审批**（`[1]是 [2]本会话都允许 [3]否 [4]改 [5]全停`）；② **operate 开关**默认关，
+不开就只 dry-run；③ **幅度 ≤±20%** 硬闸 + 历史否决/冷却拦截。写前抓快照，失败自动熔断关开关。
+请求体/路由/回滚逐字段对齐领星官方 + ivyea-ops 生产实现。
 
 ## 设计 / 路线图
 
@@ -224,13 +239,13 @@ ivyea patrol --from-lingxing --sid 1863 --days 30   # 店铺维度只读巡检
 
 ## 状态（诚实盘点 2026-06）
 
-**可用**：CSV 只读巡检；领星 OpenAPI 店铺维度只读巡检（真链路已实测：令牌+11店+报表 code=0）；通用 MCP 客户端；权限审批引擎；SQLite 记忆；pytest 测试集（28 项）。
+**可用**：CSV 只读巡检；领星 OpenAPI 店铺维度巡检（真链路已实测：令牌+11店+报表 code=0）；**领星写入执行（否词/调bid/预算 + 审批 + operate开关 + 幅度闸 + 审计回滚）**——dry-run 与请求体已端到端验证，逻辑由 41 项 pytest 覆盖；通用 MCP 客户端；权限审批引擎；SQLite 记忆。
 
 **尚未实现 / 待办**（不再标“✅完成”）：
+- 领星**真实写入**仅 dry-run/单测验证，**尚未在生产真按下写**（需活跃广告店 + 你授权开 operate 实测）。
 - 流式输出（当前 provider 全非流式）；上下文压缩；成本/token 核算。
 - Anthropic 原生 + prompt caching；Gemini/登录制。
-- 领星**写入执行**（否词/调bid 真写 + 审批 + 回滚）——下一里程碑。
 - 记忆摘要压缩 / 会话转录回忆 / 自策展。
-- DeepSeek 主脑**对话式工具循环**已验证契约（自然语言→tool_calls），但端到端对话体验仍在打磨。
+- DeepSeek 主脑**对话式工具循环**已验证契约（自然语言→tool_calls），端到端对话体验仍在打磨。
 
-路线（总纲 M0–M7）：M0 止血+核实 ✅ → M1 领星适配层（只读）✅ → M1+ 内核重做(流式/成本/Plan) → 模型层 → 工具能力 → 记忆 → 交互/视觉 → 工程化 → 嵌入 IvyeaOps。
+路线（总纲 M0–M7）：M0 止血+核实 ✅ → M1 领星适配层（只读）✅ → M2 领星写入执行+审批 ✅ → M1+ 内核重做(流式/成本/Plan) → 模型层 → 工具能力 → 记忆 → 交互/视觉 → 工程化 → 嵌入 IvyeaOps。

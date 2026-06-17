@@ -290,7 +290,7 @@ def run_store(sid: int, days: Optional[int] = None) -> dict[str, Any]:
                 ok, why = guard(info.get("name") or cid, "budget")
                 new_bud = round(bud * (1 + step), 2)
                 cands.append({
-                    "lever": "加预算", "op_type": "campaign_budget", "sid": sid,
+                    "lever": "加预算", "op_type": "campaign_budget", "sid": sid, "target_id": cid,
                     "target_name": info.get("name") or cid, "metrics": m,
                     "opt_target": tgt(), "opt_breakeven": brk(), "blocked": not ok, "block_reason": why,
                     "current": {"daily_budget": bud}, "proposed": {"daily_budget": new_bud},

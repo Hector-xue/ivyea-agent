@@ -22,6 +22,7 @@ class ToolContext:
     last_detail_csv: str = ""
     asin: str = ""
     actions: list = field(default_factory=list)
+    lingxing_result: dict = field(default_factory=dict)   # 最近一次领星巡检候选
     perm: permission.PermissionState = field(default_factory=permission.PermissionState)
 
 
@@ -79,8 +80,8 @@ def _t_run_patrol(args: dict, ctx: ToolContext) -> str:
             result = opt.run_store(int(args["sid"]), days=int(args.get("days", 30)))
         except LingXingError as e:
             return f"领星拉数失败：{e}"
-        # M1 只读：返回候选报告文本，不进入可执行动作队列（写入是后续里程碑）
         ctx.asin = f"sid:{args['sid']}"
+        ctx.lingxing_result = result   # 供 execute_actions 写入
         return lrep.render(result, color=False)
     if args.get("from_mcp"):
         from .mcp_source import fetch_to_csv
@@ -125,7 +126,41 @@ def _t_propose_actions(args: dict, ctx: ToolContext) -> str:
     return "\n".join(lines)
 
 
+def _t_execute_lingxing(ctx: ToolContext) -> str:
+    """领星候选：逐条人工审批 → 写入（默认 dry-run；真写需 operate 开关）。"""
+    from . import lingxing_write as lw
+    writable = []
+    for c in ctx.lingxing_result.get("candidates", []):
+        if c.get("blocked"):
+            continue
+        intent = lw.candidate_to_intent(c)
+        if intent and intent.get("sid") is not None:
+            writable.append(intent)
+    if not writable:
+        return "没有可写入的候选（收割为建议项、被拦截项不写）。"
+    live = lw.operate_active()
+    results = [f"可写 {len(writable)} 个；operate 开关：{'开（真实写入）' if live else '关（dry-run）'}。"]
+    for intent in writable:
+        decision = permission.request_intent(intent, lw.preview(intent), ctx.perm)
+        if decision == permission.ABORT:
+            results.append("用户终止。")
+            break
+        if decision == permission.DENY:
+            memory.record_decision(f"sid:{intent.get('sid')}",
+                                   intent.get("keyword_text") or str(intent.get("target_name")),
+                                   lw._kind_for_memory(intent["op_type"]), "reject")
+            results.append(f"跳过：{lw.preview(intent)}")
+            continue
+        r = lw.execute(intent, dry_run=not live)
+        results.append(("✓ " if r["ok"] else "✗ ") + r["detail"])
+    if not live:
+        results.append("（dry-run 预览；真写需在终端 `ivyea lingxing operate on`。）")
+    return "\n".join(results)
+
+
 def _t_execute_actions(args: dict, ctx: ToolContext) -> str:
+    if ctx.lingxing_result:
+        return _t_execute_lingxing(ctx)
     ex = [a for a in ctx.actions if a.executable]
     if not ex:
         return "没有可执行动作（先 propose_actions）。"
