@@ -5,7 +5,7 @@ M1 不做缓存层，直连取数；行抽取兼容 data 为 list 或 data.{list
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from .lingxing_openapi import LingXingError, call
 

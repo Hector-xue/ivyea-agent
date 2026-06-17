@@ -84,7 +84,6 @@ def _render(md: str) -> str:
     lines = md.splitlines()
     out: list[str] = []
     in_code = False
-    code_lang = ""
     table_buf: list[str] = []
 
     def _flush_table():
@@ -96,11 +95,7 @@ def _render(md: str) -> str:
         fence = re.match(r"^\s*```(\w*)", ln)
         if fence:
             _flush_table()
-            if not in_code:
-                in_code = True
-                code_lang = fence.group(1)
-            else:
-                in_code = False
+            in_code = not in_code
             continue
         if in_code:
             out.append(f"{_CODE_BG}  {ln:<60}{_X}")
