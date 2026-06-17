@@ -539,6 +539,7 @@ SLASH_COMMANDS = [
     ("/approve", "批准并退出计划模式，继续执行"),
     ("/cost", "本会话 token 用量与成本估算"),
     ("/compact", "压缩上下文（LLM 摘要历史，省 token）"),
+    ("/init", "生成账户指令模板 AGENTS.md（长期打法/边界，自动注入）"),
     ("/raw", "切换 Markdown 渲染 / 原始流式输出"),
     ("/clear", "清空当前对话上下文"),
     ("/exit", "退出 (亦可 /quit)"),
@@ -621,7 +622,7 @@ def _print_welcome_box(lines: list, width: int = 58) -> None:
 
 
 def _cmd_chat(args: argparse.Namespace) -> int:
-    from . import agent_loop, agent_tools, config as cfg, pricing, sessions, context as ctx_mod, markdown
+    from . import agent_loop, agent_tools, config as cfg, pricing, sessions, context as ctx_mod, markdown, memory
     from .providers import from_settings, LLMError
 
     def _label() -> str:
@@ -632,9 +633,12 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         from_mcp=args.from_mcp, execute=args.execute, workspace=os.getcwd(),
         protected=[w for w in (args.protected or "").split(",") if w.strip()])
     meter = pricing.UsageMeter()
+    instructions = memory.load_instructions(os.getcwd())   # USER.md/AGENTS.md 持久指令
 
     def _sys_msg() -> dict:
         content = agent_loop.SYSTEM_PROMPT + (agent_loop.PLAN_NOTE if ctx.plan_mode else "")
+        if instructions:
+            content += "\n\n[长期指令/画像]\n" + instructions
         return {"role": "system", "content": content}
 
     # ── resume / continue ─────────────────────────────────────────────
@@ -728,8 +732,19 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             provider = from_settings(cfg.get_model_config(), ak)
             messages, summary = ctx_mod.compact(messages, provider)
             after = sum(len(str(m.get('content') or '')) for m in messages)
+            if summary:
+                memory.remember_summary(summary, sid)
             _persist()
-            print(f"已压缩上下文（约 {before}→{after} 字）。" if summary else "上下文较短，无需压缩。")
+            print(f"已压缩上下文（约 {before}→{after} 字），摘要已入库。" if summary else "上下文较短，无需压缩。")
+            continue
+        if line == "/init":
+            p = memory.init_agents(str(cfg.IVYEA_DIR / "AGENTS.md"))
+            if p[0]:
+                print(f"已生成账户指令模板：{p[1]}\n填好后重开对话即自动注入。")
+            else:
+                print(f"已存在：{p[1]}（未覆盖）。`ivyea config edit` 或直接编辑它。")
+            instructions = memory.load_instructions(os.getcwd())
+            messages[0] = _sys_msg()
             continue
         if line == "/mcp":
             servers = cfg.load_mcp().get("mcpServers", {})
@@ -797,11 +812,18 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             if c:
                 print(f"{_C['d']}  (本轮 ¥{c:.4f} · 累计 ¥{meter.cost:.4f}){_C['x']}")
             print()
-            # 自动压缩 + 落盘
+            # 记忆：会话转录入库 + 自策展提示
+            memory.index_turn("user", line, sid)
+            memory.index_turn("assistant", out.get("text", ""), sid)
+            hint = memory.nudge_hint(out.get("text", ""))
+            if hint:
+                print(f"{_C['d']}  💡 {hint}{_C['x']}")
+            # 自动压缩 + 摘要入库 + 落盘
             if ctx_mod.should_compact(int((out.get('usage') or {}).get('prompt_tokens') or 0)):
                 messages, _s = ctx_mod.compact(messages, provider)
                 if _s:
-                    print(f"{_C['d']}（上下文较长，已自动压缩以省 token）{_C['x']}")
+                    memory.remember_summary(_s, sid)
+                    print(f"{_C['d']}（上下文较长，已自动压缩并入库摘要以省 token）{_C['x']}")
             _persist()
         except LLMError as e:
             print(f"\n[模型错误] {e}")
