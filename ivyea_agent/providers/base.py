@@ -57,6 +57,12 @@ def from_settings(model_cfg: dict, api_key: str) -> LLMProvider:
     if kind == "openai":
         from .openai_compat import OpenAICompatProvider
         return OpenAICompatProvider(api_key, model, base_url)
+    if kind == "anthropic":
+        from .anthropic_provider import AnthropicProvider
+        # 只认 anthropic 自有网关；忽略切换残留的他家 base_url（默认走 api.anthropic.com）
+        raw = (model_cfg.get("base_url") or model_cfg.get("base") or "")
+        gw = raw if "anthropic" in raw.lower() else ""
+        return AnthropicProvider(api_key, model, gw)
     if kind == "native":
         raise LLMError(f"{model_cfg.get('label', model)} 走厂商原生 API，适配规划中；"
                        "当前可用：OpenAI 兼容类（OpenAI/DeepSeek/通义/Kimi/GLM/豆包/MiniMax/OpenRouter/自定义）。")

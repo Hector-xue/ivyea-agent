@@ -62,7 +62,7 @@ def _model_picker() -> None:
     elif m["kind"] == "openai":
         model = _ask("model 名（回车用默认）", model)
     config.apply_model(m, model=model, base_url=base)
-    if m["kind"] == "openai":
+    if m["kind"] in ("openai", "anthropic"):
         cur = "已配置" if config.get_active_key() else "未配置"
         nk = _ask_secret(f"{m['label']} 的 API key（{m['key_env']}，当前{cur}；回车跳过 / - 清空）")
         if nk == "-":
@@ -73,7 +73,7 @@ def _model_picker() -> None:
               f"{'已配 key' if config.get_active_key() else '未配 key'}")
     else:
         print(f"已选 {m['label']}，但{m.get('note', '该类型规划中')}。"
-              f"当前可直接用：OpenAI 兼容类（DeepSeek/通义/Kimi/GLM/豆包/MiniMax/OpenRouter/OpenAI/自定义）。")
+              f"当前可直接用：Claude 原生 + OpenAI 兼容类（DeepSeek/通义/Kimi/GLM/豆包/MiniMax/OpenRouter/OpenAI/自定义）。")
 
 
 def _config_wizard() -> int:

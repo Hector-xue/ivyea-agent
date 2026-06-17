@@ -1,10 +1,11 @@
 """主流模型清单（国内 + 国外 + 登录制），供 `ivyea model` / `/model` 选择。
 
 kind:
-  openai   —— OpenAI 兼容端点（key 鉴权）。OpenAI 官方/DeepSeek/通义/Kimi/GLM/豆包/
-              MiniMax/OpenRouter/自定义 都走这条，现已可用。
-  native   —— 厂商原生 API（Anthropic/Gemini），适配规划中。
-  login    —— 登录制（Codex 用 ChatGPT 会员、Claude 订阅），免 API key，接入规划中。
+  openai    —— OpenAI 兼容端点（key 鉴权）。OpenAI 官方/DeepSeek/通义/Kimi/GLM/豆包/
+               MiniMax/OpenRouter/自定义 都走这条，现已可用。
+  anthropic —— Claude 原生（官方 SDK，含 prompt caching），现已可用（需 ANTHROPIC_API_KEY）。
+  native    —— 其它厂商原生 API（Gemini），适配规划中。
+  login     —— 登录制（Codex 用 ChatGPT 会员、Claude 订阅），免 API key，接入规划中。
 """
 from __future__ import annotations
 
@@ -15,8 +16,11 @@ MODELS: list[dict[str, Any]] = [
     # ── 国外（OpenAI 兼容，可用）──
     {"id": "gpt-4o",          "label": "OpenAI GPT-4o",            "kind": "openai", "model": "gpt-4o",              "base": "https://api.openai.com/v1",  "key_env": "OPENAI_API_KEY",  "group": "国外"},
     {"id": "gpt-4o-mini",     "label": "OpenAI GPT-4o mini（便宜）", "kind": "openai", "model": "gpt-4o-mini",         "base": "https://api.openai.com/v1",  "key_env": "OPENAI_API_KEY",  "group": "国外"},
+    # ── 国外（Anthropic 原生，可用，高端档）──
+    {"id": "claude-opus",     "label": "Claude Opus 4.8（最强）",   "kind": "anthropic", "model": "claude-opus-4-8",   "key_env": "ANTHROPIC_API_KEY", "group": "国外"},
+    {"id": "claude-sonnet",   "label": "Claude Sonnet 4.6（均衡）", "kind": "anthropic", "model": "claude-sonnet-4-6", "key_env": "ANTHROPIC_API_KEY", "group": "国外"},
+    {"id": "claude-haiku",    "label": "Claude Haiku 4.5（快/省）", "kind": "anthropic", "model": "claude-haiku-4-5",  "key_env": "ANTHROPIC_API_KEY", "group": "国外"},
     # ── 国外（原生 API，规划中）──
-    {"id": "claude-sonnet",   "label": "Anthropic Claude Sonnet",  "kind": "native", "model": "claude-3-7-sonnet-latest", "key_env": "ANTHROPIC_API_KEY", "group": "国外", "note": "原生 API 适配规划中"},
     {"id": "gemini",          "label": "Google Gemini 2.5",        "kind": "native", "model": "gemini-2.5-pro",      "key_env": "GEMINI_API_KEY",  "group": "国外", "note": "原生 API 适配规划中"},
     # ── 国内（OpenAI 兼容，可用）──
     {"id": "deepseek-chat",   "label": "DeepSeek V3（deepseek-chat）", "kind": "openai", "model": "deepseek-chat",     "base": "https://api.deepseek.com",   "key_env": "DEEPSEEK_API_KEY", "group": "国内"},

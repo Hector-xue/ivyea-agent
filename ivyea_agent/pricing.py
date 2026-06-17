@@ -10,9 +10,13 @@ from typing import Any
 from . import config
 
 # 模型 id → {input, cached_input, output}（¥ / 1M tokens，近似值）
+# Anthropic 官方价为美元，按 ≈7.2 汇率折算（cached_input 取官方 ~0.1× 读取价）
 _PRICES: dict[str, dict[str, float]] = {
     "deepseek-chat": {"input": 2.0, "cached_input": 0.5, "output": 8.0},
     "deepseek-reasoner": {"input": 4.0, "cached_input": 1.0, "output": 16.0},
+    "claude-opus-4-8": {"input": 36.0, "cached_input": 3.6, "output": 180.0},
+    "claude-sonnet-4-6": {"input": 21.6, "cached_input": 2.16, "output": 108.0},
+    "claude-haiku-4-5": {"input": 7.2, "cached_input": 0.72, "output": 36.0},
     "default": {"input": 4.0, "cached_input": 1.0, "output": 12.0},
 }
 
