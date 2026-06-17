@@ -23,6 +23,7 @@ class ToolContext:
     asin: str = ""
     actions: list = field(default_factory=list)
     lingxing_result: dict = field(default_factory=dict)   # 最近一次领星巡检候选
+    plan_mode: bool = False                                # 计划模式：禁止写入执行
     perm: permission.PermissionState = field(default_factory=permission.PermissionState)
 
 
@@ -159,6 +160,8 @@ def _t_execute_lingxing(ctx: ToolContext) -> str:
 
 
 def _t_execute_actions(args: dict, ctx: ToolContext) -> str:
+    if ctx.plan_mode:
+        return "当前为计划模式（只读）：不执行写入。请先给用户行动计划，待 /approve 批准后再执行。"
     if ctx.lingxing_result:
         return _t_execute_lingxing(ctx)
     ex = [a for a in ctx.actions if a.executable]

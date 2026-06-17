@@ -535,6 +535,9 @@ SLASH_COMMANDS = [
     ("/mcp", "列出已配置的 MCP 服务器"),
     ("/tools", "列出 Agent 可用工具"),
     ("/memory", "记忆：状态/最近巡检；/memory <词> 检索"),
+    ("/plan", "进入/退出计划模式（只读，不写入）"),
+    ("/approve", "批准并退出计划模式，继续执行"),
+    ("/cost", "本会话 token 用量与成本估算"),
     ("/clear", "清空当前对话上下文"),
     ("/exit", "退出 (亦可 /quit)"),
 ]
@@ -594,7 +597,7 @@ def _print_welcome_box(lines: list, width: int = 58) -> None:
 
 
 def _cmd_chat(args: argparse.Namespace) -> int:
-    from . import agent_loop, agent_tools, config as cfg
+    from . import agent_loop, agent_tools, config as cfg, pricing
     from .providers import from_settings, LLMError
 
     def _label() -> str:
@@ -604,7 +607,13 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     ctx = agent_tools.ToolContext(
         from_mcp=args.from_mcp, execute=args.execute,
         protected=[w for w in (args.protected or "").split(",") if w.strip()])
-    messages = [{"role": "system", "content": agent_loop.SYSTEM_PROMPT}]
+    meter = pricing.UsageMeter()
+
+    def _sys_msg() -> dict:
+        content = agent_loop.SYSTEM_PROMPT + (agent_loop.PLAN_NOTE if ctx.plan_mode else "")
+        return {"role": "system", "content": content}
+
+    messages = [_sys_msg()]
 
     keyst = "已配置" if cfg.get_active_key() else "未配 key（/model 配置后可对话）"
     mode = "真实写" if args.execute else "dry-run"
@@ -619,8 +628,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     from . import chat_input
 
     def _status() -> str:
-        return (f" ivyea · {_label()} · "
-                f"{'真实写' if args.execute else 'dry-run'} · /help 命令、Tab 补全、↑↓历史 ")
+        plan = "计划模式 · " if ctx.plan_mode else ""
+        cost = f"¥{meter.cost:.4f} · " if meter.turns else ""
+        return (f" ivyea · {_label()} · {plan}"
+                f"{'真实写' if args.execute else 'dry-run'} · {cost}/help 命令、Tab 补全 ")
 
     ci = chat_input.ChatInput(SLASH_COMMANDS, _status)
 
@@ -637,8 +648,23 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if line in ("/help", "/", "/?"):
             print(_help_text()); continue
         if line == "/clear":
-            messages = [{"role": "system", "content": agent_loop.SYSTEM_PROMPT}]
+            messages = [_sys_msg()]
             print("（已清空对话上下文）"); continue
+        if line == "/plan":
+            ctx.plan_mode = not ctx.plan_mode
+            messages[0] = _sys_msg()
+            print("已进入计划模式（只读，不写入；/approve 批准后执行）。" if ctx.plan_mode
+                  else "已退出计划模式。"); continue
+        if line == "/approve":
+            if ctx.plan_mode:
+                ctx.plan_mode = False
+                messages[0] = _sys_msg()
+                print("已批准，退出计划模式。说“继续/执行”让我落地计划。")
+            else:
+                print("当前不在计划模式。")
+            continue
+        if line == "/cost":
+            print(meter.summary() if meter.turns else "本会话还没有模型调用。"); continue
         if line == "/mcp":
             servers = cfg.load_mcp().get("mcpServers", {})
             print("MCP 服务器: " + (", ".join(servers) if servers else "(无，ivyea mcp add)")); continue
@@ -688,11 +714,16 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             continue
         messages.append({"role": "user", "content": line})
         try:
-            provider = from_settings(cfg.get_model_config(), api_key)
-            reply = agent_loop.run_turn(provider, ctx, messages)
-            print(f"\n{_C['c']}●{_C['x']} {reply}\n")
+            mcfg = cfg.get_model_config()
+            provider = from_settings(mcfg, api_key)
+            print(f"{_C['c']}●{_C['x']} ", end="", flush=True)
+            out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""))
+            c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
+            if c:
+                print(f"{_C['d']}  (本轮 ¥{c:.4f} · 累计 ¥{meter.cost:.4f}){_C['x']}")
+            print()
         except LLMError as e:
-            print(f"[模型错误] {e}")
+            print(f"\n[模型错误] {e}")
             messages.pop()  # 撤回这条 user，避免污染上下文
 
 
