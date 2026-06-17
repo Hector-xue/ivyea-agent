@@ -159,6 +159,19 @@ def _in_cooldown(sid: int, name: str, cooldown_days: int) -> bool:
         return False
 
 
+def aggregate_terms(sid: int, days: int = 14) -> dict[str, dict[str, Any]]:
+    """按搜索词聚合窗口指标 {query: {spend, orders, clicks}}，供影子模式回测拉「后续真实表现」。"""
+    excl = int(_cfg("lingxing_opt_exclude_recent_days") or 2)
+    dates = _window_dates(int(days), excl)
+    st = _agg(sid, "sp_search_term_report", dates,
+              lambda r: str(r.get("query") or "") or None, capture=())
+    out: dict[str, dict[str, Any]] = {}
+    for q, bk in st.items():
+        m = _metrics(bk["_b"])
+        out[q] = {"spend": m["spend"], "orders": m["orders"], "clicks": m["clicks"]}
+    return out
+
+
 def run_store(sid: int, days: Optional[int] = None, progress: Optional[Callable] = None) -> dict[str, Any]:
     """对一个店铺跑只读规则引擎，返回 {sid, window_days, margin, target_acos, candidates...}。"""
     factor = _f(_cfg("lingxing_target_acos_factor")) or 0.7

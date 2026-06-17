@@ -367,7 +367,15 @@ def _patrol_lingxing(args: argparse.Namespace) -> int:
     md_path = report.write_md(lrep.render_md(result), out_dir, asin=f"sid{args.sid}")
     print(f"\n[已保存] {md_path}", file=sys.stderr)
 
+    from . import shadow
+    n = shadow.record(args.sid, result.get("candidates", []))   # 影子台账：记建议
+    if n:
+        print(f"{_C['d']}[影子] 已记录 {n} 条建议入台账，过些天 `ivyea shadow report --sid {args.sid}` 看若照做的收益。{_C['x']}", file=sys.stderr)
+
     if getattr(args, "execute", False):
+        if shadow.shadow_mode():
+            print(f"{_C['d']}[影子模式] 只记不写——已记录建议，未执行任何写操作。{_C['x']}", file=sys.stderr)
+            return 0
         return _execute_lingxing_candidates(result, yes=getattr(args, "yes", False))
     return 0
 
@@ -470,6 +478,41 @@ def _cmd_lingxing(args: argparse.Namespace) -> int:
             print(f"领星写入开关：{'开' if lw.operate_active() else '关'}")
         return 0
     return 2
+
+
+def _cmd_shadow(args: argparse.Namespace) -> int:
+    from . import shadow
+    if args.action == "on":
+        shadow.set_shadow(True); print("影子模式已开：巡检只记建议、不写广告。攒几天用 shadow report 看收益。"); return 0
+    if args.action == "off":
+        shadow.set_shadow(False); print("影子模式已关：可正常审批写入（仍需 operate 开关）。"); return 0
+    if args.action == "list":
+        rows = shadow.list_recs(args.sid or "", limit=50)
+        if not rows:
+            print("（影子台账为空，先跑几次 ivyea patrol --from-lingxing）"); return 0
+        import time as _t
+        for r in rows:
+            print(f"  {_t.strftime('%m-%d', _t.localtime(r['ts']))} sid{r['sid']} {r['lever']}「{r['target']}」"
+                  f" {r['clicks']:.0f}点击/{r['orders']:.0f}单/¥{r['spend']:.2f}")
+        return 0
+    # report
+    if not args.sid:
+        print("用法：ivyea shadow report --sid <店铺SID> [--days 14]", file=sys.stderr); return 2
+    from . import lingxing_optimizer as opt
+    from .lingxing_openapi import LingXingError, is_configured
+    if not is_configured():
+        print("未配置领星 OpenAPI，无法拉现况回测。", file=sys.stderr); return 2
+    recs = shadow.list_recs(str(args.sid), limit=500)
+    if not recs:
+        print("该店铺影子台账为空。"); return 0
+    try:
+        print(f"[影子] 拉取 sid={args.sid} 近 {args.days} 天搜索词现况回测…", file=sys.stderr)
+        current = opt.aggregate_terms(int(args.sid), days=args.days)
+    except LingXingError as e:
+        print(f"[领星错误] {e}", file=sys.stderr); return 1
+    result = shadow.evaluate(recs, current)
+    print(shadow.summary_text(str(args.sid), result))
+    return 0
 
 
 def _cmd_apply(args: argparse.Namespace) -> int:
@@ -1008,6 +1051,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     pob = sub.add_parser("onboard", help="首次运行引导（选模型/配 key/可选领星）")
     pob.set_defaults(func=_cmd_onboard)
+
+    psh = sub.add_parser("shadow", help="影子模式：on/off（只记不写）/ list / report（回测若照做的收益）")
+    psh.add_argument("action", choices=["on", "off", "list", "report"])
+    psh.add_argument("--sid", help="店铺 SID（report/list）")
+    psh.add_argument("--days", type=int, default=14, help="回测窗口天数，默认 14")
+    psh.set_defaults(func=_cmd_shadow)
 
     pmo = sub.add_parser("model", help="查看/配置主脑模型（交互；或 ivyea model deepseek:deepseek-chat）")
     pmo.add_argument("spec", nargs="?", help="provider:model，如 deepseek:deepseek-chat")

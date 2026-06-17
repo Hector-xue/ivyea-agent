@@ -84,6 +84,8 @@ def _t_run_patrol(args: dict, ctx: ToolContext) -> str:
             return f"领星拉数失败：{e}"
         ctx.asin = f"sid:{args['sid']}"
         ctx.lingxing_result = result   # 供 execute_actions 写入
+        from . import shadow
+        shadow.record(args["sid"], result.get("candidates", []))   # 影子台账
         return lrep.render(result, color=False)
     if args.get("from_mcp"):
         from .mcp_source import fetch_to_csv
@@ -130,7 +132,9 @@ def _t_propose_actions(args: dict, ctx: ToolContext) -> str:
 
 def _t_execute_lingxing(ctx: ToolContext) -> str:
     """领星候选：逐条人工审批 → 写入（默认 dry-run；真写需 operate 开关）。"""
-    from . import lingxing_write as lw
+    from . import lingxing_write as lw, shadow
+    if shadow.shadow_mode():
+        return "影子模式开：只记不写。建议已入台账，用 `ivyea shadow report` 看若照做的收益；关掉用 `ivyea shadow off`。"
     writable = []
     for c in ctx.lingxing_result.get("candidates", []):
         if c.get("blocked"):
