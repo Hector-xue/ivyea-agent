@@ -195,8 +195,9 @@ def t_run_command(args: dict, ctx) -> str:
     command = args.get("command", "")
     if not command:
         return "command 为空。"
-    return _run(["bash", "-lc", command], args, ctx, "run_command",
-                "运行命令：" + _truncate(command, 400))
+    import os as _os
+    shell = ["cmd", "/c", command] if _os.name == "nt" else ["bash", "-lc", command]
+    return _run(shell, args, ctx, "run_command", "运行命令：" + _truncate(command, 400))
 
 
 def t_todo_write(args: dict, ctx) -> str:

@@ -5,9 +5,51 @@
 """
 from __future__ import annotations
 
+import json
+import time
 from typing import Any
 
 from . import config
+
+_SPEND = config.IVYEA_DIR / "spend.json"
+
+
+def _today() -> str:
+    return time.strftime("%Y-%m-%d")
+
+
+def today_spend() -> float:
+    try:
+        return float(json.loads(_SPEND.read_text(encoding="utf-8")).get(_today(), 0.0))
+    except Exception:
+        return 0.0
+
+
+def add_spend(cny: float) -> float:
+    """累加今日花费(¥)，只保留最近 30 天。返回今日累计。"""
+    if not cny:
+        return today_spend()
+    try:
+        data = json.loads(_SPEND.read_text(encoding="utf-8")) if _SPEND.exists() else {}
+    except Exception:
+        data = {}
+    data[_today()] = float(data.get(_today(), 0.0)) + float(cny)
+    for k in sorted(data)[:-30]:   # 裁掉 30 天前
+        data.pop(k, None)
+    try:
+        config.ensure_dirs()
+        _SPEND.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return data[_today()]
+
+
+def daily_limit() -> float:
+    """每日成本上限(¥)，0=不限。"""
+    try:
+        return float(config.get_setting("daily_cost_limit_cny", 0) or 0)
+    except Exception:
+        return 0.0
 
 # 模型 id → {input, cached_input, output}（¥ / 1M tokens，近似值）
 # Anthropic 官方价为美元，按 ≈7.2 汇率折算（cached_input 取官方 ~0.1× 读取价）

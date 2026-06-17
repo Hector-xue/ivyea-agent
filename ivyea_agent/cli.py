@@ -76,6 +76,41 @@ def _model_picker() -> None:
               f"当前可直接用：Claude 原生 + OpenAI 兼容类（DeepSeek/通义/Kimi/GLM/豆包/MiniMax/OpenRouter/OpenAI/自定义）。")
 
 
+def _cmd_onboard(args: argparse.Namespace = None) -> int:
+    """首次运行引导：三步配好就能用。"""
+    config.ensure_dirs()
+    print(f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}")
+    print(f"\n{_C['b']}欢迎使用 Ivyea Agent{_C['x']} —— 自托管的亚马逊运营对话式 Agent。")
+    print(f"{_C['d']}三步配好就能用；任何一步都可回车跳过，之后用 ivyea model / lingxing setup 再配。{_C['x']}\n")
+
+    print(f"{_C['b']}① 选主脑模型并配 API key{_C['x']}（推荐 DeepSeek：便宜、工具调用稳）")
+    _model_picker()
+
+    print(f"\n{_C['b']}② 接领星 OpenAPI（可选，拉真实广告数据/写回）{_C['x']}")
+    if _ask("现在配领星吗？(y/N)").strip().lower().startswith("y"):
+        host = _ask("OpenAPI Host", config.get_setting("lingxing_openapi_host", "https://openapi.lingxing.com"))
+        appid = _ask("appId", config.get_setting("lingxing_openapi_appid", ""))
+        secret = _ask_secret("appSecret（回车跳过）")
+        config.set_setting("lingxing_openapi_host", host.strip())
+        config.set_setting("lingxing_openapi_appid", appid.strip())
+        if secret:
+            config.set_env_key("LINGXING_OPENAPI_SECRET", secret.strip())
+        print(f"{_C['d']}已存。`ivyea lingxing probe` 可自检；`ivyea lingxing sellers` 查店铺。{_C['x']}")
+    else:
+        print(f"{_C['d']}（跳过；无领星也能用 CSV：ivyea patrol 报告.csv）{_C['x']}")
+
+    print(f"\n{_C['b']}③ 写账户打法到 AGENTS.md（可选，长期指令，对话自动注入）{_C['x']}")
+    if _ask("现在生成 AGENTS.md 模板吗？(y/N)").strip().lower().startswith("y"):
+        from . import memory
+        created, p = memory.init_agents(str(config.IVYEA_DIR / "AGENTS.md"))
+        print(f"{_C['d']}{'已生成 ' + p + '，填好后对话自动遵守。' if created else '已存在 ' + p}{_C['x']}")
+
+    ready = "已配 key，可直接对话" if config.get_active_key() else "未配 key，对话前请 ivyea model 配置"
+    print(f"\n{_C['g']}✓ 配置完成（{ready}）。{_C['x']}")
+    print(f"{_C['d']}敲 {_C['c']}ivyea{_C['d']} 进对话；{_C['c']}/help{_C['d']} 看命令。{_C['x']}")
+    return 0
+
+
 def _config_wizard() -> int:
     """配置向导：站点 + 目标 ACoS + 模型选择（含密钥）。"""
     config.ensure_dirs()
@@ -314,10 +349,16 @@ def _patrol_lingxing(args: argparse.Namespace) -> int:
     if not args.sid:
         print("--from-lingxing 需要 --sid <店铺SID>（用 `ivyea lingxing sellers` 查）。", file=sys.stderr)
         return 2
+    def _progress(label, i, total):
+        bar = "█" * (i * 16 // total) + "░" * (16 - i * 16 // total)
+        sys.stderr.write(f"\r[领星] {label} {bar} {i}/{total} 天")
+        sys.stderr.flush()
+        if i == total:
+            sys.stderr.write("\n")
     try:
-        print(f"[领星] 店铺 sid={args.sid} 拉取近 {args.days} 天广告报表并跑规则引擎（逐日聚合，可能耗时）…",
+        print(f"[领星] 店铺 sid={args.sid} 拉取近 {args.days} 天广告报表（逐日聚合，已缓存的秒回）…",
               file=sys.stderr)
-        result = opt.run_store(int(args.sid), days=args.days)
+        result = opt.run_store(int(args.sid), days=args.days, progress=_progress)
     except LingXingError as e:
         print(f"[领星错误] {e}", file=sys.stderr)
         return 1
@@ -408,6 +449,13 @@ def _cmd_lingxing(args: argparse.Namespace) -> int:
         print(f"共 {len(sellers)} 个店铺：")
         for s in sellers:
             print(f"  sid={s.get('sid')}  {s.get('name')}  {s.get('country') or ''}")
+        return 0
+    if args.action == "cache":
+        from . import lingxing_cache
+        if (args.value or "").lower() == "clear":
+            print(f"已清空领星缓存（{lingxing_cache.clear()} 条）。")
+        else:
+            print("用法：ivyea lingxing cache clear")
         return 0
     if args.action == "operate":
         from . import lingxing_write as lw
@@ -625,6 +673,12 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     from . import agent_loop, agent_tools, config as cfg, pricing, sessions, context as ctx_mod, markdown, memory
     from .providers import from_settings, LLMError
 
+    # 首次运行：无配置 → 先走引导
+    if not cfg.SETTINGS_FILE.exists() and not cfg.get_active_key() and sys.stdin.isatty():
+        print(f"{_C['d']}（检测到首次运行，先带你配置）{_C['x']}")
+        _cmd_onboard(args)
+        print()
+
     def _label() -> str:
         s = cfg.load_settings()
         return s.get("label", s.get("provider", "deepseek"))
@@ -722,7 +776,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 print("当前不在计划模式。")
             continue
         if line == "/cost":
-            print(meter.summary() if meter.turns else "本会话还没有模型调用。"); continue
+            lim = pricing.daily_limit()
+            tail = f" · 今日 ¥{pricing.today_spend():.4f}" + (f"/¥{lim:.2f} 上限" if lim > 0 else "（无上限，可 config set daily_cost_limit_cny）")
+            print((meter.summary() if meter.turns else "本会话还没有模型调用。") + tail); continue
         if line == "/raw":
             render_md = not render_md
             print(f"已切换为 {'原始流式' if not render_md else 'Markdown 渲染'} 输出。"); continue
@@ -795,6 +851,12 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if not api_key:
             print(f"⚠️ 未配置主脑模型 key，自然语言对话不可用。用 {_C['c']}/model{_C['x']} 选模型并配 key，或用斜杠命令。")
             continue
+        # 成本护栏：每日 ¥ 上限
+        _lim = pricing.daily_limit()
+        if _lim > 0 and pricing.today_spend() >= _lim:
+            if not _ask(f"今日已花 ¥{pricing.today_spend():.2f} 达上限 ¥{_lim:.2f}，仍继续？(y/N)").strip().lower().startswith("y"):
+                print(f"{_C['d']}（已暂停。调整上限：ivyea config set daily_cost_limit_cny <元>）{_C['x']}")
+                continue
         messages.append({"role": "user", "content": line})
         try:
             mcfg = cfg.get_model_config()
@@ -813,7 +875,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
             _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
             if c:
-                print(f"{_C['d']}  (本轮 ¥{c:.4f} · 累计 ¥{meter.cost:.4f}){_C['x']}")
+                day = pricing.add_spend(c)
+                print(f"{_C['d']}  (本轮 ¥{c:.4f} · 累计 ¥{meter.cost:.4f} · 今日 ¥{day:.4f}){_C['x']}")
             from . import panels
             if ctx.todos:
                 print(panels.render_todos(ctx.todos, color=sys.stdout.isatty()))
@@ -831,6 +894,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                     memory.remember_summary(_s, sid)
                     print(f"{_C['d']}（上下文较长，已自动压缩并入库摘要以省 token）{_C['x']}")
             _persist()
+        except KeyboardInterrupt:
+            print(f"\n{_C['d']}（已中断本轮，会话保留。继续输入即可。）{_C['x']}")
         except LLMError as e:
             print(f"\n[模型错误] {e}")
             messages.pop()  # 撤回这条 user，避免污染上下文
@@ -932,14 +997,17 @@ def build_parser() -> argparse.ArgumentParser:
     pa.set_defaults(func=_cmd_apply)
 
     plx = sub.add_parser("lingxing", help="领星 OpenAPI：setup / probe / sellers / operate <on|off|status>")
-    plx.add_argument("action", choices=["setup", "probe", "sellers", "operate"])
-    plx.add_argument("value", nargs="?", help="operate 的 on/off/status")
+    plx.add_argument("action", choices=["setup", "probe", "sellers", "operate", "cache"])
+    plx.add_argument("value", nargs="?", help="operate 的 on/off/status；cache 的 clear")
     plx.set_defaults(func=_cmd_lingxing)
 
     pu = sub.add_parser("audit", help="执行审计 / 回滚")
     pu.add_argument("action", choices=["list", "rollback"])
     pu.add_argument("id", nargs="?", help="rollback 的审计ID")
     pu.set_defaults(func=_cmd_audit)
+
+    pob = sub.add_parser("onboard", help="首次运行引导（选模型/配 key/可选领星）")
+    pob.set_defaults(func=_cmd_onboard)
 
     pmo = sub.add_parser("model", help="查看/配置主脑模型（交互；或 ivyea model deepseek:deepseek-chat）")
     pmo.add_argument("spec", nargs="?", help="provider:model，如 deepseek:deepseek-chat")
