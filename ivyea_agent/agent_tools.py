@@ -9,7 +9,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from . import actions as act_mod, executor, guardrails, memory, permission, patrol as patrol_mod
+from . import actions as act_mod, executor, guardrails, memory, permission, patrol as patrol_mod, tools_general
 from .rule_engine import RuleEngineError
 
 
@@ -24,6 +24,7 @@ class ToolContext:
     actions: list = field(default_factory=list)
     lingxing_result: dict = field(default_factory=dict)   # 最近一次领星巡检候选
     plan_mode: bool = False                                # 计划模式：禁止写入执行
+    workspace: str = ""                                    # 通用工具的工作目录（默认 cwd）
     perm: permission.PermissionState = field(default_factory=permission.PermissionState)
 
 
@@ -63,7 +64,7 @@ TOOL_SCHEMAS = [
         "description": "检索历史记忆(过往巡检、决策、记的要点)，跨会话回忆。",
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string"}}, "required": ["query"]}}},
-]
+] + tools_general.GENERAL_TOOL_SCHEMAS
 
 
 def _t_run_patrol(args: dict, ctx: ToolContext) -> str:
@@ -209,6 +210,7 @@ _DISPATCH = {
     "rollback": _t_rollback,
     "remember": _t_remember,
     "recall": _t_recall,
+    **tools_general.GENERAL_DISPATCH,
 }
 
 

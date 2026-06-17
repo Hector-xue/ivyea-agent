@@ -629,7 +629,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         return s.get("label", s.get("provider", "deepseek"))
 
     ctx = agent_tools.ToolContext(
-        from_mcp=args.from_mcp, execute=args.execute,
+        from_mcp=args.from_mcp, execute=args.execute, workspace=os.getcwd(),
         protected=[w for w in (args.protected or "").split(",") if w.strip()])
     meter = pricing.UsageMeter()
 
