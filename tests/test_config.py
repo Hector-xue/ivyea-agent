@@ -34,6 +34,12 @@ def test_env_key_add_update_remove(ivyea_home):
     assert "LINGXING_OPENAPI_SECRET" not in txt
 
 
+import os as _os
+
+import pytest
+
+
+@pytest.mark.skipif(_os.name == "nt", reason="Windows 无 POSIX 文件权限位（chmod 在此为 best-effort 空操作）")
 def test_env_file_permissions(ivyea_home):
     config = _cfg()
     config.set_env_key("FOO", "bar")
