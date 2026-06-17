@@ -101,18 +101,24 @@ def recent_runs(asin: str = "", limit: int = 5) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def _like_search(conn, query: str, limit: int):
+    return conn.execute("SELECT text, asin, ts FROM search_fts WHERE text LIKE ? "
+                        "ORDER BY ts DESC LIMIT ?", (f"%{query}%", limit)).fetchall()
+
+
 def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
+    """全文检索。FTS5 的 unicode61 把整段中文当一个 token，无法子串匹配，
+    故 FTS 命中为空时回退到 LIKE 子串检索（保证中文回忆可用）。"""
     conn = _conn()
+    rows = []
     try:
         if _FTS_OK:
             rows = conn.execute("SELECT text, asin, ts FROM search_fts WHERE search_fts MATCH ? "
                                 "ORDER BY rank LIMIT ?", (query, limit)).fetchall()
-        else:
-            rows = conn.execute("SELECT text, asin, ts FROM search_fts WHERE text LIKE ? "
-                                "ORDER BY ts DESC LIMIT ?", (f"%{query}%", limit)).fetchall()
+        if not rows:
+            rows = _like_search(conn, query, limit)
     except Exception:
-        rows = conn.execute("SELECT text, asin, ts FROM search_fts WHERE text LIKE ? "
-                            "ORDER BY ts DESC LIMIT ?", (f"%{query}%", limit)).fetchall()
+        rows = _like_search(conn, query, limit)
     conn.close()
     return [dict(r) for r in rows]
 

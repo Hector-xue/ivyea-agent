@@ -98,7 +98,11 @@ ivyea model deepseek-chat   # 按 id 直接切
 已接入（OpenAI 兼容，可直接用）：OpenAI(GPT-4o)、DeepSeek、通义千问、Kimi/Moonshot、智谱GLM、豆包、MiniMax、OpenRouter、自定义端点。
 规划中：Anthropic Claude / Google Gemini（原生 API）、Codex（ChatGPT 会员登录）/ Claude（订阅登录）等登录制。
 
-### MCP 服务器（对话式配置 + 自动拉数）
+### MCP 服务器（通用数据源；⚠️ 不是领星广告源）
+
+> 更正（2026-06）：**领星广告数据不要走 MCP**——领星 MCP 无广告工具。领星请用上文
+> `--from-lingxing`。本节的 MCP 客户端用于接入**其它**通用数据源（Sorftime/SIF/自建等）。
+> 下文示例里凡出现 `领星` 仅为历史占位，实际请换成你的非领星 MCP 服务器名。
 
 ```bash
 ivyea mcp add               # 对话式添加：名称 / 传输(http·sse·stdio) / URL / 鉴权(header·query)
@@ -196,16 +200,37 @@ ivyea memory note B0XXXX     # 看某 ASIN 的运营记忆笔记
 ```
 对话里：`/memory`、或直接说"记住…/回忆…"（remember / recall 工具）。
 
+## 领星 OpenAPI 店铺巡检（真实广告数据，推荐）
+
+> ⚠️ 重要更正（2026-06）：**领星 MCP 没有广告工具**（只有 ERP/库存/利润）。真实广告
+> 数据走**领星 OpenAPI**。agent 已独立实现领星 OpenAPI（鉴权/签名/拉数），并移植了
+> ivyea-ops 的 sid 维度确定性规则引擎（五杠杆 + 毛利率推目标ACOS）。
+
+```bash
+ivyea lingxing setup        # 配 host/appid/secret（只存本机 ~/.ivyea/）
+ivyea lingxing probe        # 自检：取令牌 + 拉店铺列表
+ivyea lingxing sellers      # 列店铺，拿 sid
+ivyea patrol --from-lingxing --sid 1863 --days 30   # 店铺维度只读巡检
+```
+窗口逐日聚合（丢最近 N 天归因），按否词/收割/降bid/加bid/加预算分区出候选，每条带规则+
+指标+理由，历史否决/冷却自动拦截。**只读**：不写广告（写入是后续里程碑）。
+
 ## 设计 / 路线图
 
-- 架构与方法论：见 IvyeaOps 知识库 `ivyea-agent/架构方案`、`amazon-ops/*`。
-- LLM Provider 层：多模型统一接口（P1 接 DeepSeek，预留 OpenAI/Anthropic/Gemini/Ollama）。⚠️ apimart 只生图、不能做 agent 主脑。
-- MCP：P1.5 接入「领星 ERP MCP」直接读广告报表（替代手动导 CSV）；写操作走网关 + 审核制（P2）。
-- 设计 v2（架构学 Hermes、交互学 Claude Code）：见知识库 `ivyea-agent/设计v2`。
-- 记忆（P3）：**SQLite FTS5 + 策展 markdown + 摘要**（Hermes 同款，自有，不用向量库/GBrain）。
-- 路线：P1 只读巡检 ✅ → P1.5 通用 MCP ✅ → P2 审核制执行 ✅ → P2.5 对话式+权限审批 ✅ → P3 记忆 ✅ → P4 嵌入 IvyeaOps → P5 多 ASIN/多店 + 自学习。
+- 总纲：对标 Hermes/Codex/Claude Code 的完整方案见 `/root/ivyea-agent-优化方案-对标三大产品.md`。
+- LLM Provider 层：当前**只有 OpenAI 兼容（DeepSeek）真正可用**；Anthropic 原生/Gemini/登录制为规划中（raise 提示，不假装可用）。⚠️ apimart 只生图、不能做 agent 主脑。
+- 数据源：① 本地 CSV（vendored 规则引擎，离线/试用兜底）② **领星 OpenAPI 店铺维度（真实广告链路）** ③ 通用 MCP（任意数据源，**非领星广告**）。
+- 记忆：SQLite FTS5 + 策展 markdown（中文回退 LIKE 子串检索）；**摘要压缩/会话回忆/自策展 nudge 尚未实现**（M4 里程碑）。
 
-## 状态
+## 状态（诚实盘点 2026-06）
 
-P1/P1.5/P2/P2.5/P3 已完成（只读巡检、通用 MCP、审核制执行、对话+权限审批、记忆）。
-待验证真链路：DeepSeek 主脑 key（对话/复核）、真实 MCP 读写。P3 记忆进行中。
+**可用**：CSV 只读巡检；领星 OpenAPI 店铺维度只读巡检（真链路已实测：令牌+11店+报表 code=0）；通用 MCP 客户端；权限审批引擎；SQLite 记忆；pytest 测试集（28 项）。
+
+**尚未实现 / 待办**（不再标“✅完成”）：
+- 流式输出（当前 provider 全非流式）；上下文压缩；成本/token 核算。
+- Anthropic 原生 + prompt caching；Gemini/登录制。
+- 领星**写入执行**（否词/调bid 真写 + 审批 + 回滚）——下一里程碑。
+- 记忆摘要压缩 / 会话转录回忆 / 自策展。
+- DeepSeek 主脑**对话式工具循环**已验证契约（自然语言→tool_calls），但端到端对话体验仍在打磨。
+
+路线（总纲 M0–M7）：M0 止血+核实 ✅ → M1 领星适配层（只读）✅ → M1+ 内核重做(流式/成本/Plan) → 模型层 → 工具能力 → 记忆 → 交互/视觉 → 工程化 → 嵌入 IvyeaOps。

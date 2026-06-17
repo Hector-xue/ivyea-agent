@@ -267,6 +267,9 @@ def _cmd_patrol(args: argparse.Namespace) -> int:
     from . import patrol as patrol_mod
     from .rule_engine import RuleEngineError
 
+    if getattr(args, "from_lingxing", False):
+        return _patrol_lingxing(args)
+
     csv_path = args.csv
     if args.from_mcp:
         from .mcp_source import fetch_to_csv
@@ -298,6 +301,68 @@ def _cmd_patrol(args: argparse.Namespace) -> int:
     if not result["review"]["ok"] and not args.no_llm:
         print(f"[提示] {result['review']['note']}", file=sys.stderr)
     return 0
+
+
+def _patrol_lingxing(args: argparse.Namespace) -> int:
+    """领星 OpenAPI 店铺巡检（只读，sid 维度规则引擎）。"""
+    from . import lingxing_optimizer as opt, lingxing_report as lrep, report
+    from .lingxing_openapi import LingXingError, is_configured
+
+    if not is_configured():
+        print("未配置领星 OpenAPI。先运行 `ivyea lingxing setup`（填 host/appid/secret）。", file=sys.stderr)
+        return 2
+    if not args.sid:
+        print("--from-lingxing 需要 --sid <店铺SID>（用 `ivyea lingxing sellers` 查）。", file=sys.stderr)
+        return 2
+    try:
+        print(f"[领星] 店铺 sid={args.sid} 拉取近 {args.days} 天广告报表并跑规则引擎（逐日聚合，可能耗时）…",
+              file=sys.stderr)
+        result = opt.run_store(int(args.sid), days=args.days)
+    except LingXingError as e:
+        print(f"[领星错误] {e}", file=sys.stderr)
+        return 1
+    print(lrep.render(result, color=sys.stdout.isatty()))
+    out_dir = args.output_dir or str(config.IVYEA_DIR / "patrol_out")
+    md_path = report.write_md(lrep.render_md(result), out_dir, asin=f"sid{args.sid}")
+    print(f"\n[已保存] {md_path}", file=sys.stderr)
+    return 0
+
+
+def _cmd_lingxing(args: argparse.Namespace) -> int:
+    from . import lingxing_openapi as lx
+    from .lingxing_datasets import list_sellers
+    from .lingxing_openapi import LingXingError
+
+    if args.action == "setup":
+        print("配置领星 OpenAPI（凭据只存本机 ~/.ivyea/）：")
+        host = _ask("OpenAPI Host", config.get_setting("lingxing_openapi_host", "https://openapi.lingxing.com"))
+        appid = _ask("appId", config.get_setting("lingxing_openapi_appid", ""))
+        secret = _ask_secret("appSecret（回车保留原值）")
+        config.set_setting("lingxing_openapi_host", host.strip())
+        config.set_setting("lingxing_openapi_appid", appid.strip())
+        if secret:
+            config.set_env_key("LINGXING_OPENAPI_SECRET", secret.strip())
+        print("已保存。运行 `ivyea lingxing probe` 自检。")
+        return 0
+    if args.action == "probe":
+        try:
+            r = lx.verify()
+        except LingXingError as e:
+            print(f"[领星自检失败] {e}", file=sys.stderr)
+            return 1
+        print(f"✓ 令牌获取成功；店铺列表 code={r['probe_code']}，店铺数={r['probe_seller_count']}")
+        return 0
+    if args.action == "sellers":
+        try:
+            sellers = list_sellers()
+        except LingXingError as e:
+            print(f"[领星错误] {e}", file=sys.stderr)
+            return 1
+        print(f"共 {len(sellers)} 个店铺：")
+        for s in sellers:
+            print(f"  sid={s.get('sid')}  {s.get('name')}  {s.get('country') or ''}")
+        return 0
+    return 2
 
 
 def _cmd_apply(args: argparse.Namespace) -> int:
@@ -631,10 +696,13 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("--args", help="call 的入参 JSON，如 '{\"asin\":\"B0..\"}'")
     pm.set_defaults(func=_cmd_mcp)
 
-    pp = sub.add_parser("patrol", help="只读广告巡检（输入 CSV 或 --from-mcp 自动拉数）")
+    pp = sub.add_parser("patrol", help="只读广告巡检（CSV / --from-lingxing 店铺维度 / --from-mcp 通用源）")
     pp.add_argument("csv", nargs="?", help="搜索词报告路径 (csv/xlsx)；用 --from-mcp 时可省略")
     pp.add_argument("--from-mcp", dest="from_mcp", help="改用已配置的 MCP 服务器拉广告数据（需该服务器配好 dataSource 映射）")
-    pp.add_argument("--days", type=int, default=30, help="MCP 拉取天数，默认 30")
+    pp.add_argument("--from-lingxing", dest="from_lingxing", action="store_true",
+                    help="走领星 OpenAPI 的店铺(sid)维度规则引擎巡检（需 --sid，先 ivyea lingxing setup）")
+    pp.add_argument("--sid", help="领星店铺 SID（--from-lingxing 时必填，用 ivyea lingxing sellers 查）")
+    pp.add_argument("--days", type=int, default=30, help="拉取天数，默认 30")
     pp.add_argument("--asin", help="指定分析的 ASIN（--from-mcp 时必填）")
     pp.add_argument("--site", help="站点代码，默认取配置/US")
     pp.add_argument("--target-acos", type=float, dest="target_acos", help="目标 ACoS，如 0.3")
@@ -650,6 +718,10 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--protected", help="保护词清单，逗号分隔（这些词不否/不动）")
     pa.add_argument("--yes", action="store_true", help="跳过逐条确认，批准所有未被护栏拦截的动作")
     pa.set_defaults(func=_cmd_apply)
+
+    plx = sub.add_parser("lingxing", help="领星 OpenAPI：setup（配凭据）/ probe（自检）/ sellers（列店铺）")
+    plx.add_argument("action", choices=["setup", "probe", "sellers"])
+    plx.set_defaults(func=_cmd_lingxing)
 
     pu = sub.add_parser("audit", help="执行审计 / 回滚")
     pu.add_argument("action", choices=["list", "rollback"])

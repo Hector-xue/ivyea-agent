@@ -29,10 +29,13 @@ class ToolContext:
 TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "run_patrol",
-        "description": "对一个 ASIN 跑只读广告巡检。数据源二选一：本地 CSV(source) 或已配置的 MCP 服务器(from_mcp)。",
+        "description": "跑只读广告巡检。数据源三选一：本地 CSV(source)、MCP 服务器(from_mcp)、"
+                       "或领星 OpenAPI 店铺维度(from_lingxing=true + sid，最真实，推荐)。",
         "parameters": {"type": "object", "properties": {
-            "source": {"type": "string", "description": "搜索词报告 CSV 路径（用 MCP 时留空）"},
+            "source": {"type": "string", "description": "搜索词报告 CSV 路径（用 MCP/领星 时留空）"},
             "from_mcp": {"type": "string", "description": "MCP 服务器名（用 MCP 拉数时填）"},
+            "from_lingxing": {"type": "boolean", "description": "true=走领星 OpenAPI 店铺维度规则引擎（需 sid）"},
+            "sid": {"type": "integer", "description": "领星店铺 SID（from_lingxing 时必填）"},
             "asin": {"type": "string"}, "site": {"type": "string"},
             "days": {"type": "integer"}}, "required": []}}},
     {"type": "function", "function": {
@@ -65,6 +68,20 @@ def _t_run_patrol(args: dict, ctx: ToolContext) -> str:
     asin = args.get("asin")
     site = args.get("site") or "US"
     csv = args.get("source")
+    if args.get("from_lingxing"):
+        from . import lingxing_optimizer as opt, lingxing_report as lrep
+        from .lingxing_openapi import LingXingError, is_configured
+        if not is_configured():
+            return "领星 OpenAPI 未配置（请先在终端 `ivyea lingxing setup`）。"
+        if not args.get("sid"):
+            return "走领星巡检需要 sid（用 `ivyea lingxing sellers` 查店铺）。"
+        try:
+            result = opt.run_store(int(args["sid"]), days=int(args.get("days", 30)))
+        except LingXingError as e:
+            return f"领星拉数失败：{e}"
+        # M1 只读：返回候选报告文本，不进入可执行动作队列（写入是后续里程碑）
+        ctx.asin = f"sid:{args['sid']}"
+        return lrep.render(result, color=False)
     if args.get("from_mcp"):
         from .mcp_source import fetch_to_csv
         from .mcp_client import MCPError
