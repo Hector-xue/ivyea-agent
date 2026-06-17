@@ -538,9 +538,33 @@ SLASH_COMMANDS = [
     ("/plan", "进入/退出计划模式（只读，不写入）"),
     ("/approve", "批准并退出计划模式，继续执行"),
     ("/cost", "本会话 token 用量与成本估算"),
+    ("/compact", "压缩上下文（LLM 摘要历史，省 token）"),
+    ("/raw", "切换 Markdown 渲染 / 原始流式输出"),
     ("/clear", "清空当前对话上下文"),
     ("/exit", "退出 (亦可 /quit)"),
 ]
+
+
+class _LiveSpinner:
+    """生成时的轻量转圈反馈（不打印 token；收尾渲染 markdown）。"""
+    _F = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self):
+        self.i = 0
+        self.on = False
+
+    def tick(self, _text: str = "") -> None:
+        self.i += 1
+        frame = self._F[self.i % len(self._F)]
+        sys.stdout.write(f"\r{_C['c']}{frame}{_C['x']} {_C['d']}生成中…{_C['x']}")
+        sys.stdout.flush()
+        self.on = True
+
+    def clear(self) -> None:
+        if self.on:
+            sys.stdout.write("\r" + " " * 20 + "\r")
+            sys.stdout.flush()
+            self.on = False
 
 
 def _help_text() -> str:
@@ -597,7 +621,7 @@ def _print_welcome_box(lines: list, width: int = 58) -> None:
 
 
 def _cmd_chat(args: argparse.Namespace) -> int:
-    from . import agent_loop, agent_tools, config as cfg, pricing
+    from . import agent_loop, agent_tools, config as cfg, pricing, sessions, context as ctx_mod, markdown
     from .providers import from_settings, LLMError
 
     def _label() -> str:
@@ -613,7 +637,35 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         content = agent_loop.SYSTEM_PROMPT + (agent_loop.PLAN_NOTE if ctx.plan_mode else "")
         return {"role": "system", "content": content}
 
+    # ── resume / continue ─────────────────────────────────────────────
+    sid = None
     messages = [_sys_msg()]
+    resume_target = getattr(args, "resume", None)
+    if getattr(args, "cont", False) and not resume_target:
+        resume_target = sessions.latest_id() or None
+    if resume_target:
+        rid = resume_target if resume_target is not True else sessions.latest_id()
+        sess = sessions.load(rid) if rid else None
+        if sess and sess.get("messages"):
+            messages = sess["messages"]
+            sid = sess["id"]
+            u = sess.get("usage") or {}
+            meter.cost = u.get("cost", 0.0); meter.turns = u.get("turns", 0)
+            meter.prompt = u.get("prompt", 0); meter.completion = u.get("completion", 0)
+            print(f"{_C['d']}（已续接会话 {sid}，{meter.turns} 轮历史）{_C['x']}")
+        else:
+            print(f"{_C['d']}（未找到可续接的会话，开新会话）{_C['x']}")
+    if sid is None:
+        sid = sessions.new_id()
+    render_md = not getattr(args, "raw", False)   # 默认 markdown 渲染
+
+    def _persist():
+        try:
+            sessions.save(sid, messages, model=cfg.get_model_config().get("model", ""),
+                          usage={"cost": meter.cost, "turns": meter.turns,
+                                 "prompt": meter.prompt, "completion": meter.completion})
+        except Exception:
+            pass
 
     keyst = "已配置" if cfg.get_active_key() else "未配 key（/model 配置后可对话）"
     mode = "真实写" if args.execute else "dry-run"
@@ -665,6 +717,20 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             continue
         if line == "/cost":
             print(meter.summary() if meter.turns else "本会话还没有模型调用。"); continue
+        if line == "/raw":
+            render_md = not render_md
+            print(f"已切换为 {'原始流式' if not render_md else 'Markdown 渲染'} 输出。"); continue
+        if line == "/compact":
+            ak = cfg.get_active_key()
+            if not ak:
+                print("未配 key，无法压缩。"); continue
+            before = sum(len(str(m.get('content') or '')) for m in messages)
+            provider = from_settings(cfg.get_model_config(), ak)
+            messages, summary = ctx_mod.compact(messages, provider)
+            after = sum(len(str(m.get('content') or '')) for m in messages)
+            _persist()
+            print(f"已压缩上下文（约 {before}→{after} 字）。" if summary else "上下文较短，无需压缩。")
+            continue
         if line == "/mcp":
             servers = cfg.load_mcp().get("mcpServers", {})
             print("MCP 服务器: " + (", ".join(servers) if servers else "(无，ivyea mcp add)")); continue
@@ -716,12 +782,27 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         try:
             mcfg = cfg.get_model_config()
             provider = from_settings(mcfg, api_key)
-            print(f"{_C['c']}●{_C['x']} ", end="", flush=True)
-            out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""))
+            if render_md:
+                # 缓冲 + spinner，收尾渲染 markdown
+                spin = _LiveSpinner()
+                out = agent_loop.run_turn_stream(
+                    provider, ctx, messages, model=mcfg.get("model", ""),
+                    render=spin.tick, narrate=lambda s: (spin.clear(), print(s)))
+                spin.clear()
+                print(f"{_C['c']}●{_C['x']} " + markdown.render(out["text"]))
+            else:
+                print(f"{_C['c']}●{_C['x']} ", end="", flush=True)
+                out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""))
             c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
             if c:
                 print(f"{_C['d']}  (本轮 ¥{c:.4f} · 累计 ¥{meter.cost:.4f}){_C['x']}")
             print()
+            # 自动压缩 + 落盘
+            if ctx_mod.should_compact(int((out.get('usage') or {}).get('prompt_tokens') or 0)):
+                messages, _s = ctx_mod.compact(messages, provider)
+                if _s:
+                    print(f"{_C['d']}（上下文较长，已自动压缩以省 token）{_C['x']}")
+            _persist()
         except LLMError as e:
             print(f"\n[模型错误] {e}")
             messages.pop()  # 撤回这条 user，避免污染上下文
@@ -777,6 +858,10 @@ def _cmd_memory(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ivyea", description="Ivyea Agent — 亚马逊运营 CLI Agent")
     p.add_argument("--version", action="version", version=f"ivyea-agent {__version__}")
+    # 顶层便捷标志：裸 ivyea 进对话时也能用（见 main 转发）
+    p.add_argument("--resume", nargs="?", const=True, help="裸 ivyea：续接会话（留空=最近）")
+    p.add_argument("--continue", dest="cont", action="store_true", help="裸 ivyea：续接最近会话")
+    p.add_argument("--raw", action="store_true", help="裸 ivyea：原始流式输出")
     sub = p.add_subparsers(dest="command")  # 无子命令 → 默认进对话模式(见 main)
 
     pc = sub.add_parser("config", help="配置向导（无参=交互式）/ show / set / edit")
@@ -841,6 +926,9 @@ def build_parser() -> argparse.ArgumentParser:
     pch.add_argument("--from-mcp", dest="from_mcp", help="执行/拉数用的 MCP 服务器")
     pch.add_argument("--execute", action="store_true", help="允许真实写（默认 dry-run）")
     pch.add_argument("--protected", help="保护词清单，逗号分隔")
+    pch.add_argument("--resume", nargs="?", const=True, help="续接会话：留空=最近一个，或指定会话ID")
+    pch.add_argument("--continue", dest="cont", action="store_true", help="续接最近一个会话")
+    pch.add_argument("--raw", action="store_true", help="原始流式输出（默认 Markdown 渲染）")
     pch.set_defaults(func=_cmd_chat)
     return p
 
@@ -851,7 +939,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):
         # 像 claude/hermes：直接敲 `ivyea` 进对话模式（dry-run 默认）
-        args = parser.parse_args(["chat"])
+        chat_argv = ["chat"]
+        if getattr(args, "cont", False):
+            chat_argv.append("--continue")
+        if getattr(args, "raw", False):
+            chat_argv.append("--raw")
+        r = getattr(args, "resume", None)
+        if r is True:
+            chat_argv.append("--resume")
+        elif r:
+            chat_argv += ["--resume", r]
+        args = parser.parse_args(chat_argv)
     return args.func(args)
 
 
