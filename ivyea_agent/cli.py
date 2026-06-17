@@ -62,7 +62,7 @@ def _model_picker() -> None:
     elif m["kind"] == "openai":
         model = _ask("model 名（回车用默认）", model)
     config.apply_model(m, model=model, base_url=base)
-    if m["kind"] == "openai":
+    if m["kind"] in ("openai", "anthropic"):
         cur = "已配置" if config.get_active_key() else "未配置"
         nk = _ask_secret(f"{m['label']} 的 API key（{m['key_env']}，当前{cur}；回车跳过 / - 清空）")
         if nk == "-":
@@ -73,7 +73,7 @@ def _model_picker() -> None:
               f"{'已配 key' if config.get_active_key() else '未配 key'}")
     else:
         print(f"已选 {m['label']}，但{m.get('note', '该类型规划中')}。"
-              f"当前可直接用：OpenAI 兼容类（DeepSeek/通义/Kimi/GLM/豆包/MiniMax/OpenRouter/OpenAI/自定义）。")
+              f"当前可直接用：Claude 原生 + OpenAI 兼容类（DeepSeek/通义/Kimi/GLM/豆包/MiniMax/OpenRouter/OpenAI/自定义）。")
 
 
 def _config_wizard() -> int:
@@ -267,6 +267,9 @@ def _cmd_patrol(args: argparse.Namespace) -> int:
     from . import patrol as patrol_mod
     from .rule_engine import RuleEngineError
 
+    if getattr(args, "from_lingxing", False):
+        return _patrol_lingxing(args)
+
     csv_path = args.csv
     if args.from_mcp:
         from .mcp_source import fetch_to_csv
@@ -298,6 +301,127 @@ def _cmd_patrol(args: argparse.Namespace) -> int:
     if not result["review"]["ok"] and not args.no_llm:
         print(f"[提示] {result['review']['note']}", file=sys.stderr)
     return 0
+
+
+def _patrol_lingxing(args: argparse.Namespace) -> int:
+    """领星 OpenAPI 店铺巡检（只读，sid 维度规则引擎）。"""
+    from . import lingxing_optimizer as opt, lingxing_report as lrep, report
+    from .lingxing_openapi import LingXingError, is_configured
+
+    if not is_configured():
+        print("未配置领星 OpenAPI。先运行 `ivyea lingxing setup`（填 host/appid/secret）。", file=sys.stderr)
+        return 2
+    if not args.sid:
+        print("--from-lingxing 需要 --sid <店铺SID>（用 `ivyea lingxing sellers` 查）。", file=sys.stderr)
+        return 2
+    try:
+        print(f"[领星] 店铺 sid={args.sid} 拉取近 {args.days} 天广告报表并跑规则引擎（逐日聚合，可能耗时）…",
+              file=sys.stderr)
+        result = opt.run_store(int(args.sid), days=args.days)
+    except LingXingError as e:
+        print(f"[领星错误] {e}", file=sys.stderr)
+        return 1
+    print(lrep.render(result, color=sys.stdout.isatty()))
+    out_dir = args.output_dir or str(config.IVYEA_DIR / "patrol_out")
+    md_path = report.write_md(lrep.render_md(result), out_dir, asin=f"sid{args.sid}")
+    print(f"\n[已保存] {md_path}", file=sys.stderr)
+
+    if getattr(args, "execute", False):
+        return _execute_lingxing_candidates(result, yes=getattr(args, "yes", False))
+    return 0
+
+
+def _execute_lingxing_candidates(result: dict, yes: bool = False) -> int:
+    """对巡检候选逐条人工审批 → 写入（默认 dry-run；真写需 operate 开关）。"""
+    from . import lingxing_write as lw, permission
+
+    writable = []
+    for c in result.get("candidates", []):
+        if c.get("blocked"):
+            continue
+        intent = lw.candidate_to_intent(c)
+        if intent and all(intent.get(k) is not None for k in ("sid",)):
+            writable.append(intent)
+    if not writable:
+        print("没有可写入的候选（收割为建议项、被拦截项不写）。", file=sys.stderr)
+        return 0
+
+    live = lw.operate_active()
+    print(f"\n共 {len(writable)} 个可写动作。operate 开关：{'开（将真实写入）' if live else '关（dry-run 预览）'}。",
+          file=sys.stderr)
+    state = permission.PermissionState()
+    done = 0
+    for intent in writable:
+        if not yes:
+            decision = permission.request_intent(intent, lw.preview(intent), state)
+            if decision == permission.ABORT:
+                print("已全部停止。", file=sys.stderr)
+                break
+            if decision == permission.DENY:
+                from . import memory
+                memory.record_decision(f"sid:{intent.get('sid')}",
+                                       intent.get("keyword_text") or str(intent.get("target_name")),
+                                       lw._kind_for_memory(intent["op_type"]), "reject")
+                print(f"  跳过：{lw.preview(intent)}", file=sys.stderr)
+                continue
+        r = lw.execute(intent, dry_run=not live)
+        print(("  ✓ " if r["ok"] else "  ✗ ") + r["detail"])
+        if r["ok"] and not r.get("dry_run"):
+            done += 1
+    if not live:
+        print("\n（以上为 dry-run 预览。真实写入需 `ivyea lingxing operate on`。）", file=sys.stderr)
+    elif done:
+        print(f"\n已写入 {done} 条。回滚用 `ivyea audit rollback <ID>`。", file=sys.stderr)
+    return 0
+
+
+def _cmd_lingxing(args: argparse.Namespace) -> int:
+    from . import lingxing_openapi as lx
+    from .lingxing_datasets import list_sellers
+    from .lingxing_openapi import LingXingError
+
+    if args.action == "setup":
+        print("配置领星 OpenAPI（凭据只存本机 ~/.ivyea/）：")
+        host = _ask("OpenAPI Host", config.get_setting("lingxing_openapi_host", "https://openapi.lingxing.com"))
+        appid = _ask("appId", config.get_setting("lingxing_openapi_appid", ""))
+        secret = _ask_secret("appSecret（回车保留原值）")
+        config.set_setting("lingxing_openapi_host", host.strip())
+        config.set_setting("lingxing_openapi_appid", appid.strip())
+        if secret:
+            config.set_env_key("LINGXING_OPENAPI_SECRET", secret.strip())
+        print("已保存。运行 `ivyea lingxing probe` 自检。")
+        return 0
+    if args.action == "probe":
+        try:
+            r = lx.verify()
+        except LingXingError as e:
+            print(f"[领星自检失败] {e}", file=sys.stderr)
+            return 1
+        print(f"✓ 令牌获取成功；店铺列表 code={r['probe_code']}，店铺数={r['probe_seller_count']}")
+        return 0
+    if args.action == "sellers":
+        try:
+            sellers = list_sellers()
+        except LingXingError as e:
+            print(f"[领星错误] {e}", file=sys.stderr)
+            return 1
+        print(f"共 {len(sellers)} 个店铺：")
+        for s in sellers:
+            print(f"  sid={s.get('sid')}  {s.get('name')}  {s.get('country') or ''}")
+        return 0
+    if args.action == "operate":
+        from . import lingxing_write as lw
+        sub = (args.value or "status").lower()
+        if sub == "on":
+            lw.set_operate(True)
+            print("⚠️ 领星写入开关已开启（默认 120 分钟后自动关）。写动作仍需逐条人工审批。")
+        elif sub == "off":
+            lw.set_operate(False)
+            print("领星写入开关已关闭（回到 dry-run）。")
+        else:
+            print(f"领星写入开关：{'开' if lw.operate_active() else '关'}")
+        return 0
+    return 2
 
 
 def _cmd_apply(args: argparse.Namespace) -> int:
@@ -372,14 +496,20 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             print("(暂无审计记录)")
             return 0
         for e in rows:
+            src = e.get("source") or e.get("server") or ""
             print(f"  {e.get('id','?')}  {e.get('ts','')}  {e.get('kind','')}  "
-                  f"{e.get('search_term','')}  [{e.get('server','')}]")
+                  f"{e.get('search_term','')}  [{src}]")
         return 0
     if args.action == "rollback":
         if not args.id:
             print("用法: ivyea audit rollback <审计ID>", file=sys.stderr)
             return 2
-        r = executor.rollback(args.id)
+        entry = audit.get(args.id)
+        if entry and entry.get("source") == "lingxing":
+            from . import lingxing_write as lw
+            r = lw.rollback(args.id)
+        else:
+            r = executor.rollback(args.id)
         print(("✓ " if r["ok"] else "✗ ") + r["detail"])
         return 0 if r["ok"] else 1
     return 2
@@ -405,9 +535,37 @@ SLASH_COMMANDS = [
     ("/mcp", "列出已配置的 MCP 服务器"),
     ("/tools", "列出 Agent 可用工具"),
     ("/memory", "记忆：状态/最近巡检；/memory <词> 检索"),
+    ("/plan", "进入/退出计划模式（只读，不写入）"),
+    ("/approve", "批准并退出计划模式，继续执行"),
+    ("/cost", "本会话 token 用量与成本估算"),
+    ("/compact", "压缩上下文（LLM 摘要历史，省 token）"),
+    ("/init", "生成账户指令模板 AGENTS.md（长期打法/边界，自动注入）"),
+    ("/raw", "切换 Markdown 渲染 / 原始流式输出"),
     ("/clear", "清空当前对话上下文"),
     ("/exit", "退出 (亦可 /quit)"),
 ]
+
+
+class _LiveSpinner:
+    """生成时的轻量转圈反馈（不打印 token；收尾渲染 markdown）。"""
+    _F = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self):
+        self.i = 0
+        self.on = False
+
+    def tick(self, _text: str = "") -> None:
+        self.i += 1
+        frame = self._F[self.i % len(self._F)]
+        sys.stdout.write(f"\r{_C['c']}{frame}{_C['x']} {_C['d']}生成中…{_C['x']}")
+        sys.stdout.flush()
+        self.on = True
+
+    def clear(self) -> None:
+        if self.on:
+            sys.stdout.write("\r" + " " * 20 + "\r")
+            sys.stdout.flush()
+            self.on = False
 
 
 def _help_text() -> str:
@@ -464,7 +622,7 @@ def _print_welcome_box(lines: list, width: int = 58) -> None:
 
 
 def _cmd_chat(args: argparse.Namespace) -> int:
-    from . import agent_loop, agent_tools, config as cfg
+    from . import agent_loop, agent_tools, config as cfg, pricing, sessions, context as ctx_mod, markdown, memory
     from .providers import from_settings, LLMError
 
     def _label() -> str:
@@ -472,9 +630,47 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         return s.get("label", s.get("provider", "deepseek"))
 
     ctx = agent_tools.ToolContext(
-        from_mcp=args.from_mcp, execute=args.execute,
+        from_mcp=args.from_mcp, execute=args.execute, workspace=os.getcwd(),
         protected=[w for w in (args.protected or "").split(",") if w.strip()])
-    messages = [{"role": "system", "content": agent_loop.SYSTEM_PROMPT}]
+    meter = pricing.UsageMeter()
+    _ui = {"ctx": 0}                                        # 状态栏:上下文 token 估算
+    instructions = memory.load_instructions(os.getcwd())   # USER.md/AGENTS.md 持久指令
+
+    def _sys_msg() -> dict:
+        content = agent_loop.SYSTEM_PROMPT + (agent_loop.PLAN_NOTE if ctx.plan_mode else "")
+        if instructions:
+            content += "\n\n[长期指令/画像]\n" + instructions
+        return {"role": "system", "content": content}
+
+    # ── resume / continue ─────────────────────────────────────────────
+    sid = None
+    messages = [_sys_msg()]
+    resume_target = getattr(args, "resume", None)
+    if getattr(args, "cont", False) and not resume_target:
+        resume_target = sessions.latest_id() or None
+    if resume_target:
+        rid = resume_target if resume_target is not True else sessions.latest_id()
+        sess = sessions.load(rid) if rid else None
+        if sess and sess.get("messages"):
+            messages = sess["messages"]
+            sid = sess["id"]
+            u = sess.get("usage") or {}
+            meter.cost = u.get("cost", 0.0); meter.turns = u.get("turns", 0)
+            meter.prompt = u.get("prompt", 0); meter.completion = u.get("completion", 0)
+            print(f"{_C['d']}（已续接会话 {sid}，{meter.turns} 轮历史）{_C['x']}")
+        else:
+            print(f"{_C['d']}（未找到可续接的会话，开新会话）{_C['x']}")
+    if sid is None:
+        sid = sessions.new_id()
+    render_md = not getattr(args, "raw", False)   # 默认 markdown 渲染
+
+    def _persist():
+        try:
+            sessions.save(sid, messages, model=cfg.get_model_config().get("model", ""),
+                          usage={"cost": meter.cost, "turns": meter.turns,
+                                 "prompt": meter.prompt, "completion": meter.completion})
+        except Exception:
+            pass
 
     keyst = "已配置" if cfg.get_active_key() else "未配 key（/model 配置后可对话）"
     mode = "真实写" if args.execute else "dry-run"
@@ -489,8 +685,11 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     from . import chat_input
 
     def _status() -> str:
-        return (f" ivyea · {_label()} · "
-                f"{'真实写' if args.execute else 'dry-run'} · /help 命令、Tab 补全、↑↓历史 ")
+        plan = "计划模式 · " if ctx.plan_mode else ""
+        cost = f"¥{meter.cost:.4f} · " if meter.turns else ""
+        cx = f"ctx ~{_ui['ctx'] // 1000}k · " if _ui["ctx"] else ""
+        return (f" ivyea · {_label()} · {plan}"
+                f"{'真实写' if args.execute else 'dry-run'} · {cx}{cost}/help 命令、Tab 补全 ")
 
     ci = chat_input.ChatInput(SLASH_COMMANDS, _status)
 
@@ -507,8 +706,48 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if line in ("/help", "/", "/?"):
             print(_help_text()); continue
         if line == "/clear":
-            messages = [{"role": "system", "content": agent_loop.SYSTEM_PROMPT}]
+            messages = [_sys_msg()]
             print("（已清空对话上下文）"); continue
+        if line == "/plan":
+            ctx.plan_mode = not ctx.plan_mode
+            messages[0] = _sys_msg()
+            print("已进入计划模式（只读，不写入；/approve 批准后执行）。" if ctx.plan_mode
+                  else "已退出计划模式。"); continue
+        if line == "/approve":
+            if ctx.plan_mode:
+                ctx.plan_mode = False
+                messages[0] = _sys_msg()
+                print("已批准，退出计划模式。说“继续/执行”让我落地计划。")
+            else:
+                print("当前不在计划模式。")
+            continue
+        if line == "/cost":
+            print(meter.summary() if meter.turns else "本会话还没有模型调用。"); continue
+        if line == "/raw":
+            render_md = not render_md
+            print(f"已切换为 {'原始流式' if not render_md else 'Markdown 渲染'} 输出。"); continue
+        if line == "/compact":
+            ak = cfg.get_active_key()
+            if not ak:
+                print("未配 key，无法压缩。"); continue
+            before = sum(len(str(m.get('content') or '')) for m in messages)
+            provider = from_settings(cfg.get_model_config(), ak)
+            messages, summary = ctx_mod.compact(messages, provider)
+            after = sum(len(str(m.get('content') or '')) for m in messages)
+            if summary:
+                memory.remember_summary(summary, sid)
+            _persist()
+            print(f"已压缩上下文（约 {before}→{after} 字），摘要已入库。" if summary else "上下文较短，无需压缩。")
+            continue
+        if line == "/init":
+            p = memory.init_agents(str(cfg.IVYEA_DIR / "AGENTS.md"))
+            if p[0]:
+                print(f"已生成账户指令模板：{p[1]}\n填好后重开对话即自动注入。")
+            else:
+                print(f"已存在：{p[1]}（未覆盖）。`ivyea config edit` 或直接编辑它。")
+            instructions = memory.load_instructions(os.getcwd())
+            messages[0] = _sys_msg()
+            continue
         if line == "/mcp":
             servers = cfg.load_mcp().get("mcpServers", {})
             print("MCP 服务器: " + (", ".join(servers) if servers else "(无，ivyea mcp add)")); continue
@@ -558,11 +797,42 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             continue
         messages.append({"role": "user", "content": line})
         try:
-            provider = from_settings(cfg.get_model_config(), api_key)
-            reply = agent_loop.run_turn(provider, ctx, messages)
-            print(f"\n{_C['c']}●{_C['x']} {reply}\n")
+            mcfg = cfg.get_model_config()
+            provider = from_settings(mcfg, api_key)
+            if render_md:
+                # 缓冲 + spinner，收尾渲染 markdown
+                spin = _LiveSpinner()
+                out = agent_loop.run_turn_stream(
+                    provider, ctx, messages, model=mcfg.get("model", ""),
+                    render=spin.tick, narrate=lambda s: (spin.clear(), print(s)))
+                spin.clear()
+                print(f"{_C['c']}●{_C['x']} " + markdown.render(out["text"]))
+            else:
+                print(f"{_C['c']}●{_C['x']} ", end="", flush=True)
+                out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""))
+            c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
+            _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
+            if c:
+                print(f"{_C['d']}  (本轮 ¥{c:.4f} · 累计 ¥{meter.cost:.4f}){_C['x']}")
+            from . import panels
+            if ctx.todos:
+                print(panels.render_todos(ctx.todos, color=sys.stdout.isatty()))
+            print()
+            # 记忆：会话转录入库 + 自策展提示
+            memory.index_turn("user", line, sid)
+            memory.index_turn("assistant", out.get("text", ""), sid)
+            hint = memory.nudge_hint(out.get("text", ""))
+            if hint:
+                print(f"{_C['d']}  💡 {hint}{_C['x']}")
+            # 自动压缩 + 摘要入库 + 落盘
+            if ctx_mod.should_compact(int((out.get('usage') or {}).get('prompt_tokens') or 0)):
+                messages, _s = ctx_mod.compact(messages, provider)
+                if _s:
+                    memory.remember_summary(_s, sid)
+                    print(f"{_C['d']}（上下文较长，已自动压缩并入库摘要以省 token）{_C['x']}")
+            _persist()
         except LLMError as e:
-            print(f"[模型错误] {e}")
+            print(f"\n[模型错误] {e}")
             messages.pop()  # 撤回这条 user，避免污染上下文
 
 
@@ -616,6 +886,10 @@ def _cmd_memory(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ivyea", description="Ivyea Agent — 亚马逊运营 CLI Agent")
     p.add_argument("--version", action="version", version=f"ivyea-agent {__version__}")
+    # 顶层便捷标志：裸 ivyea 进对话时也能用（见 main 转发）
+    p.add_argument("--resume", nargs="?", const=True, help="裸 ivyea：续接会话（留空=最近）")
+    p.add_argument("--continue", dest="cont", action="store_true", help="裸 ivyea：续接最近会话")
+    p.add_argument("--raw", action="store_true", help="裸 ivyea：原始流式输出")
     sub = p.add_subparsers(dest="command")  # 无子命令 → 默认进对话模式(见 main)
 
     pc = sub.add_parser("config", help="配置向导（无参=交互式）/ show / set / edit")
@@ -631,16 +905,22 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("--args", help="call 的入参 JSON，如 '{\"asin\":\"B0..\"}'")
     pm.set_defaults(func=_cmd_mcp)
 
-    pp = sub.add_parser("patrol", help="只读广告巡检（输入 CSV 或 --from-mcp 自动拉数）")
+    pp = sub.add_parser("patrol", help="只读广告巡检（CSV / --from-lingxing 店铺维度 / --from-mcp 通用源）")
     pp.add_argument("csv", nargs="?", help="搜索词报告路径 (csv/xlsx)；用 --from-mcp 时可省略")
     pp.add_argument("--from-mcp", dest="from_mcp", help="改用已配置的 MCP 服务器拉广告数据（需该服务器配好 dataSource 映射）")
-    pp.add_argument("--days", type=int, default=30, help="MCP 拉取天数，默认 30")
+    pp.add_argument("--from-lingxing", dest="from_lingxing", action="store_true",
+                    help="走领星 OpenAPI 的店铺(sid)维度规则引擎巡检（需 --sid，先 ivyea lingxing setup）")
+    pp.add_argument("--sid", help="领星店铺 SID（--from-lingxing 时必填，用 ivyea lingxing sellers 查）")
+    pp.add_argument("--days", type=int, default=30, help="拉取天数，默认 30")
     pp.add_argument("--asin", help="指定分析的 ASIN（--from-mcp 时必填）")
     pp.add_argument("--site", help="站点代码，默认取配置/US")
     pp.add_argument("--target-acos", type=float, dest="target_acos", help="目标 ACoS，如 0.3")
     pp.add_argument("--report-type", dest="report_type", help="SP/SB/SD")
     pp.add_argument("--output-dir", dest="output_dir", help="输出目录")
     pp.add_argument("--no-llm", action="store_true", help="只跑规则引擎，跳过 AI 复核")
+    pp.add_argument("--execute", action="store_true",
+                    help="（仅 --from-lingxing）巡检后对候选逐条人工审批并写入；默认 dry-run，真写需 ivyea lingxing operate on")
+    pp.add_argument("--yes", action="store_true", help="跳过逐条确认（仍受 operate 开关约束）")
     pp.set_defaults(func=_cmd_patrol)
 
     pa = sub.add_parser("apply", help="审核制执行巡检建议（默认 dry-run；--execute 才真写）")
@@ -650,6 +930,11 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--protected", help="保护词清单，逗号分隔（这些词不否/不动）")
     pa.add_argument("--yes", action="store_true", help="跳过逐条确认，批准所有未被护栏拦截的动作")
     pa.set_defaults(func=_cmd_apply)
+
+    plx = sub.add_parser("lingxing", help="领星 OpenAPI：setup / probe / sellers / operate <on|off|status>")
+    plx.add_argument("action", choices=["setup", "probe", "sellers", "operate"])
+    plx.add_argument("value", nargs="?", help="operate 的 on/off/status")
+    plx.set_defaults(func=_cmd_lingxing)
 
     pu = sub.add_parser("audit", help="执行审计 / 回滚")
     pu.add_argument("action", choices=["list", "rollback"])
@@ -669,6 +954,9 @@ def build_parser() -> argparse.ArgumentParser:
     pch.add_argument("--from-mcp", dest="from_mcp", help="执行/拉数用的 MCP 服务器")
     pch.add_argument("--execute", action="store_true", help="允许真实写（默认 dry-run）")
     pch.add_argument("--protected", help="保护词清单，逗号分隔")
+    pch.add_argument("--resume", nargs="?", const=True, help="续接会话：留空=最近一个，或指定会话ID")
+    pch.add_argument("--continue", dest="cont", action="store_true", help="续接最近一个会话")
+    pch.add_argument("--raw", action="store_true", help="原始流式输出（默认 Markdown 渲染）")
     pch.set_defaults(func=_cmd_chat)
     return p
 
@@ -679,7 +967,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):
         # 像 claude/hermes：直接敲 `ivyea` 进对话模式（dry-run 默认）
-        args = parser.parse_args(["chat"])
+        chat_argv = ["chat"]
+        if getattr(args, "cont", False):
+            chat_argv.append("--continue")
+        if getattr(args, "raw", False):
+            chat_argv.append("--raw")
+        r = getattr(args, "resume", None)
+        if r is True:
+            chat_argv.append("--resume")
+        elif r:
+            chat_argv += ["--resume", r]
+        args = parser.parse_args(chat_argv)
     return args.func(args)
 
 

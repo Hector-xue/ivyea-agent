@@ -101,18 +101,24 @@ def recent_runs(asin: str = "", limit: int = 5) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def _like_search(conn, query: str, limit: int):
+    return conn.execute("SELECT text, asin, ts FROM search_fts WHERE text LIKE ? "
+                        "ORDER BY ts DESC LIMIT ?", (f"%{query}%", limit)).fetchall()
+
+
 def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
+    """全文检索。FTS5 的 unicode61 把整段中文当一个 token，无法子串匹配，
+    故 FTS 命中为空时回退到 LIKE 子串检索（保证中文回忆可用）。"""
     conn = _conn()
+    rows = []
     try:
         if _FTS_OK:
             rows = conn.execute("SELECT text, asin, ts FROM search_fts WHERE search_fts MATCH ? "
                                 "ORDER BY rank LIMIT ?", (query, limit)).fetchall()
-        else:
-            rows = conn.execute("SELECT text, asin, ts FROM search_fts WHERE text LIKE ? "
-                                "ORDER BY ts DESC LIMIT ?", (f"%{query}%", limit)).fetchall()
+        if not rows:
+            rows = _like_search(conn, query, limit)
     except Exception:
-        rows = conn.execute("SELECT text, asin, ts FROM search_fts WHERE text LIKE ? "
-                            "ORDER BY ts DESC LIMIT ?", (f"%{query}%", limit)).fetchall()
+        rows = _like_search(conn, query, limit)
     conn.close()
     return [dict(r) for r in rows]
 
@@ -153,6 +159,93 @@ def remember(text: str, asin: str = "") -> str:
     _index(conn, f"[记忆] {asin} {text}", asin or "", time.time())
     conn.commit(); conn.close()
     return f"已记到 {p.name}"
+
+
+# ── 持久指令（CLAUDE.md/AGENTS.md 同款）────────────────────────────────────────
+def instruction_paths(cwd: str = "") -> list:
+    """全局画像/账户指令 + 项目级指令（优先级：全局 → 项目）。"""
+    from pathlib import Path
+    paths = [config.IVYEA_DIR / "USER.md", config.IVYEA_DIR / "AGENTS.md"]
+    if cwd:
+        paths.append(Path(cwd) / "AGENTS.md")
+    return paths
+
+
+def load_instructions(cwd: str = "", limit: int = 6000) -> str:
+    """汇总 USER.md(画像) + AGENTS.md(账户/项目打法)，启动注入 system。"""
+    parts = []
+    for p in instruction_paths(cwd):
+        try:
+            if p.exists():
+                t = p.read_text(encoding="utf-8").strip()
+                if t:
+                    parts.append(f"# {p.name}\n{t}")
+        except Exception:
+            pass
+    return "\n\n".join(parts)[:limit]
+
+
+_AGENTS_TEMPLATE = """# 账户运营指令（AGENTS.md）
+
+> Ivyea Agent 每次启动会读取本文件并注入上下文。写你希望它长期遵守的打法与边界。
+
+## 店铺与目标
+- 主营类目 / 站点：
+- 目标 ACoS（或留空让它按毛利率推）：
+- 保护词（绝不否定）：品牌词、核心品类词…
+
+## 打法偏好
+- 否词：≥15 点击 0 单才否（保守）
+- 调 bid：单步 ≤15%，冷却 7 天
+- 旺季 / 大促节奏：
+
+## 边界（红线）
+- 不投 SBV / 不走 Vine / 不操控评论
+- 任何写操作必须人工逐条确认
+"""
+
+
+def init_agents(path: str) -> tuple:
+    """生成 AGENTS.md 模板。返回 (是否新建, 路径)。已存在则不覆盖。"""
+    from pathlib import Path
+    p = Path(path)
+    if p.exists():
+        return False, str(p)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(_AGENTS_TEMPLATE, encoding="utf-8")
+    return True, str(p)
+
+
+# ── 会话转录回忆 + 摘要入库 ──────────────────────────────────────────────────
+def index_turn(role: str, text: str, session_id: str = "") -> None:
+    """把一轮对话入 FTS，支撑跨会话「上次聊到的那个…」回忆。"""
+    text = (text or "").strip()
+    if not text:
+        return
+    conn = _conn()
+    _index(conn, f"[对话:{role}] {text[:1000]}", "", time.time())
+    conn.commit(); conn.close()
+
+
+_NUDGE_KEYS = ("否词", "否决", "降bid", "加bid", "调价", "收割", "加预算", "放量")
+
+
+def nudge_hint(assistant_text: str) -> str:
+    """自策展提示：回复涉及打法/决策且未在记要点时，提醒可长期沉淀。"""
+    t = assistant_text or ""
+    if any(k in t for k in _NUDGE_KEYS) and "记住" not in t:
+        return "想让我长期记住这条打法/否决？说一句「记住…」即可，下次自动遵守。"
+    return ""
+
+
+def remember_summary(text: str, session_id: str = "") -> None:
+    """把上下文压缩出的会话摘要入库（长期可召回）。"""
+    text = (text or "").strip()
+    if not text:
+        return
+    conn = _conn()
+    _index(conn, f"[会话摘要] {text[:2000]}", "", time.time())
+    conn.commit(); conn.close()
 
 
 def annotate(actions: list, asin: str, stability_days: int = 5) -> list:

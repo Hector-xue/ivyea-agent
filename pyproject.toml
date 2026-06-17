@@ -4,16 +4,50 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ivyea-agent"
-version = "0.1.0"
-description = "Ivyea Agent — 自托管的亚马逊运营 CLI Agent（P1: 只读广告巡检）"
+version = "0.3.0"
+description = "Ivyea Agent — 自托管的亚马逊运营 CLI Agent（对话式 + 多模型 + 领星广告读写审批 + 通用工具 + 记忆）"
 readme = "README.md"
 requires-python = ">=3.9"
+authors = [{ name = "Hector" }]
+keywords = ["amazon", "advertising", "agent", "cli", "llm", "deepseek", "claude"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+]
 dependencies = [
     "pandas>=2.0",
     "openpyxl>=3.1",
     "httpx>=0.27",
     "prompt_toolkit>=3.0",
+    "cryptography>=42",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Hector-xue/ivyea-agent"
+Repository = "https://github.com/Hector-xue/ivyea-agent"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "build>=1.2"]
+anthropic = ["anthropic>=0.69"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = ["ivyea_agent/rule_engine_scripts", "build"]  # vendored 第三方脚本不按本仓风格
+
+[tool.ruff.lint]
+# 务实：放过长行/裸 except/分号一行(conn.commit();close() 的刻意紧凑)，主抓真错(未用导入/未定义名)
+ignore = ["E501", "E722", "E741", "E702"]
 
 [project.scripts]
 ivyea = "ivyea_agent.cli:main"

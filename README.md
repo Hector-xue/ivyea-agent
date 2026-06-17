@@ -98,7 +98,11 @@ ivyea model deepseek-chat   # 按 id 直接切
 已接入（OpenAI 兼容，可直接用）：OpenAI(GPT-4o)、DeepSeek、通义千问、Kimi/Moonshot、智谱GLM、豆包、MiniMax、OpenRouter、自定义端点。
 规划中：Anthropic Claude / Google Gemini（原生 API）、Codex（ChatGPT 会员登录）/ Claude（订阅登录）等登录制。
 
-### MCP 服务器（对话式配置 + 自动拉数）
+### MCP 服务器（通用数据源；⚠️ 不是领星广告源）
+
+> 更正（2026-06）：**领星广告数据不要走 MCP**——领星 MCP 无广告工具。领星请用上文
+> `--from-lingxing`。本节的 MCP 客户端用于接入**其它**通用数据源（Sorftime/SIF/自建等）。
+> 下文示例里凡出现 `领星` 仅为历史占位，实际请换成你的非领星 MCP 服务器名。
 
 ```bash
 ivyea mcp add               # 对话式添加：名称 / 传输(http·sse·stdio) / URL / 鉴权(header·query)
@@ -196,16 +200,60 @@ ivyea memory note B0XXXX     # 看某 ASIN 的运营记忆笔记
 ```
 对话里：`/memory`、或直接说"记住…/回忆…"（remember / recall 工具）。
 
+## 领星 OpenAPI 店铺巡检（真实广告数据，推荐）
+
+> ⚠️ 重要更正（2026-06）：**领星 MCP 没有广告工具**（只有 ERP/库存/利润）。真实广告
+> 数据走**领星 OpenAPI**。agent 已独立实现领星 OpenAPI（鉴权/签名/拉数），并移植了
+> ivyea-ops 的 sid 维度确定性规则引擎（五杠杆 + 毛利率推目标ACOS）。
+
+```bash
+ivyea lingxing setup        # 配 host/appid/secret（只存本机 ~/.ivyea/）
+ivyea lingxing probe        # 自检：取令牌 + 拉店铺列表
+ivyea lingxing sellers      # 列店铺，拿 sid
+ivyea patrol --from-lingxing --sid 1863 --days 30   # 店铺维度只读巡检
+```
+窗口逐日聚合（丢最近 N 天归因），按否词/收割/降bid/加bid/加预算分区出候选，每条带规则+
+指标+理由，历史否决/冷却自动拦截。
+
+### 写入执行（审批制，默认 dry-run）
+
+```bash
+ivyea patrol --from-lingxing --sid 1863 --days 30 --execute   # 巡检 + 逐条人工审批
+ivyea lingxing operate status      # 看写入总开关（默认 关）
+ivyea lingxing operate on          # 开启真写（默认 120 分钟后自动关）
+ivyea lingxing operate off         # 关回 dry-run
+ivyea audit list                   # 看写入审计
+ivyea audit rollback <审计ID>      # 一键回滚（否词→归档；调bid/预算→还原旧值）
+```
+写入支持：**否词 / 关键词调bid / 活动预算**（收割为建议项，不自动写）。三重硬闸：
+① 每条**人工逐条审批**（`[1]是 [2]本会话都允许 [3]否 [4]改 [5]全停`）；② **operate 开关**默认关，
+不开就只 dry-run；③ **幅度 ≤±20%** 硬闸 + 历史否决/冷却拦截。写前抓快照，失败自动熔断关开关。
+请求体/路由/回滚逐字段对齐领星官方 + ivyea-ops 生产实现。
+
 ## 设计 / 路线图
 
-- 架构与方法论：见 IvyeaOps 知识库 `ivyea-agent/架构方案`、`amazon-ops/*`。
-- LLM Provider 层：多模型统一接口（P1 接 DeepSeek，预留 OpenAI/Anthropic/Gemini/Ollama）。⚠️ apimart 只生图、不能做 agent 主脑。
-- MCP：P1.5 接入「领星 ERP MCP」直接读广告报表（替代手动导 CSV）；写操作走网关 + 审核制（P2）。
-- 设计 v2（架构学 Hermes、交互学 Claude Code）：见知识库 `ivyea-agent/设计v2`。
-- 记忆（P3）：**SQLite FTS5 + 策展 markdown + 摘要**（Hermes 同款，自有，不用向量库/GBrain）。
-- 路线：P1 只读巡检 ✅ → P1.5 通用 MCP ✅ → P2 审核制执行 ✅ → P2.5 对话式+权限审批 ✅ → P3 记忆 ✅ → P4 嵌入 IvyeaOps → P5 多 ASIN/多店 + 自学习。
+- 总纲：对标 Hermes/Codex/Claude Code 的完整方案见 `/root/ivyea-agent-优化方案-对标三大产品.md`。
+- LLM Provider 层：**OpenAI 兼容（DeepSeek 等）+ Claude 原生（官方 SDK，含 prompt caching）均可用**；`ivyea model` 选 `claude-opus`/`claude-sonnet`/`claude-haiku`（需 ANTHROPIC_API_KEY，可配自有网关 base_url）。Gemini/登录制规划中。⚠️ apimart 只生图、不能做 agent 主脑。
+- 数据源：① 本地 CSV（vendored 规则引擎，离线/试用兜底）② **领星 OpenAPI 店铺维度（真实广告链路）** ③ 通用 MCP（任意数据源，**非领星广告**）。
+- 记忆：SQLite FTS5 + 策展 markdown（中文回退 LIKE 子串检索）；**会话转录回忆 + 压缩摘要入库 + 自策展 nudge + 持久指令注入（USER.md/AGENTS.md，CLAUDE.md 同款，`/init` 生成）** 均已落地，已对真实 DeepSeek 验证指令被遵守。
 
-## 状态
+## 状态（诚实盘点 2026-06）
 
-P1/P1.5/P2/P2.5/P3 已完成（只读巡检、通用 MCP、审核制执行、对话+权限审批、记忆）。
-待验证真链路：DeepSeek 主脑 key（对话/复核）、真实 MCP 读写。P3 记忆进行中。
+**可用**：CSV 只读巡检；领星 OpenAPI 店铺维度巡检（真链路已实测：令牌+11店+报表 code=0）；**领星写入执行（否词/调bid/预算 + 审批 + operate开关 + 幅度闸 + 审计回滚）**——dry-run 与请求体已端到端验证，逻辑由 41 项 pytest 覆盖；通用 MCP 客户端；权限审批引擎；SQLite 记忆。
+
+**对话式内核**：**流式输出 + 多步工具循环 + 成本/token 核算 + 计划模式 + 上下文压缩 + 会话 resume + 终端 Markdown 渲染**均已实现并对真实 DeepSeek 验证（含 prompt caching 实测命中）。聊天命令：`/plan`/`/approve`（计划模式）、`/cost`（用量）、`/compact`（压缩上下文）、`/raw`（切原始流式）。续接会话：`ivyea --continue` 或 `ivyea chat --resume [<id>]`。长对话自动压缩省 token。
+
+**通用工具能力**：除广告巡检外，agent 还能 `read_file`/`list_dir`/`web_fetch`/`web_search`（只读自动放行）、`write_file`/`edit_file`/`run_python`（可用 pandas/openpyxl 读 Excel、算数）/`run_command`（写/执行经人工审批 + 计划模式拦截 + 沙箱限工作目录/超时/输出截断）。已对真实 DeepSeek 验证「读文件→run_python 计算→给结论」多步链路。
+
+**视觉（对标 Claude Code）**：长任务用 `todo_write` 渲染 **Todo/Plan 面板**（☑/◐/☐ 实时勾选，真实 DeepSeek 已驱动跑通）；文件改动审批显示**彩色 diff**（红删绿增）；状态栏显示 模型/计划模式/上下文 token/累计 ¥；终端 Markdown 渲染；`NO_COLOR` 环境变量去色。
+
+**工程化**：99 项 pytest（含**广告决策 eval 回归集**：样例报告的否词/放量/降bid 计数冻结，退化即变红）+ ruff lint 干净 + **GitHub Actions CI**（ubuntu/macos/windows × py3.9/3.11/3.12 矩阵，护 Windows 中文编码）+ sdist/wheel 构建通过 + tag 触发的 PyPI 发布工作流（待维护者打 tag）。
+
+**尚未实现 / 待办**（不再标“✅完成”）：
+- 领星**真实写入**仅 dry-run/单测验证，**尚未在生产真按下写**（需活跃广告店 + 你授权开 operate 实测）。
+- Claude 原生已接（格式翻译+流式+caching，请求被 Anthropic 接受），**成功响应未实测**（需 ANTHROPIC_API_KEY）。
+- Gemini/登录制（Codex/Claude 订阅）。
+- 发 PyPI（已就绪，待维护者打 tag）。
+- 嵌入 IvyeaOps（内核成库 + 反向 MCP）。
+
+路线（总纲 M0–M7）：M0 止血+核实 ✅ → M1 领星适配层（只读）✅ → M2 领星写入执行+审批 ✅ → M1+ 内核(流式/成本/Plan) ✅ → M1++ 上下文压缩/resume/Markdown ✅ → 模型层(Claude 原生+caching) ✅ → 工具能力(文件/执行/web+沙箱+门控) ✅ → 记忆(回忆/摘要入库/自策展/持久指令) ✅ → 交互/视觉(Todo面板/彩色diff/状态栏) ✅ → 工程化(CI/eval/打包) ✅ → 嵌入 IvyeaOps。

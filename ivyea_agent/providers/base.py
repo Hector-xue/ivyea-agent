@@ -33,6 +33,17 @@ class LLMProvider:
         [{id, name, arguments(dict)}]（无则空列表）。供对话式 Agent 循环使用。"""
         raise NotImplementedError
 
+    def stream_chat(self, messages: list, tools: Optional[list] = None,
+                    temperature: float = 0.3, timeout: float = 120.0):
+        """流式工具调用，产出事件流（{type:text,...} 增量 + {type:final,...}）。
+        默认回退到非流式 chat（不支持流式的 provider 也能用，只是无逐字效果）。"""
+        msg = self.chat(messages, tools=tools, temperature=temperature, timeout=timeout)
+        content = msg.get("content") or ""
+        if content:
+            yield {"type": "text", "text": content}
+        yield {"type": "final", "content": content,
+               "tool_calls": msg.get("tool_calls") or [], "usage": msg.get("usage") or {}}
+
 
 def from_settings(model_cfg: dict, api_key: str) -> LLMProvider:
     """按模型配置(models.py 条目/settings)构造 provider。
@@ -46,6 +57,12 @@ def from_settings(model_cfg: dict, api_key: str) -> LLMProvider:
     if kind == "openai":
         from .openai_compat import OpenAICompatProvider
         return OpenAICompatProvider(api_key, model, base_url)
+    if kind == "anthropic":
+        from .anthropic_provider import AnthropicProvider
+        # 只认 anthropic 自有网关；忽略切换残留的他家 base_url（默认走 api.anthropic.com）
+        raw = (model_cfg.get("base_url") or model_cfg.get("base") or "")
+        gw = raw if "anthropic" in raw.lower() else ""
+        return AnthropicProvider(api_key, model, gw)
     if kind == "native":
         raise LLMError(f"{model_cfg.get('label', model)} 走厂商原生 API，适配规划中；"
                        "当前可用：OpenAI 兼容类（OpenAI/DeepSeek/通义/Kimi/GLM/豆包/MiniMax/OpenRouter/自定义）。")

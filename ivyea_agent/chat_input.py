@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import sys
-from typing import Callable, Optional
+from typing import Callable
 
 from . import config
 

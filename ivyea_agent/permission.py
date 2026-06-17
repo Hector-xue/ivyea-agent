@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable
 
 from .actions import Action
 
@@ -64,6 +64,39 @@ def request(a: Action, state: PermissionState,
             print("      改为：" + a.summary())
             continue   # 改完重新确认
         print("      请输入 1-5。")
+
+
+def request_intent(intent: dict, preview_text: str, state: PermissionState,
+                   input_fn: Callable[[str], str] = _default_input,
+                   edit_fn: Callable[[dict, Callable], None] = None) -> str:
+    """通用写 intent 审批（领星等）。复用 session_allow（按 op_type）与 abort。
+    返回 APPROVE/DENY/ABORT。[4]改 委托给 edit_fn（可选）。"""
+    if state.aborted:
+        return ABORT
+    op_type = intent.get("op_type", "")
+    if op_type in state.session_allow:
+        return APPROVE
+    print("\n  需要确认写操作：")
+    print("      " + preview_text)
+    has_edit = edit_fn is not None
+    opts = "  [1]是  [2]本会话都允许此类  [3]否  " + ("[4]改一下  " if has_edit else "") + "[5]全部停: "
+    while True:
+        choice = input_fn(opts)
+        if choice in ("1", "y", "yes"):
+            return APPROVE
+        if choice == "2":
+            state.session_allow.add(op_type)
+            return APPROVE
+        if choice in ("3", "n", "no"):
+            return DENY
+        if choice in ("5", "q"):
+            state.aborted = True
+            return ABORT
+        if choice == "4" and has_edit:
+            edit_fn(intent, input_fn)
+            print("      已修改。")
+            return "recheck"
+        print("      请输入选项编号。")
 
 
 def _edit(a: Action, input_fn: Callable[[str], str]) -> None:

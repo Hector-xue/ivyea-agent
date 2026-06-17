@@ -5,11 +5,10 @@
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
 
-from . import actions as act_mod, executor, guardrails, memory, permission, patrol as patrol_mod
+from . import actions as act_mod, executor, guardrails, memory, permission, patrol as patrol_mod, tools_general
 from .rule_engine import RuleEngineError
 
 
@@ -22,6 +21,10 @@ class ToolContext:
     last_detail_csv: str = ""
     asin: str = ""
     actions: list = field(default_factory=list)
+    lingxing_result: dict = field(default_factory=dict)   # 最近一次领星巡检候选
+    plan_mode: bool = False                                # 计划模式：禁止写入执行
+    workspace: str = ""                                    # 通用工具的工作目录（默认 cwd）
+    todos: list = field(default_factory=list)              # 当前任务计划（todo_write 维护）
     perm: permission.PermissionState = field(default_factory=permission.PermissionState)
 
 
@@ -29,10 +32,13 @@ class ToolContext:
 TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "run_patrol",
-        "description": "对一个 ASIN 跑只读广告巡检。数据源二选一：本地 CSV(source) 或已配置的 MCP 服务器(from_mcp)。",
+        "description": "跑只读广告巡检。数据源三选一：本地 CSV(source)、MCP 服务器(from_mcp)、"
+                       "或领星 OpenAPI 店铺维度(from_lingxing=true + sid，最真实，推荐)。",
         "parameters": {"type": "object", "properties": {
-            "source": {"type": "string", "description": "搜索词报告 CSV 路径（用 MCP 时留空）"},
+            "source": {"type": "string", "description": "搜索词报告 CSV 路径（用 MCP/领星 时留空）"},
             "from_mcp": {"type": "string", "description": "MCP 服务器名（用 MCP 拉数时填）"},
+            "from_lingxing": {"type": "boolean", "description": "true=走领星 OpenAPI 店铺维度规则引擎（需 sid）"},
+            "sid": {"type": "integer", "description": "领星店铺 SID（from_lingxing 时必填）"},
             "asin": {"type": "string"}, "site": {"type": "string"},
             "days": {"type": "integer"}}, "required": []}}},
     {"type": "function", "function": {
@@ -58,13 +64,27 @@ TOOL_SCHEMAS = [
         "description": "检索历史记忆(过往巡检、决策、记的要点)，跨会话回忆。",
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string"}}, "required": ["query"]}}},
-]
+] + tools_general.GENERAL_TOOL_SCHEMAS
 
 
 def _t_run_patrol(args: dict, ctx: ToolContext) -> str:
     asin = args.get("asin")
     site = args.get("site") or "US"
     csv = args.get("source")
+    if args.get("from_lingxing"):
+        from . import lingxing_optimizer as opt, lingxing_report as lrep
+        from .lingxing_openapi import LingXingError, is_configured
+        if not is_configured():
+            return "领星 OpenAPI 未配置（请先在终端 `ivyea lingxing setup`）。"
+        if not args.get("sid"):
+            return "走领星巡检需要 sid（用 `ivyea lingxing sellers` 查店铺）。"
+        try:
+            result = opt.run_store(int(args["sid"]), days=int(args.get("days", 30)))
+        except LingXingError as e:
+            return f"领星拉数失败：{e}"
+        ctx.asin = f"sid:{args['sid']}"
+        ctx.lingxing_result = result   # 供 execute_actions 写入
+        return lrep.render(result, color=False)
     if args.get("from_mcp"):
         from .mcp_source import fetch_to_csv
         from .mcp_client import MCPError
@@ -108,7 +128,43 @@ def _t_propose_actions(args: dict, ctx: ToolContext) -> str:
     return "\n".join(lines)
 
 
+def _t_execute_lingxing(ctx: ToolContext) -> str:
+    """领星候选：逐条人工审批 → 写入（默认 dry-run；真写需 operate 开关）。"""
+    from . import lingxing_write as lw
+    writable = []
+    for c in ctx.lingxing_result.get("candidates", []):
+        if c.get("blocked"):
+            continue
+        intent = lw.candidate_to_intent(c)
+        if intent and intent.get("sid") is not None:
+            writable.append(intent)
+    if not writable:
+        return "没有可写入的候选（收割为建议项、被拦截项不写）。"
+    live = lw.operate_active()
+    results = [f"可写 {len(writable)} 个；operate 开关：{'开（真实写入）' if live else '关（dry-run）'}。"]
+    for intent in writable:
+        decision = permission.request_intent(intent, lw.preview(intent), ctx.perm)
+        if decision == permission.ABORT:
+            results.append("用户终止。")
+            break
+        if decision == permission.DENY:
+            memory.record_decision(f"sid:{intent.get('sid')}",
+                                   intent.get("keyword_text") or str(intent.get("target_name")),
+                                   lw._kind_for_memory(intent["op_type"]), "reject")
+            results.append(f"跳过：{lw.preview(intent)}")
+            continue
+        r = lw.execute(intent, dry_run=not live)
+        results.append(("✓ " if r["ok"] else "✗ ") + r["detail"])
+    if not live:
+        results.append("（dry-run 预览；真写需在终端 `ivyea lingxing operate on`。）")
+    return "\n".join(results)
+
+
 def _t_execute_actions(args: dict, ctx: ToolContext) -> str:
+    if ctx.plan_mode:
+        return "当前为计划模式（只读）：不执行写入。请先给用户行动计划，待 /approve 批准后再执行。"
+    if ctx.lingxing_result:
+        return _t_execute_lingxing(ctx)
     ex = [a for a in ctx.actions if a.executable]
     if not ex:
         return "没有可执行动作（先 propose_actions）。"
@@ -154,6 +210,7 @@ _DISPATCH = {
     "rollback": _t_rollback,
     "remember": _t_remember,
     "recall": _t_recall,
+    **tools_general.GENERAL_DISPATCH,
 }
 
 
