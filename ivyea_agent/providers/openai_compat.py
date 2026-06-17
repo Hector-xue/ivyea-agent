@@ -3,11 +3,19 @@ GLM / 豆包 / MiniMax / OpenRouter / 自定义端点（只是 base_url 不同�
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Iterable, Iterator
 
 import httpx
 
 from .base import LLMError, LLMProvider
+
+_RETRIES = 3
+_RETRYABLE = {429, 500, 502, 503, 504, 529}   # 限流/服务端瞬时错误可重试
+
+
+def _backoff(attempt: int) -> float:
+    return min(8.0, 0.8 * (2 ** attempt))      # 0.8s, 1.6s, 3.2s…封顶 8s
 
 
 def parse_sse(lines: Iterable[str]) -> Iterator[dict]:
@@ -75,16 +83,24 @@ class OpenAICompatProvider(LLMProvider):
             raise LLMError("API key 未配置（用 /config 或 ivyea model 配置）")
         if not self.base_url:
             raise LLMError("base_url 未配置")
-        try:
-            resp = httpx.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                json=payload, timeout=timeout)
-        except Exception as exc:  # noqa: BLE001
-            raise LLMError(f"连接失败：{exc}") from exc
-        if resp.status_code != 200:
-            raise LLMError(f"HTTP {resp.status_code}: {resp.text[:200]}")
-        return resp.json()
+        last = ""
+        for attempt in range(_RETRIES):
+            try:
+                resp = httpx.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                    json=payload, timeout=timeout)
+            except httpx.HTTPError as exc:
+                last = f"连接失败：{exc}"   # 网络错误可重试
+            else:
+                if resp.status_code == 200:
+                    return resp.json()
+                last = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                if resp.status_code not in _RETRYABLE:
+                    raise LLMError(last)   # 4xx 等不可重试，直接抛
+            if attempt < _RETRIES - 1:
+                time.sleep(_backoff(attempt))
+        raise LLMError(f"已重试 {_RETRIES} 次仍失败：{last}")
 
     def complete(self, system: str, user: str, json_mode: bool = False,
                  temperature: float = 0.2, timeout: float = 60.0) -> str:
@@ -93,14 +109,8 @@ class OpenAICompatProvider(LLMProvider):
             "temperature": temperature, "stream": False}
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
-        last = None
-        for _ in range(3):
-            try:
-                data = self._post(payload, timeout)
-                return (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
-            except LLMError as e:
-                last = e
-        raise LLMError(f"调用失败（已重试）：{last}")
+        data = self._post(payload, timeout)   # _post 已内置重试/退避
+        return (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
 
     def chat(self, messages, tools=None, temperature=0.3, timeout=120.0):
         payload = {"model": self.model, "messages": messages,
@@ -131,14 +141,29 @@ class OpenAICompatProvider(LLMProvider):
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-        try:
-            with httpx.stream("POST", f"{self.base_url}/chat/completions",
-                              headers={"Authorization": f"Bearer {self.api_key}",
-                                       "Content-Type": "application/json"},
-                              json=payload, timeout=timeout) as resp:
-                if resp.status_code != 200:
-                    body = resp.read().decode("utf-8", "replace")[:200]
-                    raise LLMError(f"HTTP {resp.status_code}: {body}")
-                yield from parse_sse(resp.iter_lines())
-        except httpx.HTTPError as exc:
-            raise LLMError(f"流式连接失败：{exc}") from exc
+        last = ""
+        for attempt in range(_RETRIES):
+            yielded = False
+            retryable = False
+            try:
+                with httpx.stream("POST", f"{self.base_url}/chat/completions",
+                                  headers={"Authorization": f"Bearer {self.api_key}",
+                                           "Content-Type": "application/json"},
+                                  json=payload, timeout=timeout) as resp:
+                    if resp.status_code != 200:
+                        last = f"HTTP {resp.status_code}: {resp.read().decode('utf-8', 'replace')[:200]}"
+                        retryable = resp.status_code in _RETRYABLE
+                    else:
+                        for ev in parse_sse(resp.iter_lines()):
+                            yielded = True
+                            yield ev
+                        return   # 流式正常结束
+            except httpx.HTTPError as exc:
+                last = f"流式连接失败：{exc}"
+                retryable = True
+            if yielded:                       # 已吐内容，不能安全重试/降级
+                raise LLMError(last)
+            if retryable and attempt < _RETRIES - 1:
+                time.sleep(_backoff(attempt))
+                continue
+            raise LLMError(last)

@@ -671,7 +671,7 @@ def _print_welcome_box(lines: list, width: int = 58) -> None:
 
 def _cmd_chat(args: argparse.Namespace) -> int:
     from . import agent_loop, agent_tools, config as cfg, pricing, sessions, context as ctx_mod, markdown, memory
-    from .providers import from_settings, LLMError
+    from .providers import from_settings, build_chain, LLMError
 
     # 首次运行：无配置 → 先走引导
     if not cfg.SETTINGS_FILE.exists() and not cfg.get_active_key() and sys.stdin.isatty():
@@ -860,7 +860,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         messages.append({"role": "user", "content": line})
         try:
             mcfg = cfg.get_model_config()
-            provider = from_settings(mcfg, api_key)
+            provider = build_chain(mcfg, api_key, narrate=lambda s: print(s))
             if render_md:
                 # 缓冲 + spinner，收尾渲染 markdown
                 spin = _LiveSpinner()
