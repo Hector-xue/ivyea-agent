@@ -25,6 +25,7 @@ class ToolContext:
     lingxing_result: dict = field(default_factory=dict)   # 最近一次领星巡检候选
     plan_mode: bool = False                                # 计划模式：禁止写入执行
     workspace: str = ""                                    # 通用工具的工作目录（默认 cwd）
+    todos: list = field(default_factory=list)              # 当前任务计划（todo_write 维护）
     perm: permission.PermissionState = field(default_factory=permission.PermissionState)
 
 

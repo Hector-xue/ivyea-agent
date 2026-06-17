@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from . import permission
+from . import panels, permission
 
 _MAX_OUT = 4000          # 工具返回截断（防爆上下文）
 _EXEC_TIMEOUT = 30       # 执行类默认超时（秒）
@@ -120,8 +120,13 @@ def t_write_file(args: dict, ctx) -> str:
         return "path 为空。"
     p = Path(path).resolve()
     exists = p.exists()
-    ok, msg = _gate(ctx, "write_file",
-                    f"写文件 {p}（{'覆盖' if exists else '新建'}，{len(content)} 字）")
+    preview = f"写文件 {p}（{'覆盖' if exists else '新建'}，{len(content)} 字）"
+    if exists:
+        try:
+            preview += "\n" + panels.render_diff(p.read_text(encoding="utf-8"), content, p.name)
+        except Exception:
+            pass
+    ok, msg = _gate(ctx, "write_file", preview)
     if not ok:
         return msg
     try:
@@ -148,7 +153,8 @@ def t_edit_file(args: dict, ctx) -> str:
         return "未找到要替换的原文（old 不匹配）。"
     if cnt > 1:
         return f"原文出现 {cnt} 次，不唯一；请提供更长的 old 以唯一定位。"
-    ok, msg = _gate(ctx, "edit_file", f"编辑 {p}：替换 1 处（{len(old)}→{len(new)} 字）")
+    preview = f"编辑 {p}：替换 1 处\n" + panels.render_diff(old, new, p.name)
+    ok, msg = _gate(ctx, "edit_file", preview)
     if not ok:
         return msg
     try:
@@ -194,6 +200,20 @@ def t_run_command(args: dict, ctx) -> str:
                 "运行命令：" + _truncate(command, 400))
 
 
+def t_todo_write(args: dict, ctx) -> str:
+    """更新任务计划（供长任务可视化）。todos:[{content,status}]。"""
+    todos = args.get("todos") or []
+    clean = []
+    for t in todos:
+        if isinstance(t, dict) and t.get("content"):
+            st = t.get("status", "pending")
+            clean.append({"content": str(t["content"]),
+                          "status": st if st in ("pending", "in_progress", "completed") else "pending"})
+    ctx.todos = clean
+    done = sum(1 for t in clean if t["status"] == "completed")
+    return f"已更新计划：{done}/{len(clean)} 完成。" if clean else "计划已清空。"
+
+
 # ── schema + dispatch ────────────────────────────────────────────────────────
 def _fn(name, desc, props, required=()):
     return {"type": "function", "function": {
@@ -219,6 +239,11 @@ GENERAL_TOOL_SCHEMAS = [
         {"url": {"type": "string"}}, ["url"]),
     _fn("web_search", "网页搜索关键词（尽力而为，无 key）。",
         {"query": {"type": "string"}}, ["query"]),
+    _fn("todo_write", "维护多步任务计划(让长任务可视化)。每步 {content, status: pending|in_progress|completed}。开始多步任务时先列计划，完成一步就更新状态。",
+        {"todos": {"type": "array", "items": {"type": "object", "properties": {
+            "content": {"type": "string"},
+            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}}}},
+        ["todos"]),
 ]
 
 GENERAL_DISPATCH = {
@@ -226,4 +251,5 @@ GENERAL_DISPATCH = {
     "write_file": t_write_file, "edit_file": t_edit_file,
     "run_python": t_run_python, "run_command": t_run_command,
     "web_fetch": t_web_fetch, "web_search": t_web_search,
+    "todo_write": t_todo_write,
 }

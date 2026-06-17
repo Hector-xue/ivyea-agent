@@ -69,8 +69,18 @@ def _vis_len(s: str) -> int:
         return len(re.sub(r"\033\[[0-9;]*m", "", s))
 
 
+def _strip_ansi(s: str) -> str:
+    return re.sub(r"\033\[[0-9;]*m", "", s)
+
+
 def render(md: str) -> str:
-    """把 markdown 文本渲染成带 ANSI 的终端字符串。"""
+    """把 markdown 文本渲染成带 ANSI 的终端字符串。NO_COLOR 环境变量则去色。"""
+    import os
+    out = _render(md)
+    return _strip_ansi(out) if os.environ.get("NO_COLOR") else out
+
+
+def _render(md: str) -> str:
     lines = md.splitlines()
     out: list[str] = []
     in_code = False

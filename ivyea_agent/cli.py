@@ -633,6 +633,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         from_mcp=args.from_mcp, execute=args.execute, workspace=os.getcwd(),
         protected=[w for w in (args.protected or "").split(",") if w.strip()])
     meter = pricing.UsageMeter()
+    _ui = {"ctx": 0}                                        # 状态栏:上下文 token 估算
     instructions = memory.load_instructions(os.getcwd())   # USER.md/AGENTS.md 持久指令
 
     def _sys_msg() -> dict:
@@ -686,8 +687,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     def _status() -> str:
         plan = "计划模式 · " if ctx.plan_mode else ""
         cost = f"¥{meter.cost:.4f} · " if meter.turns else ""
+        cx = f"ctx ~{_ui['ctx'] // 1000}k · " if _ui["ctx"] else ""
         return (f" ivyea · {_label()} · {plan}"
-                f"{'真实写' if args.execute else 'dry-run'} · {cost}/help 命令、Tab 补全 ")
+                f"{'真实写' if args.execute else 'dry-run'} · {cx}{cost}/help 命令、Tab 补全 ")
 
     ci = chat_input.ChatInput(SLASH_COMMANDS, _status)
 
@@ -809,8 +811,12 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 print(f"{_C['c']}●{_C['x']} ", end="", flush=True)
                 out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""))
             c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
+            _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
             if c:
                 print(f"{_C['d']}  (本轮 ¥{c:.4f} · 累计 ¥{meter.cost:.4f}){_C['x']}")
+            from . import panels
+            if ctx.todos:
+                print(panels.render_todos(ctx.todos, color=sys.stdout.isatty()))
             print()
             # 记忆：会话转录入库 + 自策展提示
             memory.index_turn("user", line, sid)
