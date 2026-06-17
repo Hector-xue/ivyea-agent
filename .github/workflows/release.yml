@@ -1,16 +1,16 @@
 name: Release
 
-# 仅在打 tag（v*）时触发；日常不运行。发布需维护者手动打 tag + 在 PyPI 配置可信发布。
+# 打 tag（v*）即发布：构建 sdist+wheel，作为 GitHub Release 资产上传（同 ivyea-ops 方式，零外部配置）。
+# 用户安装：pip install <release 里的 .whl 链接>，或 pipx install git+https://github.com/Hector-xue/ivyea-agent.git
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: read
-  id-token: write   # PyPI Trusted Publishing（无需 token）
+  contents: write   # 创建 / 更新 GitHub Release
 
 jobs:
-  build-publish:
+  build-release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,5 +19,10 @@ jobs:
           python-version: "3.11"
       - name: Build sdist + wheel
         run: python -m pip install --upgrade build && python -m build
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
