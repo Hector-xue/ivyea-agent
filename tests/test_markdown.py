@@ -10,7 +10,8 @@ def _plain(s: str) -> str:
     return re.sub(r"\033\[[0-9;]*m", "", s)
 
 
-def test_heading_and_bold():
+def test_heading_and_bold(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
     out = markdown.render("# 标题\n这是 **重点** 内容")
     assert "标题" in out and "\033[1m" in out          # 有粗体 ANSI
     assert "**" not in out                              # markdown 语法不外泄

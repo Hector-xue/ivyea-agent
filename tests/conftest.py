@@ -19,7 +19,8 @@ def ivyea_home(monkeypatch):
     importlib.reload(config)
     for mod in ("ivyea_agent.memory", "ivyea_agent.lingxing_openapi",
                 "ivyea_agent.lingxing_cache", "ivyea_agent.pricing",
-                "ivyea_agent.sessions", "ivyea_agent.audit", "ivyea_agent.shadow"):
+                "ivyea_agent.sessions", "ivyea_agent.audit", "ivyea_agent.shadow",
+                "ivyea_agent.action_queue", "ivyea_agent.doctor", "ivyea_agent.profiles"):
         if mod in sys.modules:
             importlib.reload(sys.modules[mod])
     yield config.IVYEA_DIR

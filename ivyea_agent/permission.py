@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import ui
 from .actions import Action
 
 APPROVE, DENY, ABORT = "approve", "deny", "abort"
@@ -45,10 +46,10 @@ def request(a: Action, state: PermissionState,
     if a.kind in state.session_allow:
         return APPROVE
 
-    print("\n  需要确认写操作：")
-    print("      " + preview(a))
+    print()
+    print(ui.panel("需要确认写操作", preview(a), kind="warn"))
     while True:
-        choice = input_fn("  [1]是  [2]本会话都允许此类  [3]否  [4]改一下  [5]全部停: ")
+        choice = input_fn("选择 [1]批准  [2]本会话同类都批准  [3]拒绝  [4]修改  [5]全部停止: ")
         if choice in ("1", "y", "yes"):
             return APPROVE
         if choice == "2":
@@ -61,9 +62,9 @@ def request(a: Action, state: PermissionState,
             return ABORT
         if choice == "4":
             _edit(a, input_fn)
-            print("      改为：" + a.summary())
+            print(ui.message("info", "已修改为：" + a.summary()))
             continue   # 改完重新确认
-        print("      请输入 1-5。")
+        print(ui.message("warn", "请输入 1-5。"))
 
 
 def request_intent(intent: dict, preview_text: str, state: PermissionState,
@@ -76,10 +77,10 @@ def request_intent(intent: dict, preview_text: str, state: PermissionState,
     op_type = intent.get("op_type", "")
     if op_type in state.session_allow:
         return APPROVE
-    print("\n  需要确认写操作：")
-    print("      " + preview_text)
+    print()
+    print(ui.panel("需要确认写操作", preview_text, kind="warn"))
     has_edit = edit_fn is not None
-    opts = "  [1]是  [2]本会话都允许此类  [3]否  " + ("[4]改一下  " if has_edit else "") + "[5]全部停: "
+    opts = "选择 [1]批准  [2]本会话同类都批准  [3]拒绝  " + ("[4]修改  " if has_edit else "") + "[5]全部停止: "
     while True:
         choice = input_fn(opts)
         if choice in ("1", "y", "yes"):
@@ -94,9 +95,9 @@ def request_intent(intent: dict, preview_text: str, state: PermissionState,
             return ABORT
         if choice == "4" and has_edit:
             edit_fn(intent, input_fn)
-            print("      已修改。")
+            print(ui.message("info", "已修改，请重新确认。"))
             return "recheck"
-        print("      请输入选项编号。")
+        print(ui.message("warn", "请输入选项编号。"))
 
 
 def _edit(a: Action, input_fn: Callable[[str], str]) -> None:

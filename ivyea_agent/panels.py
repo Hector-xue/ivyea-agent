@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import difflib
+import shutil
+import textwrap
 
 _X = "\033[0m"
 _DIM, _B = "\033[2m", "\033[1m"
@@ -22,6 +24,8 @@ def render_todos(todos: list, *, color: bool = True) -> str:
     """todos: [{content, status: pending|in_progress|completed}] → 面板。"""
     if not todos:
         return ""
+    width = max(36, min(shutil.get_terminal_size((88, 24)).columns, 100))
+    body_width = max(20, width - 5)
     done = sum(1 for t in todos if t.get("status") == "completed")
     head = f"{_CYAN if color else ''}╭─ 计划 {done}/{len(todos)}{_X if color else ''}"
     lines = [head]
@@ -31,7 +35,10 @@ def render_todos(todos: list, *, color: bool = True) -> str:
         c = c if color else ""
         x = _X if color else ""
         bar = f"{_CYAN}│{_X} " if color else "│ "
-        lines.append(f"{bar}{c}{icon} {t.get('content', '')}{x}")
+        wrapped = textwrap.wrap(str(t.get("content", "")), width=body_width) or [""]
+        lines.append(f"{bar}{c}{icon} {wrapped[0]}{x}")
+        for cont in wrapped[1:]:
+            lines.append(f"{bar}{c}  {cont}{x}")
     lines.append(f"{_CYAN if color else ''}╰─{_X if color else ''}")
     return "\n".join(lines)
 

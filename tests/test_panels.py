@@ -26,6 +26,12 @@ def test_render_todos_empty():
     assert panels.render_todos([]) == ""
 
 
+def test_render_todos_wraps_long_content(monkeypatch):
+    monkeypatch.setattr("shutil.get_terminal_size", lambda fallback: __import__("os").terminal_size((44, 20)))
+    out = panels.render_todos([{"content": "a " * 40, "status": "pending"}], color=False)
+    assert len(out.splitlines()) > 3
+
+
 def test_render_diff_colors():
     out = panels.render_diff("bid 1.00\nstate on", "bid 0.85\nstate on", "kw")
     assert "\033[31m" in out and "\033[32m" in out      # 红删绿增
@@ -73,3 +79,18 @@ def test_markdown_no_color(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
     out = markdown.render("# 标题\n**粗体**")
     assert "\033[" not in out and "标题" in out and "粗体" in out
+
+
+def test_ui_message_and_panel_no_color(monkeypatch):
+    from ivyea_agent import ui
+    monkeypatch.setenv("NO_COLOR", "1")
+    msg = ui.message("warn", "检查配置")
+    box = ui.panel("标题", "很长的内容 " * 10, kind="warn", width=48)
+    assert "\033[" not in msg + box
+    assert "检查配置" in msg and "标题" in box
+
+
+def test_ui_tool_call_truncates_args():
+    from ivyea_agent import ui
+    out = ui.tool_call("read_file", {"path": "/tmp/" + "x" * 100}, color=False)
+    assert "read_file" in out and "..." in out

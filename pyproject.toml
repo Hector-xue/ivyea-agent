@@ -57,3 +57,4 @@ packages = ["ivyea_agent", "ivyea_agent.providers", "ivyea_agent.rule_engine_scr
 
 [tool.setuptools.package-data]
 "ivyea_agent.rule_engine_scripts" = ["*.csv"]
+"ivyea_agent" = ["knowledge_base/index.json", "knowledge_base/**/*.md"]

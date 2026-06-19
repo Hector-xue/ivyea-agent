@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from . import actions as act_mod, executor, guardrails, memory, permission, patrol as patrol_mod, tools_general
+from . import account_diagnosis, action_queue, actions as act_mod, executor, guardrails, knowledge, memory, permission, patrol as patrol_mod, profiles, tools_general
 from .rule_engine import RuleEngineError
 
 
@@ -40,7 +40,18 @@ TOOL_SCHEMAS = [
             "from_lingxing": {"type": "boolean", "description": "true=走领星 OpenAPI 店铺维度规则引擎（需 sid）"},
             "sid": {"type": "integer", "description": "领星店铺 SID（from_lingxing 时必填）"},
             "asin": {"type": "string"}, "site": {"type": "string"},
+            "target_acos": {"type": "number", "description": "目标 ACOS；留空则读取运营画像/全局配置"},
             "days": {"type": "integer"}}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "run_account_diagnosis",
+        "description": "账户级广告诊断：按 ASIN/活动/搜索词汇总浪费、赢家词、预算观察和 Listing 语义缺口。适合先看全局再决定是否巡检/执行。",
+        "parameters": {"type": "object", "properties": {
+            "source": {"type": "string", "description": "搜索词/广告报表 CSV 路径"},
+            "target_acos": {"type": "number", "description": "目标 ACOS，如 0.3"},
+            "listing_text": {"type": "string", "description": "可选：Listing 标题/五点/A+ 文本，用于检查赢家词是否覆盖"},
+            "min_clicks_no_order": {"type": "integer", "description": "零单浪费词最小点击数，默认 12"},
+            "top_n": {"type": "integer", "description": "每组最多返回条数，默认 8"}},
+            "required": ["source"]}}},
     {"type": "function", "function": {
         "name": "propose_actions",
         "description": "基于最近一次巡检，提取可执行动作（否词/调价）并做护栏检查，返回动作清单。",
@@ -60,6 +71,12 @@ TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": {
             "text": {"type": "string"}, "asin": {"type": "string"}}, "required": ["text"]}}},
     {"type": "function", "function": {
+        "name": "knowledge_search",
+        "description": "搜索 Ivyea 内置亚马逊知识库（官方摘要/规则卡/社区经验模板）。广告、Listing、预算、否词、关键词生命周期问题优先调用。",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer"}}, "required": ["query"]}}},
+    {"type": "function", "function": {
         "name": "recall",
         "description": "检索历史记忆(过往巡检、决策、记的要点)，跨会话回忆。",
         "parameters": {"type": "object", "properties": {
@@ -69,7 +86,8 @@ TOOL_SCHEMAS = [
 
 def _t_run_patrol(args: dict, ctx: ToolContext) -> str:
     asin = args.get("asin")
-    site = args.get("site") or "US"
+    profile = profiles.resolve(asin=asin or ctx.asin)
+    site = args.get("site") or profile.get("site") or "US"
     csv = args.get("source")
     if args.get("from_lingxing"):
         from . import lingxing_optimizer as opt, lingxing_report as lrep
@@ -99,7 +117,10 @@ def _t_run_patrol(args: dict, ctx: ToolContext) -> str:
     if not csv:
         return "错误：需要 source(CSV) 或 from_mcp。"
     try:
-        res = patrol_mod.patrol(csv, asin=asin, site=site, use_llm=False)
+        target_acos = args.get("target_acos")
+        if target_acos is None:
+            target_acos = profile.get("target_acos")
+        res = patrol_mod.patrol(csv, asin=asin, site=site, target_acos=target_acos, use_llm=False)
     except RuleEngineError as e:
         return f"规则引擎错误：{e}"
     ctx.last_report = res["text"]
@@ -112,16 +133,40 @@ def _t_run_patrol(args: dict, ctx: ToolContext) -> str:
             f"报告已生成（{res['md_path']}）。可调用 propose_actions 看可执行动作。")
 
 
+def _t_run_account_diagnosis(args: dict, ctx: ToolContext) -> str:
+    source = args.get("source") or ""
+    if not source:
+        return "错误：需要 source(CSV)。"
+    profile = profiles.resolve(asin=args.get("asin") or ctx.asin)
+    target_acos = args.get("target_acos")
+    if target_acos is None:
+        target_acos = profile.get("target_acos") or 0.3
+    try:
+        res = account_diagnosis.diagnose(
+            source,
+            target_acos=float(target_acos),
+            listing_text=args.get("listing_text") or "",
+            min_clicks_no_order=int(args.get("min_clicks_no_order") or 12),
+            top_n=int(args.get("top_n") or 8),
+        )
+    except Exception as e:  # noqa: BLE001
+        return f"账户诊断失败：{e}"
+    return account_diagnosis.render_md(res)
+
+
 def _t_propose_actions(args: dict, ctx: ToolContext) -> str:
     if not ctx.last_detail_csv:
         return "还没有巡检明细，请先 run_patrol。"
+    profile = profiles.resolve(asin=ctx.asin)
+    protected = list(ctx.protected) + list(profile.get("protected_terms") or [])
     acts = guardrails.annotate(act_mod.extract_actions(ctx.last_detail_csv, asin=ctx.asin),
-                               protected_terms=ctx.protected)
+                               protected_terms=protected)
     acts = memory.annotate(acts, ctx.asin)   # 记忆护栏：历史否决/5天稳定期
     ctx.actions = acts
+    queued = action_queue.enqueue_actions(acts, source=ctx.last_detail_csv, origin="chat")
     ex = [a for a in acts if a.executable]
     bl = [a for a in acts if a.blocked]
-    lines = [f"可执行 {len(ex)} 个，护栏拦截 {len(bl)} 个："]
+    lines = [f"可执行 {len(ex)} 个，护栏拦截 {len(bl)} 个；新入队 {len(queued)} 个："]
     for a in ex:
         lines.append(f"  ✓ {a.summary()}（{a.term_category},{a.confidence}）")
     for a in bl:
@@ -194,6 +239,10 @@ def _t_remember(args: dict, ctx: ToolContext) -> str:
     return memory.remember(args.get("text", ""), args.get("asin") or ctx.asin)
 
 
+def _t_knowledge_search(args: dict, ctx: ToolContext) -> str:
+    return knowledge.render_search(args.get("query", ""), limit=int(args.get("limit") or 5))
+
+
 def _t_recall(args: dict, ctx: ToolContext) -> str:
     hits = memory.search(args.get("query", ""), limit=8)
     if not hits:
@@ -209,10 +258,12 @@ def _t_rollback(args: dict, ctx: ToolContext) -> str:
 
 _DISPATCH = {
     "run_patrol": _t_run_patrol,
+    "run_account_diagnosis": _t_run_account_diagnosis,
     "propose_actions": _t_propose_actions,
     "execute_actions": _t_execute_actions,
     "rollback": _t_rollback,
     "remember": _t_remember,
+    "knowledge_search": _t_knowledge_search,
     "recall": _t_recall,
     **tools_general.GENERAL_DISPATCH,
 }

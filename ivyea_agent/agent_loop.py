@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from typing import Callable
 
+from . import ui
 from .agent_tools import TOOL_SCHEMAS, ToolContext, dispatch
 from .providers import LLMProvider
 
@@ -39,11 +40,9 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
                            for tc in tool_calls],
         })
         for tc in tool_calls:
-            _args = ", ".join(f"{k}={v}" for k, v in (tc["arguments"] or {}).items())
-            narrate(f"\033[36m⏺\033[0m {tc['name']}({_args})")
+            narrate(ui.tool_call(tc["name"], tc.get("arguments") or {}))
             result = dispatch(tc["name"], tc["arguments"], ctx)
-            first = result.splitlines()[0] if result else ""
-            narrate(f"\033[2m  ⎿ {first}\033[0m")
+            narrate(ui.tool_result(result))
             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
     return "（已达到本轮工具调用步数上限，请补充指令或分步进行。）"
 
@@ -89,10 +88,8 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
                            for tc in tool_calls],
         })
         for tc in tool_calls:
-            _args = ", ".join(f"{k}={v}" for k, v in (tc["arguments"] or {}).items())
-            narrate(f"\033[36m⏺\033[0m {tc['name']}({_args})")
+            narrate(ui.tool_call(tc["name"], tc.get("arguments") or {}))
             result = dispatch(tc["name"], tc["arguments"], ctx)
-            first = result.splitlines()[0] if result else ""
-            narrate(f"\033[2m  ⎿ {first}\033[0m")
+            narrate(ui.tool_result(result))
             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
     return {"text": "（已达到本轮工具调用步数上限，请补充指令或分步进行。）", "usage": total_usage}

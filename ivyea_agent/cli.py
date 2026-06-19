@@ -13,7 +13,7 @@ import os
 import subprocess
 import sys
 
-from . import __version__, config
+from . import __version__, config, ui
 
 
 def _ask(prompt: str, default: str = "") -> str:
@@ -129,14 +129,16 @@ def _config_wizard() -> int:
 
 def _print_config() -> int:
     s = config.load_settings()
-    print(f"配置目录: {config.IVYEA_DIR}")
-    print(f".env:      {config.ENV_FILE} ({'存在' if config.ENV_FILE.exists() else '缺失'})")
-    print(f"mcp.json:  {config.MCP_FILE} ({'存在' if config.MCP_FILE.exists() else '缺失'})")
-    print(f"主脑模型: {s.get('label', s.get('provider'))} · {s.get('model')} · kind={s.get('kind')}"
-          f" · key {'已配置' if config.get_active_key() else '未配置'}")
-    print(f"站点: {s.get('site')}　目标 ACoS: {s.get('target_acos')}")
     servers = config.load_mcp().get("mcpServers", {})
-    print(f"MCP 服务器: {', '.join(servers) if servers else '(无，用 ivyea mcp add 添加)'}")
+    print(ui.panel("当前配置", ui.kv([
+        ("配置目录", config.IVYEA_DIR),
+        (".env", f"{config.ENV_FILE} ({'存在' if config.ENV_FILE.exists() else '缺失'})"),
+        ("mcp.json", f"{config.MCP_FILE} ({'存在' if config.MCP_FILE.exists() else '缺失'})"),
+        ("主脑模型", f"{s.get('label', s.get('provider'))} · {s.get('model')} · kind={s.get('kind')}"
+                 f" · key {'已配置' if config.get_active_key() else '未配置'}"),
+        ("站点", f"{s.get('site')} · 目标 ACoS {s.get('target_acos')}"),
+        ("MCP 服务器", ', '.join(servers) if servers else "(无，用 ivyea mcp add 添加)"),
+    ]), kind="info"))
     return 0
 
 
@@ -234,6 +236,23 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
             auth = "header" if spec.get("headers") else ("query" if spec.get("query") else "none")
             print(f"  {name}\t[{t}]\t{loc}\t鉴权:{auth}")
         return 0
+    if args.action == "template":
+        from . import mcp_write
+        print(mcp_write.template_json())
+        return 0
+    if args.action == "validate":
+        from . import mcp_write
+        if not args.name:
+            print("用法: ivyea mcp validate <名称>", file=sys.stderr)
+            return 2
+        servers = config.load_mcp().get("mcpServers", {})
+        spec = servers.get(args.name or "")
+        if not spec:
+            print(f"未找到 MCP 服务器 '{args.name}'（先 ivyea mcp add）", file=sys.stderr)
+            return 2
+        errors = mcp_write.validate_spec(spec)
+        print(mcp_write.render_validation(args.name, spec))
+        return 1 if errors else 0
     if args.action == "remove":
         if not args.name:
             print("用法: ivyea mcp remove <名称>", file=sys.stderr)
@@ -300,6 +319,7 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
 
 def _cmd_patrol(args: argparse.Namespace) -> int:
     from . import patrol as patrol_mod
+    from . import profiles
     from .rule_engine import RuleEngineError
 
     if getattr(args, "from_lingxing", False):
@@ -312,29 +332,56 @@ def _cmd_patrol(args: argparse.Namespace) -> int:
         if not args.asin:
             print("--from-mcp 需要 --asin（按 ASIN 拉广告搜索词数据）", file=sys.stderr)
             return 2
-        site = args.site or config.get_setting("site", "US")
+        profile = profiles.resolve(asin=args.asin or "")
+        site = args.site or profile.get("site") or config.get_setting("site", "US")
         try:
-            print(f"[MCP] 从 '{args.from_mcp}' 拉取 {args.asin} 近 {args.days} 天广告数据…", file=sys.stderr)
+            print(ui.message("info", f"MCP 从 '{args.from_mcp}' 拉取 {args.asin} 近 {args.days} 天广告数据..."), file=sys.stderr)
             csv_path = fetch_to_csv(args.from_mcp, args.asin, site, days=args.days)
-            print(f"[MCP] 已拉取并转换为: {csv_path}", file=sys.stderr)
+            print(ui.message("success", f"MCP 已拉取并转换为: {csv_path}"), file=sys.stderr)
         except MCPError as e:
-            print(f"[MCP 错误] {e}", file=sys.stderr)
+            print(ui.message("error", f"MCP 错误: {e}"), file=sys.stderr)
             return 1
     if not csv_path:
         print("需要提供搜索词报告 CSV，或用 --from-mcp <服务器> 自动拉数。", file=sys.stderr)
         return 2
     try:
         args.csv = csv_path
+        profile = profiles.resolve(asin=args.asin or "")
         result = patrol_mod.patrol(
-            args.csv, asin=args.asin, site=args.site, target_acos=args.target_acos,
+            args.csv, asin=args.asin, site=args.site or profile.get("site"),
+            target_acos=args.target_acos if args.target_acos is not None else profile.get("target_acos"),
             report_type=args.report_type, output_dir=args.output_dir, use_llm=not args.no_llm)
     except RuleEngineError as e:
         print(f"[规则引擎错误] {e}", file=sys.stderr)
         return 1
     print(result["text"])
-    print(f"\n[已保存] {result['md_path']}", file=sys.stderr)
+    print("\n" + ui.message("success", f"报告已保存: {result['md_path']}"), file=sys.stderr)
     if not result["review"]["ok"] and not args.no_llm:
-        print(f"[提示] {result['review']['note']}", file=sys.stderr)
+        print(ui.message("warn", result["review"]["note"]), file=sys.stderr)
+    return 0
+
+
+def _cmd_diagnose(args: argparse.Namespace) -> int:
+    from . import account_diagnosis as ad, profiles, report
+
+    profile = profiles.resolve(asin=args.asin or "")
+    try:
+        result = ad.diagnose(
+            args.csv,
+            target_acos=args.target_acos if args.target_acos is not None
+            else float(profile.get("target_acos") or config.get_setting("target_acos", 0.3)),
+            listing_text=args.listing_text or "",
+            min_clicks_no_order=args.min_clicks_no_order,
+            top_n=args.top,
+        )
+    except Exception as e:
+        print(ui.message("error", f"诊断失败: {e}"), file=sys.stderr)
+        return 1
+    text = ad.render_md(result)
+    print(text)
+    if args.output_dir:
+        md_path = report.write_md(text, args.output_dir, asin="account")
+        print("\n" + ui.message("success", f"诊断报告已保存: {md_path}"), file=sys.stderr)
     return 0
 
 
@@ -356,16 +403,16 @@ def _patrol_lingxing(args: argparse.Namespace) -> int:
         if i == total:
             sys.stderr.write("\n")
     try:
-        print(f"[领星] 店铺 sid={args.sid} 拉取近 {args.days} 天广告报表（逐日聚合，已缓存的秒回）…",
+        print(ui.message("info", f"领星店铺 sid={args.sid} 拉取近 {args.days} 天广告报表（逐日聚合，已缓存的秒回）..."),
               file=sys.stderr)
         result = opt.run_store(int(args.sid), days=args.days, progress=_progress)
     except LingXingError as e:
-        print(f"[领星错误] {e}", file=sys.stderr)
+        print(ui.message("error", f"领星错误: {e}"), file=sys.stderr)
         return 1
     print(lrep.render(result, color=sys.stdout.isatty()))
     out_dir = args.output_dir or str(config.IVYEA_DIR / "patrol_out")
     md_path = report.write_md(lrep.render_md(result), out_dir, asin=f"sid{args.sid}")
-    print(f"\n[已保存] {md_path}", file=sys.stderr)
+    print("\n" + ui.message("success", f"报告已保存: {md_path}"), file=sys.stderr)
 
     from . import shadow
     n = shadow.record(args.sid, result.get("candidates", []))   # 影子台账：记建议
@@ -516,7 +563,7 @@ def _cmd_shadow(args: argparse.Namespace) -> int:
 
 
 def _cmd_apply(args: argparse.Namespace) -> int:
-    from . import actions as act_mod, executor, guardrails, memory
+    from . import actions as act_mod, executor, guardrails, memory, profiles
     from pathlib import Path
 
     detail = args.source
@@ -528,7 +575,9 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         print(f"找不到巡检明细 CSV（传入巡检输出目录或 *明细*.csv）：{args.source}", file=sys.stderr)
         return 2
 
+    profile = profiles.resolve(asin=asin)
     protected = [w for w in (args.protected or "").split(",") if w.strip()]
+    protected += list(profile.get("protected_terms") or [])
     acts = guardrails.annotate(act_mod.extract_actions(detail, asin=asin), protected_terms=protected)
     acts = memory.annotate(acts, asin)   # 记忆护栏：历史否决 / 5天稳定期
     blocked = [a for a in acts if a.blocked]
@@ -625,6 +674,7 @@ SLASH_COMMANDS = [
     ("/status", "查看当前配置与状态"),
     ("/mcp", "列出已配置的 MCP 服务器"),
     ("/tools", "列出 Agent 可用工具"),
+    ("/knowledge", "搜索内置亚马逊知识库：/knowledge 否词"),
     ("/memory", "记忆：状态/最近巡检；/memory <词> 检索"),
     ("/plan", "进入/退出计划模式（只读，不写入）"),
     ("/approve", "批准并退出计划模式，继续执行"),
@@ -713,7 +763,7 @@ def _print_welcome_box(lines: list, width: int = 58) -> None:
 
 
 def _cmd_chat(args: argparse.Namespace) -> int:
-    from . import agent_loop, agent_tools, config as cfg, pricing, sessions, context as ctx_mod, markdown, memory
+    from . import agent_loop, agent_tools, config as cfg, pricing, sessions, context as ctx_mod, markdown, memory, profiles
     from .providers import from_settings, build_chain, LLMError
 
     # 首次运行：无配置 → 先走引导
@@ -729,12 +779,18 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     ctx = agent_tools.ToolContext(
         from_mcp=args.from_mcp, execute=args.execute, workspace=os.getcwd(),
         protected=[w for w in (args.protected or "").split(",") if w.strip()])
+    if getattr(args, "asin", None):
+        ctx.asin = args.asin
     meter = pricing.UsageMeter()
     _ui = {"ctx": 0}                                        # 状态栏:上下文 token 估算
     instructions = memory.load_instructions(os.getcwd())   # USER.md/AGENTS.md 持久指令
+    profile_key = getattr(args, "asin", None) or "default"
+    profile_context = profiles.context_text(profiles.resolve(asin=getattr(args, "asin", "") or ""), label=profile_key)
 
     def _sys_msg() -> dict:
         content = agent_loop.SYSTEM_PROMPT + (agent_loop.PLAN_NOTE if ctx.plan_mode else "")
+        if profile_context:
+            content += "\n\n" + profile_context
         if instructions:
             content += "\n\n[长期指令/画像]\n" + instructions
         return {"role": "system", "content": content}
@@ -804,19 +860,19 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             print(_help_text()); continue
         if line == "/clear":
             messages = [_sys_msg()]
-            print("（已清空对话上下文）"); continue
+            print(ui.message("success", "已清空对话上下文")); continue
         if line == "/plan":
             ctx.plan_mode = not ctx.plan_mode
             messages[0] = _sys_msg()
-            print("已进入计划模式（只读，不写入；/approve 批准后执行）。" if ctx.plan_mode
-                  else "已退出计划模式。"); continue
+            print(ui.message("info", "已进入计划模式（只读，不写入；/approve 批准后执行）。") if ctx.plan_mode
+                  else ui.message("success", "已退出计划模式。")); continue
         if line == "/approve":
             if ctx.plan_mode:
                 ctx.plan_mode = False
                 messages[0] = _sys_msg()
-                print("已批准，退出计划模式。说“继续/执行”让我落地计划。")
+                print(ui.message("success", "已批准，退出计划模式。说“继续/执行”让我落地计划。"))
             else:
-                print("当前不在计划模式。")
+                print(ui.message("warn", "当前不在计划模式。"))
             continue
         if line == "/cost":
             lim = pricing.daily_limit()
@@ -824,11 +880,11 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             print((meter.summary() if meter.turns else "本会话还没有模型调用。") + tail); continue
         if line == "/raw":
             render_md = not render_md
-            print(f"已切换为 {'原始流式' if not render_md else 'Markdown 渲染'} 输出。"); continue
+            print(ui.message("success", f"已切换为 {'原始流式' if not render_md else 'Markdown 渲染'} 输出。")); continue
         if line == "/compact":
             ak = cfg.get_active_key()
             if not ak:
-                print("未配 key，无法压缩。"); continue
+                print(ui.message("warn", "未配 key，无法压缩。")); continue
             before = sum(len(str(m.get('content') or '')) for m in messages)
             provider = from_settings(cfg.get_model_config(), ak)
             messages, summary = ctx_mod.compact(messages, provider)
@@ -836,20 +892,30 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             if summary:
                 memory.remember_summary(summary, sid)
             _persist()
-            print(f"已压缩上下文（约 {before}→{after} 字），摘要已入库。" if summary else "上下文较短，无需压缩。")
+            print(ui.message("success", f"已压缩上下文（约 {before}→{after} 字），摘要已入库。") if summary
+                  else ui.message("info", "上下文较短，无需压缩。"))
             continue
         if line == "/init":
             p = memory.init_agents(str(cfg.IVYEA_DIR / "AGENTS.md"))
             if p[0]:
-                print(f"已生成账户指令模板：{p[1]}\n填好后重开对话即自动注入。")
+                print(ui.message("success", f"已生成账户指令模板：{p[1]}"))
+                print(ui.message("info", "填好后重开对话即自动注入。"))
             else:
-                print(f"已存在：{p[1]}（未覆盖）。`ivyea config edit` 或直接编辑它。")
+                print(ui.message("info", f"已存在：{p[1]}（未覆盖）。`ivyea config edit` 或直接编辑它。"))
             instructions = memory.load_instructions(os.getcwd())
             messages[0] = _sys_msg()
             continue
         if line == "/mcp":
             servers = cfg.load_mcp().get("mcpServers", {})
             print("MCP 服务器: " + (", ".join(servers) if servers else "(无，ivyea mcp add)")); continue
+        if line == "/knowledge" or line.startswith("/knowledge "):
+            from . import knowledge
+            q = line[10:].strip() if line.startswith("/knowledge ") else ""
+            if not q:
+                print("用法：/knowledge <关键词>，例如 /knowledge 否词")
+            else:
+                print(knowledge.render_search(q, limit=5))
+            continue
         if line == "/tools":
             for t in agent_tools.TOOL_SCHEMAS:
                 f = t["function"]; print(f"  {f['name']} — {f['description']}")
@@ -882,25 +948,33 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 cfg.apply_model(m)
                 print(f"已切换主脑: {m['label']}（{'已配 key' if cfg.get_active_key() else '未配 key，用 /model 配置'}）")
             else:
-                print(f"未知模型 id：{mid}。用 /model 看清单。")
+                print(ui.message("warn", f"未知模型 id：{mid}。用 /model 看清单。"))
             continue
         if line.startswith("/"):
             hits = [c for c, _ in SLASH_COMMANDS if c.startswith(line.split()[0])]
             tip = ("，你是否想用：" + " ".join(hits)) if hits else "，输入 /help 看全部"
-            print(f"未知命令 {line.split()[0]}{tip}"); continue
+            print(ui.message("warn", f"未知命令 {line.split()[0]}{tip}")); continue
 
         # 自然语言 → Agent 循环
         api_key = cfg.get_active_key()
         if not api_key:
-            print(f"⚠️ 未配置主脑模型 key，自然语言对话不可用。用 {_C['c']}/model{_C['x']} 选模型并配 key，或用斜杠命令。")
+            print(ui.message("warn", "未配置主脑模型 key，自然语言对话不可用。用 /model 选模型并配 key，或先用斜杠命令。"))
             continue
         # 成本护栏：每日 ¥ 上限
         _lim = pricing.daily_limit()
         if _lim > 0 and pricing.today_spend() >= _lim:
             if not _ask(f"今日已花 ¥{pricing.today_spend():.2f} 达上限 ¥{_lim:.2f}，仍继续？(y/N)").strip().lower().startswith("y"):
-                print(f"{_C['d']}（已暂停。调整上限：ivyea config set daily_cost_limit_cny <元>）{_C['x']}")
+                print(ui.message("info", "已暂停。调整上限：ivyea config set daily_cost_limit_cny <元>"))
                 continue
-        messages.append({"role": "user", "content": line})
+        from . import knowledge
+        kctx, kids = knowledge.context_for_query(line, limit=3)
+        user_content = line
+        if kctx:
+            user_content += ("\n\n[Ivyea 内置亚马逊知识库：本轮相关摘录]\n"
+                             + kctx
+                             + "\n\n要求：使用这些知识时说明依据，若与用户账户记忆冲突，以用户账户记忆为准。")
+            print(ui.message("muted", "已注入知识卡: " + ", ".join(kids)))
+        messages.append({"role": "user", "content": user_content})
         try:
             mcfg = cfg.get_model_config()
             provider = build_chain(mcfg, api_key, narrate=lambda s: print(s))
@@ -919,7 +993,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
             if c:
                 day = pricing.add_spend(c)
-                print(f"{_C['d']}  (本轮 ¥{c:.4f} · 累计 ¥{meter.cost:.4f} · 今日 ¥{day:.4f}){_C['x']}")
+                print(ui.message("muted", f"本轮 ¥{c:.4f} · 累计 ¥{meter.cost:.4f} · 今日 ¥{day:.4f}"))
             from . import panels
             if ctx.todos:
                 print(panels.render_todos(ctx.todos, color=sys.stdout.isatty()))
@@ -935,12 +1009,12 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 messages, _s = ctx_mod.compact(messages, provider)
                 if _s:
                     memory.remember_summary(_s, sid)
-                    print(f"{_C['d']}（上下文较长，已自动压缩并入库摘要以省 token）{_C['x']}")
+                    print(ui.message("info", "上下文较长，已自动压缩并入库摘要以省 token"))
             _persist()
         except KeyboardInterrupt:
-            print(f"\n{_C['d']}（已中断本轮，会话保留。继续输入即可。）{_C['x']}")
+            print("\n" + ui.message("info", "已中断本轮，会话保留。继续输入即可。"))
         except LLMError as e:
-            print(f"\n[模型错误] {e}")
+            print("\n" + ui.message("error", f"模型错误: {e}"))
             messages.pop()  # 撤回这条 user，避免污染上下文
 
 
@@ -991,6 +1065,240 @@ def _cmd_memory(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_knowledge(args: argparse.Namespace) -> int:
+    from . import knowledge
+
+    if args.action == "list":
+        for card in knowledge.list_cards():
+            tags = ",".join(card.get("tags", [])[:4])
+            print(f"{card['id']:<44} {card['source_type']:<18} {card['title']}  [{tags}]")
+        return 0
+    if args.action == "show":
+        if not args.query:
+            print("用法: ivyea knowledge show <知识ID>", file=sys.stderr)
+            return 2
+        card = knowledge.get_card(args.query)
+        if not card:
+            print(f"未找到知识ID：{args.query}", file=sys.stderr)
+            return 1
+        print(card["body"])
+        return 0
+    if args.action == "search":
+        if not args.query:
+            print("用法: ivyea knowledge search <关键词>", file=sys.stderr)
+            return 2
+        print(knowledge.render_search(args.query, limit=args.limit))
+        return 0
+    return 2
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    from . import doctor
+    checks = doctor.run_checks()
+    print(doctor.render(checks))
+    return 1 if any(c.status == "fail" for c in checks) else 0
+
+
+def _cmd_action(args: argparse.Namespace) -> int:
+    from . import action_queue, actions as act_mod, executor, guardrails, memory, profiles
+    from .mcp_client import MCPError
+    from pathlib import Path
+
+    item_id = args.id or args.source or ""
+    if args.action == "list":
+        if args.summary:
+            s = action_queue.summary()
+            print(f"pending={s.get('pending', 0)} approved={s.get('approved', 0)} "
+                  f"denied={s.get('denied', 0)} done={s.get('done', 0)} blocked={s.get('blocked', 0)}")
+        print(action_queue.render(action_queue.list_items(status=args.status or "", limit=args.limit)))
+        return 0
+    if args.action == "report":
+        items = action_queue.list_items(status=args.status or "", limit=args.limit)
+        text = action_queue.render_report(items)
+        if args.output:
+            from pathlib import Path
+            p = Path(args.output)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+            print(f"已导出报告：{p}")
+        else:
+            print(text)
+        return 0
+    if args.action == "show":
+        item = action_queue.get(item_id)
+        if not item:
+            print(f"未找到动作：{item_id}", file=sys.stderr)
+            return 1
+        print(__import__("json").dumps(item, ensure_ascii=False, indent=2))
+        return 0
+    if args.action == "clear":
+        n = action_queue.clear(args.status or "")
+        print(f"已清理 {n} 条。")
+        return 0
+    if args.action in ("approve", "deny", "done", "pending"):
+        status = {"approve": "approved", "deny": "denied"}.get(args.action, args.action)
+        if args.all:
+            n = action_queue.set_many_status(
+                status,
+                from_status=args.status or "pending",
+                limit=args.limit,
+                include_blocked=args.include_blocked,
+            )
+            print(f"已批量更新 {n} 条为 {status}。")
+            return 0
+        if not item_id:
+            print(f"用法: ivyea action {args.action} <ID>", file=sys.stderr)
+            return 2
+        ok = action_queue.set_status(item_id, status)
+        print("已更新。" if ok else f"未找到动作：{item_id}")
+        return 0 if ok else 1
+    if args.action == "execute":
+        if args.execute and not args.from_mcp:
+            print("真实执行需要 --from-mcp <服务器>（且该服务器配好 writeActions 映射）。", file=sys.stderr)
+            return 2
+        if item_id:
+            item = action_queue.get(item_id)
+            if not item:
+                print(f"未找到动作：{item_id}", file=sys.stderr)
+                return 1
+            items = [item]
+        else:
+            status = args.status or "approved"
+            items = action_queue.list_items(status=status, limit=args.limit)
+        if not items:
+            print("没有可执行的队列项。先用 `ivyea action approve <ID>` 批准动作。")
+            return 0
+
+        dry_run = not args.execute
+        print(f"== 动作队列{'真实执行' if args.execute else 'DRY-RUN 预演'} ==")
+        ok_count = 0
+        fail_count = 0
+        skip_count = 0
+        for item in items:
+            iid = item.get("id", "")
+            if item.get("status") != "approved":
+                print(f"  - {iid} 跳过：状态为 {item.get('status')}，需先 approve。")
+                skip_count += 1
+                continue
+            if item.get("blocked"):
+                print(f"  - {iid} 跳过：护栏拦截，{item.get('block_reason') or '无原因'}")
+                skip_count += 1
+                continue
+            action = action_queue.to_action(item)
+            if not action.executable:
+                print(f"  - {iid} 跳过：动作不可执行，{action.summary()}")
+                skip_count += 1
+                continue
+            try:
+                result = executor.execute(action, args.from_mcp or "", dry_run=dry_run)
+            except MCPError as exc:
+                result = {"ok": False, "detail": str(exc)}
+            mark = "✓" if result.get("ok") else "✗"
+            print(f"  {mark} {iid} {result.get('detail', action.summary())}")
+            if result.get("ok"):
+                ok_count += 1
+                if not dry_run:
+                    action_queue.mark_done(iid, str(result.get("detail", "")))
+            else:
+                fail_count += 1
+        if dry_run:
+            print("（这是 DRY-RUN。确认无误后加 --execute --from-mcp <服务器> 真实执行。）")
+        print(f"完成：成功 {ok_count}，跳过 {skip_count}，失败 {fail_count}。")
+        return 0 if fail_count == 0 else 1
+    if args.action == "import":
+        if not args.source:
+            print("用法: ivyea action import <巡检输出目录或明细CSV>", file=sys.stderr)
+            return 2
+        detail = args.source
+        asin = args.asin or ""
+        if Path(args.source).is_dir():
+            detail = act_mod.load_detail_from_dir(args.source) or ""
+            asin = asin or act_mod.asin_from_dir(args.source)
+        if not detail or not Path(detail).exists():
+            print(f"找不到巡检明细 CSV：{args.source}", file=sys.stderr)
+            return 2
+        profile = profiles.resolve(asin=asin)
+        protected = [w for w in (args.protected or "").split(",") if w.strip()]
+        protected += list(profile.get("protected_terms") or [])
+        acts = guardrails.annotate(act_mod.extract_actions(detail, asin=asin), protected_terms=protected)
+        acts = memory.annotate(acts, asin)
+        added = action_queue.enqueue_actions(acts, source=args.source, origin="import")
+        print(f"已导入 {len(added)} 条新动作（重复 pending/approved 已跳过）。")
+        if added:
+            print(action_queue.render(added))
+        return 0
+    return 2
+
+
+def _cmd_runs(args: argparse.Namespace) -> int:
+    from . import memory, sessions
+    import time as _t
+
+    if args.kind in ("all", "patrol"):
+        rows = memory.recent_runs(limit=args.limit)
+        print("最近巡检：")
+        if not rows:
+            print("  （无）")
+        for r in rows:
+            print(f"  {_t.strftime('%Y-%m-%d %H:%M', _t.localtime(r['ts']))} "
+                  f"{r.get('asin') or '-'}  否{r.get('negatives', 0)}/放{r.get('scale', 0)}/降{r.get('reduce', 0)}")
+    if args.kind in ("all", "sessions"):
+        rows = sessions.listing(limit=args.limit)
+        print("最近会话：")
+        if not rows:
+            print("  （无）")
+        for r in rows:
+            updated = _t.strftime('%Y-%m-%d %H:%M', _t.localtime(r["updated"])) if r.get("updated") else "-"
+            print(f"  {updated}  {r['id']}  {r['turns']}轮  {r['preview']}")
+    return 0
+
+
+def _cmd_profile(args: argparse.Namespace) -> int:
+    from . import profiles
+
+    key = args.key or "default"
+    if args.action == "list":
+        for name, profile in profiles.list_profiles():
+            target = profile.get("target_acos")
+            target_text = f"{target:.0%}" if target is not None else "未设"
+            protected = ",".join(profile.get("protected_terms") or [])
+            stage = profile.get("stage") or "-"
+            print(f"{name:<16} site={profile.get('site', 'US'):<3} target={target_text:<5} stage={stage} protected={protected or '-'}")
+        return 0
+    if args.action == "show":
+        print(profiles.render(profiles.get(key), label=key))
+        return 0
+    if args.action == "set":
+        fields = {
+            "site": args.site,
+            "target_acos": args.target_acos,
+            "stage": args.stage,
+            "protected_terms": args.protected,
+            "core_terms": args.core,
+            "competitor_terms": args.competitors,
+            "notes": args.notes,
+        }
+        profile = profiles.update(key, **fields)
+        print("已保存画像：")
+        print(profiles.render(profile, label=key))
+        return 0
+    return 2
+
+
+def _cmd_scorecard(args: argparse.Namespace) -> int:
+    from . import scorecard
+    text = scorecard.render_md(scorecard.build(limit=args.limit))
+    if args.output:
+        from pathlib import Path
+        p = Path(args.output)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+        print(f"已导出 Scorecard：{p}")
+    else:
+        print(text)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ivyea", description="Ivyea Agent — 亚马逊运营 CLI Agent")
     p.add_argument("--version", action="version", version=f"ivyea-agent {__version__}")
@@ -1006,8 +1314,8 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("value", nargs="?")
     pc.set_defaults(func=_cmd_config)
 
-    pm = sub.add_parser("mcp", help="MCP 配置/自检（add/list/remove/edit/tools/call）")
-    pm.add_argument("action", choices=["add", "list", "remove", "edit", "tools", "call"])
+    pm = sub.add_parser("mcp", help="MCP 配置/自检（add/list/remove/edit/tools/call/template/validate）")
+    pm.add_argument("action", choices=["add", "list", "remove", "edit", "tools", "call", "template", "validate"])
     pm.add_argument("name", nargs="?", help="服务器名（remove/tools/call 需要）")
     pm.add_argument("tool", nargs="?", help="工具名（call 需要）")
     pm.add_argument("--args", help="call 的入参 JSON，如 '{\"asin\":\"B0..\"}'")
@@ -1031,6 +1339,16 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--yes", action="store_true", help="跳过逐条确认（仍受 operate 开关约束）")
     pp.set_defaults(func=_cmd_patrol)
 
+    pd = sub.add_parser("diagnose", help="账户级广告诊断（CSV 汇总：浪费/赢家词/活动/Listing 缺口）")
+    pd.add_argument("csv", help="搜索词/广告报表 CSV")
+    pd.add_argument("--asin", help="指定 ASIN 画像；留空读取 default 画像")
+    pd.add_argument("--target-acos", type=float, dest="target_acos", help="目标 ACoS，如 0.3")
+    pd.add_argument("--listing-text", dest="listing_text", help="可选：Listing 标题/五点/A+ 文本，用于检查赢家词缺口")
+    pd.add_argument("--min-clicks-no-order", type=int, default=12, help="零单浪费词的最小点击阈值，默认 12")
+    pd.add_argument("--top", type=int, default=8, help="每组最多输出条数，默认 8")
+    pd.add_argument("--output-dir", dest="output_dir", help="保存 Markdown 报告到目录")
+    pd.set_defaults(func=_cmd_diagnose)
+
     pa = sub.add_parser("apply", help="审核制执行巡检建议（默认 dry-run；--execute 才真写）")
     pa.add_argument("source", help="巡检输出目录 或 *明细*.csv 路径")
     pa.add_argument("--from-mcp", dest="from_mcp", help="执行用的 MCP 服务器（需配 writeActions）")
@@ -1052,6 +1370,48 @@ def build_parser() -> argparse.ArgumentParser:
     pob = sub.add_parser("onboard", help="首次运行引导（选模型/配 key/可选领星）")
     pob.set_defaults(func=_cmd_onboard)
 
+    pdoc = sub.add_parser("doctor", help="环境体检：配置、依赖、知识库、磁盘、领星/MCP")
+    pdoc.set_defaults(func=_cmd_doctor)
+
+    pact = sub.add_parser("action", help="动作队列：import/list/show/report/approve/deny/done/pending/execute/clear")
+    pact.add_argument("action", choices=[
+        "import", "list", "show", "report", "approve", "deny", "done", "pending", "execute", "clear"])
+    pact.add_argument("source", nargs="?", help="import 的巡检目录/明细CSV；show/approve/execute 的 ID")
+    pact.add_argument("--id", help="动作 ID（也可作为第二个位置参数传入）")
+    pact.add_argument("--status", help="按状态过滤/清理：pending/approved/denied/done")
+    pact.add_argument("--limit", type=int, default=50)
+    pact.add_argument("--asin", help="导入时指定 ASIN")
+    pact.add_argument("--protected", help="导入时指定保护词，逗号分隔")
+    pact.add_argument("--all", action="store_true", help="approve/deny/done/pending 批量更新匹配状态的动作")
+    pact.add_argument("--include-blocked", action="store_true", help="批量更新时也包含护栏拦截项")
+    pact.add_argument("--summary", action="store_true", help="list 时先输出状态汇总")
+    pact.add_argument("--output", help="report 导出 Markdown 到指定路径；留空则打印")
+    pact.add_argument("--from-mcp", dest="from_mcp", help="execute 真实写入用的 MCP 服务器（需配 writeActions）")
+    pact.add_argument("--execute", action="store_true", help="execute 时真实写入；默认只 dry-run 预演")
+    pact.set_defaults(func=_cmd_action)
+
+    pruns = sub.add_parser("runs", help="查看近期巡检和对话会话")
+    pruns.add_argument("kind", nargs="?", choices=["all", "patrol", "sessions"], default="all")
+    pruns.add_argument("--limit", type=int, default=10)
+    pruns.set_defaults(func=_cmd_runs)
+
+    pprof = sub.add_parser("profile", help="运营画像：list / show [default|ASIN|sid:店铺] / set")
+    pprof.add_argument("action", choices=["list", "show", "set"])
+    pprof.add_argument("key", nargs="?", help="default、ASIN 或 sid:店铺ID")
+    pprof.add_argument("--site", help="站点，如 US/UK/DE")
+    pprof.add_argument("--target-acos", type=float, dest="target_acos", help="目标 ACOS，如 0.28")
+    pprof.add_argument("--stage", help="生命周期阶段，如 launch/growth/mature/clearance")
+    pprof.add_argument("--protected", help="保护词，逗号分隔")
+    pprof.add_argument("--core", help="核心词，逗号分隔")
+    pprof.add_argument("--competitors", help="竞品/对标词，逗号分隔")
+    pprof.add_argument("--notes", help="打法备注")
+    pprof.set_defaults(func=_cmd_profile)
+
+    pscore = sub.add_parser("scorecard", help="运营评估：建议采纳率、执行率、护栏/影子模式概览")
+    pscore.add_argument("--limit", type=int, default=1000)
+    pscore.add_argument("--output", help="导出 Markdown 到指定路径")
+    pscore.set_defaults(func=_cmd_scorecard)
+
     psh = sub.add_parser("shadow", help="影子模式：on/off（只记不写）/ list / report（回测若照做的收益）")
     psh.add_argument("action", choices=["on", "off", "list", "report"])
     psh.add_argument("--sid", help="店铺 SID（report/list）")
@@ -1067,9 +1427,16 @@ def build_parser() -> argparse.ArgumentParser:
     pmem.add_argument("query", nargs="?")
     pmem.set_defaults(func=_cmd_memory)
 
+    pk = sub.add_parser("knowledge", help="内置亚马逊知识库：list / search <词> / show <ID>")
+    pk.add_argument("action", choices=["list", "search", "show"])
+    pk.add_argument("query", nargs="?")
+    pk.add_argument("--limit", type=int, default=5)
+    pk.set_defaults(func=_cmd_knowledge)
+
     pch = sub.add_parser("chat", help="对话式 Agent（自然语言 + 斜杠命令 + 人工审批）")
     pch.add_argument("--from-mcp", dest="from_mcp", help="执行/拉数用的 MCP 服务器")
     pch.add_argument("--execute", action="store_true", help="允许真实写（默认 dry-run）")
+    pch.add_argument("--asin", help="本轮对话使用的 ASIN 画像")
     pch.add_argument("--protected", help="保护词清单，逗号分隔")
     pch.add_argument("--resume", nargs="?", const=True, help="续接会话：留空=最近一个，或指定会话ID")
     pch.add_argument("--continue", dest="cont", action="store_true", help="续接最近一个会话")

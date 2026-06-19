@@ -1,0 +1,104 @@
+[
+  {
+    "id": "amazon_ads.sponsored_products_targeting",
+    "title": "Sponsored Products targeting and campaign structure",
+    "category": "amazon_ads",
+    "source_type": "official",
+    "version": "2026.06",
+    "path": "amazon_ads/sponsored_products_targeting.md",
+    "tags": ["sponsored-products", "targeting", "match-types", "negative-targeting", "campaign-structure"]
+  },
+  {
+    "id": "amazon_ads.bidding_budget_reports",
+    "title": "Sponsored Products bidding, budgets, and reports",
+    "category": "amazon_ads",
+    "source_type": "official",
+    "version": "2026.06",
+    "path": "amazon_ads/bidding_budget_reports.md",
+    "tags": ["sponsored-products", "bidding", "budget", "reports", "optimization"]
+  },
+  {
+    "id": "listing.product_detail_page",
+    "title": "Product detail page and listing optimization",
+    "category": "listing",
+    "source_type": "official",
+    "version": "2026.06",
+    "path": "listing/product_detail_page.md",
+    "tags": ["listing", "product-detail-page", "images", "bullets", "keywords", "a-plus"]
+  },
+  {
+    "id": "community.amazon_operator_patterns",
+    "title": "Community operator patterns intake template",
+    "category": "community",
+    "source_type": "community_template",
+    "version": "2026.06",
+    "path": "community/operator_patterns.md",
+    "tags": ["community", "forum", "operator-experience", "intake"]
+  },
+  {
+    "id": "playbook.search_term_lifecycle",
+    "title": "Search term lifecycle: discover, validate, harvest, scale, suppress",
+    "category": "playbook",
+    "source_type": "official_plus_community_consensus",
+    "version": "2026.06",
+    "path": "playbooks/search_term_lifecycle.md",
+    "tags": ["search-term", "keyword-lifecycle", "harvest", "negative", "campaign-structure"]
+  },
+  {
+    "id": "playbook.negative_keyword_risk",
+    "title": "Negative keyword risk controls",
+    "category": "playbook",
+    "source_type": "official_plus_community_consensus",
+    "version": "2026.06",
+    "path": "playbooks/negative_keyword_risk.md",
+    "tags": ["negative-keywords", "risk-control", "phrase-negative", "exact-negative", "guardrails"]
+  },
+  {
+    "id": "playbook.budget_bid_scaling",
+    "title": "Budget and bid scaling playbook",
+    "category": "playbook",
+    "source_type": "official_plus_community_consensus",
+    "version": "2026.06",
+    "path": "playbooks/budget_bid_scaling.md",
+    "tags": ["budget", "bidding", "scaling", "acos", "roas", "cooldown"]
+  },
+  {
+    "id": "playbook.listing_ad_feedback_loop",
+    "title": "Listing and advertising feedback loop",
+    "category": "playbook",
+    "source_type": "official_plus_community_consensus",
+    "version": "2026.06",
+    "path": "playbooks/listing_ad_feedback_loop.md",
+    "tags": ["listing", "conversion", "search-term", "images", "bullets", "a-plus"]
+  },
+  {
+    "id": "playbook.launch_maturity_strategy",
+    "title": "Launch versus mature ASIN advertising strategy",
+    "category": "playbook",
+    "source_type": "official_plus_operator_consensus",
+    "version": "2026.06",
+    "path": "playbooks/launch_maturity_strategy.md",
+    "source_url": "https://advertising.amazon.com/library/guides/getting-started-with-sponsored-ads",
+    "tags": ["launch", "mature-asin", "automatic-targeting", "manual-targeting", "harvest", "budget"]
+  },
+  {
+    "id": "playbook.report_driven_optimization",
+    "title": "Report-driven optimization cadence",
+    "category": "playbook",
+    "source_type": "official_plus_operator_consensus",
+    "version": "2026.06",
+    "path": "playbooks/report_driven_optimization.md",
+    "source_url": "https://advertising.amazon.com/library/guides/getting-started-with-sponsored-ads",
+    "tags": ["reports", "search-term-report", "targeting-report", "placement-report", "cadence"]
+  },
+  {
+    "id": "playbook.content_conversion_assets",
+    "title": "Content assets and conversion support",
+    "category": "playbook",
+    "source_type": "official_plus_operator_consensus",
+    "version": "2026.06",
+    "path": "playbooks/content_conversion_assets.md",
+    "source_url": "https://sell.amazon.com/tools/a-content",
+    "tags": ["a-plus", "images", "video", "comparison-chart", "conversion", "brand-story"]
+  }
+]

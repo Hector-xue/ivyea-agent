@@ -80,12 +80,13 @@ def _f(v: Any) -> float:
 def extract_actions(detail_csv: str, current_bids: Optional[dict[str, float]] = None,
                     asin: str = "") -> list[Action]:
     """从明细 CSV 抽出可执行动作。current_bids: {search_term: 当前bid}（可选，用于算 bid 绝对值）。"""
-    import pandas as pd
-    df = pd.read_csv(detail_csv)
-    df.columns = [str(c).lstrip("﻿") for c in df.columns]
+    import csv
+
+    with open(detail_csv, newline="", encoding="utf-8-sig") as fh:
+        rows = list(csv.DictReader(fh))
     current_bids = current_bids or {}
     actions: list[Action] = []
-    for _, r in df.iterrows():
+    for r in rows:
         tag = str(r.get("decision_tag", "")).strip()
         if tag not in EXECUTABLE_TAGS:
             continue
