@@ -9,6 +9,9 @@ from ivyea_agent.agent_tools import ToolContext
 
 
 def _ctx(tmp_path, allow=()):
+    from ivyea_agent import policy
+    if policy.POLICY_FILE.exists():
+        policy.POLICY_FILE.unlink()
     c = ToolContext(workspace=str(tmp_path))
     for k in allow:
         c.perm.session_allow.add(k)
@@ -79,6 +82,12 @@ def test_run_command(tmp_path):
     ctx = _ctx(tmp_path, allow=["run_command"])
     r = tg.t_run_command({"command": "echo ivyea-ok"}, ctx)
     assert "ivyea-ok" in r
+
+
+def test_run_command_rejects_dangerous(tmp_path):
+    ctx = _ctx(tmp_path, allow=["run_command"])
+    r = tg.t_run_command({"command": "git reset --hard"}, ctx)
+    assert "拒绝" in r
 
 
 def test_run_python_runs_in_workspace(tmp_path):

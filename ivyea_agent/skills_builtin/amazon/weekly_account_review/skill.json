@@ -1,0 +1,14 @@
+{
+  "id": "amazon.weekly_account_review",
+  "title": "Amazon Weekly Account Review",
+  "domain": "amazon",
+  "version": "2026.06",
+  "description": "Generate a weekly account review across waste, winners, budget, listing feedback, risk, and next actions.",
+  "triggers": ["weekly", "周报", "账户复盘", "复盘", "巡检", "review", "scorecard"],
+  "knowledge_ids": [
+    "playbook.report_driven_optimization",
+    "playbook.search_term_lifecycle",
+    "playbook.listing_ad_feedback_loop"
+  ],
+  "tools": ["run_account_diagnosis", "run_patrol", "knowledge_search", "recall"]
+}

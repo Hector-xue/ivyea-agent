@@ -1,0 +1,14 @@
+{
+  "id": "amazon.search_term_optimizer",
+  "title": "Amazon Search Term Optimizer",
+  "domain": "amazon",
+  "version": "2026.06",
+  "description": "Analyze search term reports, classify traffic, and propose harvest, bid, budget, or suppression actions with evidence.",
+  "triggers": ["search term", "搜索词", "关键词", "收割", "否词", "ACOS", "广告优化"],
+  "knowledge_ids": [
+    "playbook.search_term_lifecycle",
+    "playbook.negative_keyword_risk",
+    "amazon_ads.sponsored_products_targeting"
+  ],
+  "tools": ["run_patrol", "run_account_diagnosis", "propose_actions", "knowledge_search", "recall"]
+}

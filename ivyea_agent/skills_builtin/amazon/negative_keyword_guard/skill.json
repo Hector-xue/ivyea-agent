@@ -1,0 +1,13 @@
+{
+  "id": "amazon.negative_keyword_guard",
+  "title": "Amazon Negative Keyword Guard",
+  "domain": "amazon",
+  "version": "2026.06",
+  "description": "Prevent over-aggressive negative keyword decisions and explain exact vs phrase negative risk.",
+  "triggers": ["negative", "否词", "否定", "negative phrase", "negative exact", "误伤"],
+  "knowledge_ids": [
+    "playbook.negative_keyword_risk",
+    "playbook.search_term_lifecycle"
+  ],
+  "tools": ["knowledge_search", "recall", "propose_actions"]
+}

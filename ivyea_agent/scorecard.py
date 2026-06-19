@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from . import action_queue, memory, shadow
+from . import action_queue, memory, shadow, traces
 
 
 def build(limit: int = 1000) -> dict[str, Any]:
@@ -17,6 +17,7 @@ def build(limit: int = 1000) -> dict[str, Any]:
     actionable = len(non_blocked)
     memory_stats = memory.stats()
     shadow_recs = shadow.list_recs(limit=limit)
+    trace_stats = traces.stats(limit=limit)
     return {
         "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
         "queue": queue,
@@ -28,6 +29,7 @@ def build(limit: int = 1000) -> dict[str, Any]:
         "recent_runs": memory.recent_runs(limit=8),
         "shadow_mode": shadow.shadow_mode(),
         "shadow_recs": len(shadow_recs),
+        "traces": trace_stats,
     }
 
 
@@ -50,6 +52,8 @@ def render_md(score: dict[str, Any]) -> str:
         f"- 记忆决策：{m.get('decisions', 0)} 条（批准 {m.get('approved', 0)} / 否决 {m.get('rejected', 0)}）",
         f"- 巡检次数：{m.get('runs', 0)}",
         f"- 影子模式：{'开' if score.get('shadow_mode') else '关'}，台账建议 {score.get('shadow_recs', 0)} 条",
+        f"- 工具调用：{score.get('traces', {}).get('tool_calls', 0)} 次，失败 {score.get('traces', {}).get('failures', 0)} 次，"
+        f"平均 {score.get('traces', {}).get('avg_tool_ms', 0)}ms",
         "",
         "## 最近巡检",
     ]
@@ -71,4 +75,3 @@ def render_md(score: dict[str, Any]) -> str:
         "- 影子台账增长但无回测：说明需要后续真实数据来验证“若照做”的收益。",
     ])
     return "\n".join(lines) + "\n"
-

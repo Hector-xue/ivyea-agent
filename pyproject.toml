@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ivyea-agent"
-version = "0.4.0"
+version = "0.5.0"
 description = "Ivyea Agent — 自托管的亚马逊运营 CLI Agent（对话式 + 多模型 + 领星广告读写审批 + 通用工具 + 记忆）"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -57,4 +57,4 @@ packages = ["ivyea_agent", "ivyea_agent.providers", "ivyea_agent.rule_engine_scr
 
 [tool.setuptools.package-data]
 "ivyea_agent.rule_engine_scripts" = ["*.csv"]
-"ivyea_agent" = ["knowledge_base/index.json", "knowledge_base/**/*.md"]
+"ivyea_agent" = ["knowledge_base/index.json", "knowledge_base/**/*.md", "skills_builtin/**/*.json", "skills_builtin/**/*.md"]

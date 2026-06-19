@@ -12,6 +12,7 @@ import getpass
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 from . import __version__, config, ui
 
@@ -271,8 +272,9 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
             print(f"找不到编辑器；直接编辑: {config.MCP_FILE}", file=sys.stderr)
             return 1
         return 0
-    if args.action in ("tools", "call"):
+    if args.action in ("tools", "call", "suggest"):
         from .mcp_client import MCPClient, MCPError
+        from . import mcp_source
         servers = config.load_mcp().get("mcpServers", {})
         spec = servers.get(args.name or "")
         if not spec:
@@ -297,9 +299,9 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
                 print("\n提示：用 `ivyea mcp call " + (args.name or "<名称>") +
                       " <工具> --args '{...}'` 看返回结构，再 `ivyea mcp edit` 填 dataSource 映射。")
                 return 0
-            # call
+            # call / suggest
             if not args.tool:
-                print("用法: ivyea mcp call <名称> <工具> [--args '{\"k\":\"v\"}']", file=sys.stderr)
+                print("用法: ivyea mcp call|suggest <名称> <工具> [--args '{\"k\":\"v\"}']", file=sys.stderr)
                 return 2
             arguments = {}
             if args.args:
@@ -309,6 +311,10 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
                     print(f"--args 不是合法 JSON: {e}", file=sys.stderr)
                     return 2
             res = client.call_tool(args.tool, arguments)
+            if args.action == "suggest":
+                suggestion = mcp_source.suggest_data_source(args.tool, arguments, res)
+                print(mcp_source.render_suggestion(suggestion))
+                return 0
             print(__import__("json").dumps(res, ensure_ascii=False, indent=2)[:4000])
             return 0
         except MCPError as e:
@@ -675,6 +681,7 @@ SLASH_COMMANDS = [
     ("/mcp", "列出已配置的 MCP 服务器"),
     ("/tools", "列出 Agent 可用工具"),
     ("/knowledge", "搜索内置亚马逊知识库：/knowledge 否词"),
+    ("/skill", "搜索可复用运营 Skill：/skill listing"),
     ("/memory", "记忆：状态/最近巡检；/memory <词> 检索"),
     ("/plan", "进入/退出计划模式（只读，不写入）"),
     ("/approve", "批准并退出计划模式，继续执行"),
@@ -815,6 +822,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             print(f"{_C['d']}（未找到可续接的会话，开新会话）{_C['x']}")
     if sid is None:
         sid = sessions.new_id()
+    ctx.session_id = sid
     render_md = not getattr(args, "raw", False)   # 默认 markdown 渲染
 
     def _persist():
@@ -916,6 +924,14 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             else:
                 print(knowledge.render_search(q, limit=5))
             continue
+        if line == "/skill" or line.startswith("/skill "):
+            from . import skills
+            q = line[7:].strip() if line.startswith("/skill ") else ""
+            if not q:
+                print(skills.render_list())
+            else:
+                print(skills.render_search(q, limit=8))
+            continue
         if line == "/tools":
             for t in agent_tools.TOOL_SCHEMAS:
                 f = t["function"]; print(f"  {f['name']} — {f['description']}")
@@ -966,14 +982,22 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             if not _ask(f"今日已花 ¥{pricing.today_spend():.2f} 达上限 ¥{_lim:.2f}，仍继续？(y/N)").strip().lower().startswith("y"):
                 print(ui.message("info", "已暂停。调整上限：ivyea config set daily_cost_limit_cny <元>"))
                 continue
-        from . import knowledge
+        from . import knowledge, skills
         kctx, kids = knowledge.context_for_query(line, limit=3)
+        sctx, sids = skills.context_for_query(line, limit=2)
         user_content = line
+        if sctx:
+            user_content += ("\n\n[Ivyea Skill：本轮相关可复用流程]\n"
+                             + sctx
+                             + "\n\n要求：优先按 skill workflow 组织执行步骤；涉及事实依据时再结合知识库。")
+            print(ui.message("muted", "已注入 skill: " + ", ".join(sids)))
         if kctx:
             user_content += ("\n\n[Ivyea 内置亚马逊知识库：本轮相关摘录]\n"
                              + kctx
                              + "\n\n要求：使用这些知识时说明依据，若与用户账户记忆冲突，以用户账户记忆为准。")
             print(ui.message("muted", "已注入知识卡: " + ", ".join(kids)))
+        import time as _turn_time
+        ctx.turn_id = _turn_time.strftime("%Y%m%d-%H%M%S")
         messages.append({"role": "user", "content": user_content})
         try:
             mcfg = cfg.get_model_config()
@@ -1071,7 +1095,56 @@ def _cmd_knowledge(args: argparse.Namespace) -> int:
     if args.action == "list":
         for card in knowledge.list_cards():
             tags = ",".join(card.get("tags", [])[:4])
-            print(f"{card['id']:<44} {card['source_type']:<18} {card['title']}  [{tags}]")
+            conf = card.get("confidence", "unknown")
+            print(f"{card['id']:<44} {card['source_type']:<34} {conf:<11} {card['title']}  [{tags}]")
+        return 0
+    if args.action == "audit":
+        print(knowledge.render_audit())
+        return 0
+    if args.action == "rebuild":
+        res = knowledge.rebuild()
+        print(f"已重建用户知识索引：{res['user_cards']} 张用户知识卡；清理缺失 {len(res['missing_pruned'])} 张")
+        print(f"sources: {res['sources']}")
+        print(f"index: {res['index']['db']} cards={res['index']['cards']} fts={'on' if res['index']['fts'] else 'off'}")
+        return 0
+    if args.action == "index":
+        res = knowledge.rebuild_index()
+        print(f"已重建知识索引：{res['cards']} 张卡 · FTS5={'on' if res['fts'] else 'off'} · {res['db']}")
+        return 0
+    if args.action == "conflicts":
+        print(knowledge.render_conflicts())
+        return 0
+    if args.action == "import":
+        if not args.query:
+            print("用法: ivyea knowledge import <本地Markdown/TXT路径>", file=sys.stderr)
+            return 2
+        tags = [t.strip() for t in (args.tags or "").split(",") if t.strip()]
+        card = knowledge.import_file(
+            args.query,
+            title=args.title or "",
+            source_type=args.source_type or "user",
+            confidence=args.confidence or "",
+            tags=tags,
+            card_id=args.id or "",
+            license=args.license or "user_supplied",
+        )
+        print(f"已导入知识卡：{card['id']} -> {card['path']}")
+        return 0
+    if args.action == "url":
+        if not args.query:
+            print("用法: ivyea knowledge url <https://...>", file=sys.stderr)
+            return 2
+        tags = [t.strip() for t in (args.tags or "").split(",") if t.strip()]
+        card = knowledge.import_url(
+            args.query,
+            title=args.title or "",
+            source_type=args.source_type or "user",
+            confidence=args.confidence or "",
+            tags=tags,
+            card_id=args.id or "",
+            license=args.license or "user_supplied",
+        )
+        print(f"已导入知识卡：{card['id']} -> {card['path']}")
         return 0
     if args.action == "show":
         if not args.query:
@@ -1088,6 +1161,31 @@ def _cmd_knowledge(args: argparse.Namespace) -> int:
             print("用法: ivyea knowledge search <关键词>", file=sys.stderr)
             return 2
         print(knowledge.render_search(args.query, limit=args.limit))
+        return 0
+    return 2
+
+
+def _cmd_skill(args: argparse.Namespace) -> int:
+    from . import skills
+
+    if args.action == "list":
+        print(skills.render_list())
+        return 0
+    if args.action == "search":
+        if not args.query:
+            print("用法: ivyea skill search <关键词>", file=sys.stderr)
+            return 2
+        print(skills.render_search(args.query, limit=args.limit))
+        return 0
+    if args.action in ("show", "run"):
+        if not args.query:
+            print(f"用法: ivyea skill {args.action} <skill_id>", file=sys.stderr)
+            return 2
+        sk = skills.get_skill(args.query)
+        if not sk:
+            print(f"未找到 skill：{args.query}", file=sys.stderr)
+            return 1
+        print(skills.render_skill(sk, include_knowledge=True))
         return 0
     return 2
 
@@ -1261,9 +1359,13 @@ def _cmd_profile(args: argparse.Namespace) -> int:
         for name, profile in profiles.list_profiles():
             target = profile.get("target_acos")
             target_text = f"{target:.0%}" if target is not None else "未设"
+            margin = profile.get("margin_rate")
+            margin_text = f"{margin:.0%}" if margin is not None else "-"
             protected = ",".join(profile.get("protected_terms") or [])
             stage = profile.get("stage") or "-"
-            print(f"{name:<16} site={profile.get('site', 'US'):<3} target={target_text:<5} stage={stage} protected={protected or '-'}")
+            risks = ",".join(profile.get("listing_risks") or [])
+            print(f"{name:<16} site={profile.get('site', 'US'):<3} target={target_text:<5} margin={margin_text:<4} "
+                  f"stage={stage} protected={protected or '-'} risks={risks or '-'}")
         return 0
     if args.action == "show":
         print(profiles.render(profiles.get(key), label=key))
@@ -1272,10 +1374,15 @@ def _cmd_profile(args: argparse.Namespace) -> int:
         fields = {
             "site": args.site,
             "target_acos": args.target_acos,
+            "margin_rate": args.margin_rate,
+            "breakeven_acos": args.breakeven_acos,
+            "price": args.price,
+            "currency": args.currency,
             "stage": args.stage,
             "protected_terms": args.protected,
             "core_terms": args.core,
             "competitor_terms": args.competitors,
+            "listing_risks": args.listing_risks,
             "notes": args.notes,
         }
         profile = profiles.update(key, **fields)
@@ -1299,6 +1406,281 @@ def _cmd_scorecard(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_trace(args: argparse.Namespace) -> int:
+    from . import traces
+    if args.action == "stats":
+        st = traces.stats(limit=args.limit)
+        print(f"trace db: {st['db']}")
+        print(f"events {st['events']} · tool_calls {st['tool_calls']} · failures {st['failures']} · avg_tool_ms {st['avg_tool_ms']}")
+        return 0
+    print(traces.render_recent(limit=args.limit, session_id=args.session or ""))
+    return 0
+
+
+def _cmd_eval(args: argparse.Namespace) -> int:
+    from . import evals
+    result = evals.run()
+    print(evals.render(result))
+    return 0 if result["ok"] else 1
+
+
+def _read_optional_text(path: str = "", text: str = "") -> str:
+    if text:
+        return text
+    if not path:
+        return ""
+    return Path(path).expanduser().read_text(encoding="utf-8", errors="replace")
+
+
+def _cmd_listing(args: argparse.Namespace) -> int:
+    from . import listing_audit
+
+    if args.action != "audit":
+        return 2
+    search_terms = [s.strip() for s in (args.search_terms or "").split(",") if s.strip()]
+    result = listing_audit.audit(
+        title=_read_optional_text(args.title_file or "", args.title or ""),
+        bullets=_read_optional_text(args.bullets_file or "", args.bullets or ""),
+        aplus=_read_optional_text(args.aplus_file or "", args.aplus or ""),
+        search_terms=search_terms,
+        reviews=_read_optional_text(args.reviews_file or "", args.reviews or ""),
+        price=args.price,
+        rating=args.rating,
+        review_count=args.review_count,
+    )
+    print(listing_audit.render(result))
+    return 0
+
+
+def _cmd_review(args: argparse.Namespace) -> int:
+    from . import review_audit
+
+    if args.action != "audit":
+        return 2
+    result = review_audit.audit(
+        reviews=_read_optional_text(args.reviews_file or "", args.reviews or ""),
+        qa=_read_optional_text(args.qa_file or "", args.qa or ""),
+        rating=args.rating,
+        review_count=args.review_count,
+        price=args.price,
+        coupon=args.coupon or "",
+        competitor_price=args.competitor_price,
+    )
+    print(review_audit.render(result))
+    return 0
+
+
+def _cmd_offer(args: argparse.Namespace) -> int:
+    from . import offer_audit
+
+    if args.action != "audit":
+        return 2
+    result = offer_audit.audit(
+        price=args.price,
+        competitor_price=args.competitor_price,
+        margin_rate=args.margin_rate,
+        target_acos=args.target_acos,
+        inventory_days=args.inventory_days,
+        coupon=args.coupon or "",
+        spend=args.spend,
+        sales=args.sales,
+    )
+    print(offer_audit.render(result))
+    return 0
+
+
+def _cmd_competitor(args: argparse.Namespace) -> int:
+    from . import competitor_audit
+
+    if args.action != "audit":
+        return 2
+    result = competitor_audit.audit(
+        own_terms=args.own_terms or "",
+        search_terms=args.search_terms or "",
+        competitor_terms=args.competitor_terms or "",
+        category_terms=args.category_terms or "",
+        protected_terms=args.protected_terms or "",
+    )
+    print(competitor_audit.render(result))
+    return 0
+
+
+def _cmd_weekly(args: argparse.Namespace) -> int:
+    from . import weekly_review
+
+    if args.action != "review":
+        return 2
+    text = weekly_review.render(weekly_review.build(limit=args.limit))
+    if args.output:
+        out = Path(args.output).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+        print(f"已导出周期复盘：{out}")
+    else:
+        print(text)
+    return 0
+
+
+def _cmd_alert(args: argparse.Namespace) -> int:
+    from . import alerts, notify
+    rows = alerts.check(limit=args.limit)
+    text = alerts.render(rows)
+    print(text)
+    if args.notify:
+        result = notify.send(
+            text,
+            title=args.title or "Ivyea Alerts",
+            channel=args.channel,
+            webhook_url=args.webhook_url or "",
+        )
+        print(notify.render_result(result))
+        if not result.get("ok"):
+            return 1
+    return 1 if any(a["severity"] == "fail" for a in rows) else 0
+
+
+def _cmd_notify(args: argparse.Namespace) -> int:
+    from . import notify
+
+    message = args.message or "Ivyea Agent 通知测试。"
+    result = notify.send(
+        message,
+        title=args.title or "Ivyea Agent",
+        channel=args.channel,
+        webhook_url=args.webhook_url or "",
+    )
+    print(notify.render_result(result))
+    return 0 if result.get("ok") else 1
+
+
+def _cmd_schedule(args: argparse.Namespace) -> int:
+    from . import schedule
+    if args.action == "list":
+        print(schedule.render_jobs())
+        return 0
+    if args.action == "set":
+        if not args.name or not args.task:
+            print("用法: ivyea schedule set <名称> <alert|weekly|eval> --every-hours 24", file=sys.stderr)
+            return 2
+        try:
+            task_args = {}
+            if args.notify:
+                task_args = {
+                    "notify": True,
+                    "channel": args.channel,
+                    "webhook_url": args.webhook_url or "",
+                    "title": args.title or "",
+                    "limit": args.limit,
+                }
+            elif args.limit != 500:
+                task_args = {"limit": args.limit}
+            job = schedule.set_job(args.name, args.task, every_hours=args.every_hours, args=task_args)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 2
+        print(f"已保存计划：{job['name']} task={job['task']} every={job['every_hours']}h")
+        return 0
+    if args.action == "remove":
+        if not args.name:
+            print("用法: ivyea schedule remove <名称>", file=sys.stderr)
+            return 2
+        print("已删除" if schedule.remove_job(args.name) else "未找到")
+        return 0
+    if args.action == "run-due":
+        rows = schedule.run_due()
+        if not rows:
+            print("无到期任务。")
+            return 0
+        ok = True
+        for row in rows:
+            ok = ok and row["ok"]
+            print(f"## {row['job']} ({row['task']}) {'OK' if row['ok'] else 'FAIL'}")
+            print(row["output"])
+        return 0 if ok else 1
+    if args.action == "run":
+        task = args.task or args.name
+        if not task:
+            print("用法: ivyea schedule run <alert|weekly|eval>", file=sys.stderr)
+            return 2
+        task_args = {}
+        if args.notify:
+            task_args = {
+                "notify": True,
+                "channel": args.channel,
+                "webhook_url": args.webhook_url or "",
+                "title": args.title or "",
+                "limit": args.limit,
+            }
+        elif args.limit != 500:
+            task_args = {"limit": args.limit}
+        ok, text = schedule.run_task(task, task_args)
+        print(text)
+        return 0 if ok else 1
+    return 2
+
+
+def _cmd_policy(args: argparse.Namespace) -> int:
+    from . import policy
+    if args.action == "show":
+        print(policy.render())
+        return 0
+    if args.action == "init":
+        created, path = policy.init(force=args.force)
+        print(("已生成" if created else "已存在") + f" policy：{path}")
+        return 0
+    if args.action == "check-path":
+        ok, msg = policy.check_path(args.value or "", args.op or "read")
+        print("OK" if ok else msg)
+        return 0 if ok else 1
+    if args.action == "check-command":
+        ok, msg = policy.check_command(args.value or "")
+        print("OK" if ok else msg)
+        return 0 if ok else 1
+    return 2
+
+
+def _cmd_image(args: argparse.Namespace) -> int:
+    from . import image_audit, ocr, vision
+    if args.action == "ocr":
+        print(ocr.render(ocr.run(args.paths or [], lang=args.lang or "eng", recursive=not args.no_recursive)))
+        return 0
+    if args.action == "vision":
+        pkg = vision.build(
+            args.provider,
+            args.paths or [],
+            product_context=args.context or "",
+            model=args.model or "",
+            max_images=args.max_images,
+        )
+        text = vision.render_package(pkg, include_payload=args.payload)
+        if args.output:
+            out = vision.write_package(pkg, args.output)
+            text += f"\n已导出视觉请求包：{out}\n"
+        if args.call:
+            result = vision.call(pkg, api_key=args.api_key or "", timeout=args.timeout)
+            text += "\n" + vision.render_call(result)
+            if not result.get("ok"):
+                print(text)
+                return 1
+        print(text)
+        return 0
+    if args.action != "audit":
+        return 2
+    result = image_audit.audit(args.paths or [], recursive=not args.no_recursive)
+    text = image_audit.render(result)
+    if args.prompt:
+        prompt = image_audit.multimodal_prompt(result, product_context=args.context or "")
+        if args.prompt_out:
+            out = Path(args.prompt_out).expanduser()
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(prompt, encoding="utf-8")
+            text += f"\n已导出多模态审核 Prompt：{out}\n"
+        else:
+            text += "\n## 多模态审核 Prompt\n\n" + prompt + "\n"
+    print(text)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ivyea", description="Ivyea Agent — 亚马逊运营 CLI Agent")
     p.add_argument("--version", action="version", version=f"ivyea-agent {__version__}")
@@ -1314,8 +1696,8 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("value", nargs="?")
     pc.set_defaults(func=_cmd_config)
 
-    pm = sub.add_parser("mcp", help="MCP 配置/自检（add/list/remove/edit/tools/call/template/validate）")
-    pm.add_argument("action", choices=["add", "list", "remove", "edit", "tools", "call", "template", "validate"])
+    pm = sub.add_parser("mcp", help="MCP 配置/自检（add/list/remove/edit/tools/call/suggest/template/validate）")
+    pm.add_argument("action", choices=["add", "list", "remove", "edit", "tools", "call", "suggest", "template", "validate"])
     pm.add_argument("name", nargs="?", help="服务器名（remove/tools/call 需要）")
     pm.add_argument("tool", nargs="?", help="工具名（call 需要）")
     pm.add_argument("--args", help="call 的入参 JSON，如 '{\"asin\":\"B0..\"}'")
@@ -1400,10 +1782,15 @@ def build_parser() -> argparse.ArgumentParser:
     pprof.add_argument("key", nargs="?", help="default、ASIN 或 sid:店铺ID")
     pprof.add_argument("--site", help="站点，如 US/UK/DE")
     pprof.add_argument("--target-acos", type=float, dest="target_acos", help="目标 ACOS，如 0.28")
+    pprof.add_argument("--margin-rate", type=float, dest="margin_rate", help="毛利率，如 0.35")
+    pprof.add_argument("--breakeven-acos", type=float, dest="breakeven_acos", help="盈亏平衡 ACOS，如 0.35")
+    pprof.add_argument("--price", type=float, help="当前售价")
+    pprof.add_argument("--currency", help="币种，如 USD")
     pprof.add_argument("--stage", help="生命周期阶段，如 launch/growth/mature/clearance")
     pprof.add_argument("--protected", help="保护词，逗号分隔")
     pprof.add_argument("--core", help="核心词，逗号分隔")
     pprof.add_argument("--competitors", help="竞品/对标词，逗号分隔")
+    pprof.add_argument("--listing-risks", dest="listing_risks", help="Listing 风险，逗号分隔，如 review弱,主图不清晰")
     pprof.add_argument("--notes", help="打法备注")
     pprof.set_defaults(func=_cmd_profile)
 
@@ -1411,6 +1798,125 @@ def build_parser() -> argparse.ArgumentParser:
     pscore.add_argument("--limit", type=int, default=1000)
     pscore.add_argument("--output", help="导出 Markdown 到指定路径")
     pscore.set_defaults(func=_cmd_scorecard)
+
+    ptr = sub.add_parser("trace", help="运行时间线：recent / stats")
+    ptr.add_argument("action", nargs="?", choices=["recent", "stats"], default="recent")
+    ptr.add_argument("--limit", type=int, default=20)
+    ptr.add_argument("--session", help="只看指定会话 ID")
+    ptr.set_defaults(func=_cmd_trace)
+
+    pev = sub.add_parser("eval", help="业务质量回归：规则引擎/知识召回/skill召回/安全脱敏")
+    pev.set_defaults(func=_cmd_eval)
+
+    plis = sub.add_parser("listing", help="Listing 转化诊断：audit")
+    plis.add_argument("action", choices=["audit"])
+    plis.add_argument("--title")
+    plis.add_argument("--title-file")
+    plis.add_argument("--bullets")
+    plis.add_argument("--bullets-file")
+    plis.add_argument("--aplus")
+    plis.add_argument("--aplus-file")
+    plis.add_argument("--search-terms", help="广告搜索词，逗号分隔")
+    plis.add_argument("--reviews", help="Review/Q&A 摘要")
+    plis.add_argument("--reviews-file")
+    plis.add_argument("--price", type=float)
+    plis.add_argument("--rating", type=float)
+    plis.add_argument("--review-count", type=int, dest="review_count")
+    plis.set_defaults(func=_cmd_listing)
+
+    prev = sub.add_parser("review", help="Review/Q&A/Offer 归因：audit")
+    prev.add_argument("action", choices=["audit"])
+    prev.add_argument("--reviews", help="Review 摘要/原文片段")
+    prev.add_argument("--reviews-file")
+    prev.add_argument("--qa", help="Q&A 摘要/原文片段")
+    prev.add_argument("--qa-file")
+    prev.add_argument("--rating", type=float)
+    prev.add_argument("--review-count", type=int, dest="review_count")
+    prev.add_argument("--price", type=float)
+    prev.add_argument("--coupon")
+    prev.add_argument("--competitor-price", type=float, dest="competitor_price")
+    prev.set_defaults(func=_cmd_review)
+
+    poff = sub.add_parser("offer", help="Offer/库存/利润诊断：audit")
+    poff.add_argument("action", choices=["audit"])
+    poff.add_argument("--price", type=float)
+    poff.add_argument("--competitor-price", type=float, dest="competitor_price")
+    poff.add_argument("--margin-rate", type=float, dest="margin_rate")
+    poff.add_argument("--target-acos", type=float, dest="target_acos")
+    poff.add_argument("--inventory-days", type=float, dest="inventory_days")
+    poff.add_argument("--coupon")
+    poff.add_argument("--spend", type=float)
+    poff.add_argument("--sales", type=float)
+    poff.set_defaults(func=_cmd_offer)
+
+    pcomp = sub.add_parser("competitor", help="竞品/类目关键词诊断：audit")
+    pcomp.add_argument("action", choices=["audit"])
+    pcomp.add_argument("--own-terms", help="自身核心词，逗号分隔")
+    pcomp.add_argument("--search-terms", help="广告搜索词，逗号分隔")
+    pcomp.add_argument("--competitor-terms", help="竞品品牌/产品/ASIN，逗号分隔")
+    pcomp.add_argument("--category-terms", help="类目/属性词，逗号分隔")
+    pcomp.add_argument("--protected-terms", help="保护词，逗号分隔")
+    pcomp.set_defaults(func=_cmd_competitor)
+
+    pwk = sub.add_parser("weekly", help="周期运营复盘：review")
+    pwk.add_argument("action", choices=["review"])
+    pwk.add_argument("--limit", type=int, default=200)
+    pwk.add_argument("--output", help="导出 Markdown 到指定路径")
+    pwk.set_defaults(func=_cmd_weekly)
+
+    palert = sub.add_parser("alert", help="本地自动预警：check")
+    palert.add_argument("action", choices=["check"])
+    palert.add_argument("--limit", type=int, default=500)
+    palert.add_argument("--notify", action="store_true", help="将预警发送到通知通道")
+    palert.add_argument("--channel", choices=["stdout", "webhook", "feishu"], default="stdout")
+    palert.add_argument("--webhook-url", help="覆盖 settings/env 中的 webhook URL")
+    palert.add_argument("--title", help="通知标题")
+    palert.set_defaults(func=_cmd_alert)
+
+    pnot = sub.add_parser("notify", help="通知通道：test")
+    pnot.add_argument("action", choices=["test"])
+    pnot.add_argument("--message", help="测试消息")
+    pnot.add_argument("--title", help="通知标题")
+    pnot.add_argument("--channel", choices=["stdout", "webhook", "feishu"], default="stdout")
+    pnot.add_argument("--webhook-url", help="覆盖 settings/env 中的 webhook URL")
+    pnot.set_defaults(func=_cmd_notify)
+
+    psch = sub.add_parser("schedule", help="本地计划任务：list/set/remove/run-due/run")
+    psch.add_argument("action", choices=["list", "set", "remove", "run-due", "run"])
+    psch.add_argument("name", nargs="?", help="set/remove 的计划名称")
+    psch.add_argument("task", nargs="?", help="set/run 的任务：alert/weekly/eval")
+    psch.add_argument("--every-hours", type=float, default=24.0)
+    psch.add_argument("--limit", type=int, default=500)
+    psch.add_argument("--notify", action="store_true", help="alert 任务完成后发送通知")
+    psch.add_argument("--channel", choices=["stdout", "webhook", "feishu"], default="stdout")
+    psch.add_argument("--webhook-url", help="覆盖 settings/env 中的 webhook URL")
+    psch.add_argument("--title", help="通知标题")
+    psch.set_defaults(func=_cmd_schedule)
+
+    ppol = sub.add_parser("policy", help="本地安全策略：show/init/check-path/check-command")
+    ppol.add_argument("action", choices=["show", "init", "check-path", "check-command"])
+    ppol.add_argument("value", nargs="?")
+    ppol.add_argument("--op", choices=["read", "write"], default="read")
+    ppol.add_argument("--force", action="store_true")
+    ppol.set_defaults(func=_cmd_policy)
+
+    pimg = sub.add_parser("image", help="Listing 图片资产诊断：audit / ocr / vision")
+    pimg.add_argument("action", choices=["audit", "ocr", "vision"])
+    pimg.add_argument("paths", nargs="+", help="图片文件或目录")
+    pimg.add_argument("--no-recursive", action="store_true", help="目录扫描不递归")
+    pimg.add_argument("--prompt", action="store_true", help="输出多模态大模型审核 prompt")
+    pimg.add_argument("--prompt-out", help="把多模态 prompt 写到文件")
+    pimg.add_argument("--context", help="产品/广告上下文，写入 prompt")
+    pimg.add_argument("--provider", choices=["openai", "anthropic", "gemini"], default="openai")
+    pimg.add_argument("--model", help="覆盖默认视觉模型名")
+    pimg.add_argument("--lang", default="eng", help="OCR 语言，如 eng/chi_sim/eng+chi_sim")
+    pimg.add_argument("--max-images", type=int, default=8)
+    pimg.add_argument("--payload", action="store_true", help="显示截断后的 payload 预览")
+    pimg.add_argument("--output", help="导出截断后的请求包 JSON")
+    pimg.add_argument("--call", action="store_true", help="真实调用多模态模型；默认只生成请求包")
+    pimg.add_argument("--api-key", help="覆盖 provider 对应环境变量中的 API key")
+    pimg.add_argument("--timeout", type=float, default=120.0, help="真实调用超时时间（秒）")
+    pimg.set_defaults(func=_cmd_image)
 
     psh = sub.add_parser("shadow", help="影子模式：on/off（只记不写）/ list / report（回测若照做的收益）")
     psh.add_argument("action", choices=["on", "off", "list", "report"])
@@ -1427,11 +1933,23 @@ def build_parser() -> argparse.ArgumentParser:
     pmem.add_argument("query", nargs="?")
     pmem.set_defaults(func=_cmd_memory)
 
-    pk = sub.add_parser("knowledge", help="内置亚马逊知识库：list / search <词> / show <ID>")
-    pk.add_argument("action", choices=["list", "search", "show"])
+    pk = sub.add_parser("knowledge", help="亚马逊知识库：list/search/show/audit/import/url/rebuild/index/conflicts")
+    pk.add_argument("action", choices=["list", "search", "show", "audit", "import", "url", "rebuild", "index", "conflicts"])
     pk.add_argument("query", nargs="?")
     pk.add_argument("--limit", type=int, default=5)
+    pk.add_argument("--id", help="导入时指定知识 ID，如 user.my-playbook")
+    pk.add_argument("--title", help="导入时指定标题")
+    pk.add_argument("--source-type", dest="source_type", help="来源类型：official/community/user 等")
+    pk.add_argument("--confidence", help="可信度：high/medium/user_supplied 等")
+    pk.add_argument("--license", help="来源许可/授权说明，如 user_supplied/public_summary")
+    pk.add_argument("--tags", help="标签，逗号分隔")
     pk.set_defaults(func=_cmd_knowledge)
+
+    pski = sub.add_parser("skill", help="可复用运营 Skill：list / search <词> / show <ID> / run <ID>")
+    pski.add_argument("action", choices=["list", "search", "show", "run"])
+    pski.add_argument("query", nargs="?")
+    pski.add_argument("--limit", type=int, default=8)
+    pski.set_defaults(func=_cmd_skill)
 
     pch = sub.add_parser("chat", help="对话式 Agent（自然语言 + 斜杠命令 + 人工审批）")
     pch.add_argument("--from-mcp", dest="from_mcp", help="执行/拉数用的 MCP 服务器")

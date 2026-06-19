@@ -95,7 +95,6 @@ def test_candidate_harvest_not_writable(ivyea_home):
 
 # ── 执行 + 回滚（monkeypatch，开关开）──────────────────────────────────────────
 def test_execute_and_rollback_bid(ivyea_home, monkeypatch):
-    from ivyea_agent import audit
     lw = _lw()
     lw.set_operate(True)
     sent = []

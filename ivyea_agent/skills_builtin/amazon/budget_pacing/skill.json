@@ -1,0 +1,14 @@
+{
+  "id": "amazon.budget_pacing",
+  "title": "Amazon Budget Pacing",
+  "domain": "amazon",
+  "version": "2026.06",
+  "description": "Review budgets, bid changes, scaling windows, and campaign pacing without breaking guardrails.",
+  "triggers": ["budget", "预算", "加预算", "放量", "bid", "出价", "scaling", "pacing"],
+  "knowledge_ids": [
+    "playbook.budget_bid_scaling",
+    "amazon_ads.bidding_budget_reports",
+    "playbook.report_driven_optimization"
+  ],
+  "tools": ["run_account_diagnosis", "run_patrol", "knowledge_search", "recall"]
+}

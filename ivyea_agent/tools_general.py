@@ -9,18 +9,35 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
-from . import panels, permission
+from . import panels, permission, policy, security
 
 _MAX_OUT = 4000          # 工具返回截断（防爆上下文）
 _EXEC_TIMEOUT = 30       # 执行类默认超时（秒）
 _MUTATING = {"write_file", "edit_file", "run_python", "run_command"}
+_DANGEROUS_COMMANDS = [
+    r"\brm\s+-rf\s+/(?:\s|$)",
+    r"\bgit\s+reset\s+--hard\b",
+    r"\bmkfs(?:\.[\w-]+)?\b",
+    r"\bshutdown\b",
+    r"\breboot\b",
+    r"\bdd\s+if=.*\s+of=/dev/",
+]
 
 
 def _truncate(s: str, n: int = _MAX_OUT) -> str:
+    s = security.redact_text(s)
     return s if len(s) <= n else s[:n] + f"\n…（已截断，共 {len(s)} 字）"
+
+
+def _dangerous_command(command: str) -> str:
+    for pattern in _DANGEROUS_COMMANDS:
+        if re.search(pattern, command, re.I):
+            return pattern
+    return ""
 
 
 def _gate(ctx, kind: str, preview: str) -> tuple[bool, str]:
@@ -38,6 +55,9 @@ def _gate(ctx, kind: str, preview: str) -> tuple[bool, str]:
 # ── 读类（自动放行）──────────────────────────────────────────────────────────
 def t_read_file(args: dict, ctx) -> str:
     p = Path(os.path.expanduser(args.get("path", ""))).resolve()
+    ok, msg = policy.check_path(p, "read")
+    if not ok:
+        return msg
     if not p.exists():
         return f"文件不存在：{p}"
     if p.is_dir():
@@ -50,6 +70,9 @@ def t_read_file(args: dict, ctx) -> str:
 
 def t_list_dir(args: dict, ctx) -> str:
     p = Path(os.path.expanduser(args.get("path", ".") or ".")).resolve()
+    ok, msg = policy.check_path(p, "read")
+    if not ok:
+        return msg
     if not p.exists():
         return f"目录不存在：{p}"
     if p.is_file():
@@ -118,6 +141,9 @@ def t_write_file(args: dict, ctx) -> str:
     if not path:
         return "path 为空。"
     p = Path(path).resolve()
+    ok, msg = policy.check_path(p, "write")
+    if not ok:
+        return msg
     exists = p.exists()
     preview = f"写文件 {p}（{'覆盖' if exists else '新建'}，{len(content)} 字）"
     if exists:
@@ -138,6 +164,9 @@ def t_write_file(args: dict, ctx) -> str:
 
 def t_edit_file(args: dict, ctx) -> str:
     p = Path(os.path.expanduser(args.get("path", ""))).resolve()
+    ok, msg = policy.check_path(p, "write")
+    if not ok:
+        return msg
     old, new = args.get("old", ""), args.get("new", "")
     if not p.exists():
         return f"文件不存在：{p}"
@@ -195,6 +224,12 @@ def t_run_command(args: dict, ctx) -> str:
     command = args.get("command", "")
     if not command:
         return "command 为空。"
+    ok, msg = policy.check_command(command)
+    if not ok:
+        return msg
+    blocked = _dangerous_command(command)
+    if blocked:
+        return f"安全策略拒绝高风险命令：{blocked}"
     import os as _os
     shell = ["cmd", "/c", command] if _os.name == "nt" else ["bash", "-lc", command]
     return _run(shell, args, ctx, "run_command", "运行命令：" + _truncate(command, 400))

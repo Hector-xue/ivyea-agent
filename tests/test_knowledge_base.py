@@ -59,3 +59,76 @@ def test_new_playbooks_chinese_queries():
     rendered = knowledge.render_search("素材 A+ 转化 listing", limit=5)
     assert "playbook.content_conversion_assets" in rendered
     assert "https://sell.amazon.com/tools/a-content" in rendered
+
+
+def test_user_knowledge_import_search_audit_rebuild(ivyea_home, tmp_path):
+    src = tmp_path / "prime-day.md"
+    src.write_text("# Prime Day打法\n\nPrime Day 前提高预算，但保护品牌词，不误否核心词。", encoding="utf-8")
+
+    card = knowledge.import_file(
+        str(src),
+        title="Prime Day Playbook",
+        source_type="user",
+        tags=["prime-day", "预算"],
+        card_id="user.prime_day_playbook",
+        license="user_supplied",
+    )
+    assert card["id"] == "user.prime_day_playbook"
+    assert card["body_hash"]
+    assert card["license"] == "user_supplied"
+    assert knowledge.get_card("user.prime_day_playbook")["body"].startswith("# Prime Day")
+
+    hits = knowledge.search("Prime Day 预算 品牌词", limit=5)
+    assert any(h["id"] == "user.prime_day_playbook" for h in hits)
+
+    audit = knowledge.render_audit()
+    assert "user.prime_day_playbook | user | user" in audit
+    assert "license=user_supplied" in audit
+
+    idx = knowledge.rebuild_index()
+    assert idx["cards"] >= 1
+    ihits = knowledge.search_index("Prime Day", limit=5)
+    assert any(h["id"] == "user.prime_day_playbook" for h in ihits)
+
+    # 删除正文后 rebuild 应清理 sources.jsonl 中的缺失项。
+    (ivyea_home / "knowledge" / card["path"]).unlink()
+    res = knowledge.rebuild()
+    assert res["missing_pruned"] == ["user.prime_day_playbook"]
+    assert not knowledge.list_user_cards()
+
+
+def test_knowledge_cli_import_and_rebuild(ivyea_home, tmp_path, capsys):
+    from ivyea_agent.cli import main
+
+    src = tmp_path / "listing-note.md"
+    src.write_text("主图不清晰会影响 CTR，Listing 承接不足不要急着否词。", encoding="utf-8")
+
+    assert main(["knowledge", "import", str(src), "--id", "user.listing_note", "--tags", "listing,ctr", "--license", "user_supplied"]) == 0
+    out = capsys.readouterr().out
+    assert "user.listing_note" in out
+
+    assert main(["knowledge", "search", "主图 CTR", "--limit", "5"]) == 0
+    out = capsys.readouterr().out
+    assert "user.listing_note" in out
+
+    assert main(["knowledge", "rebuild"]) == 0
+    out = capsys.readouterr().out
+    assert "已重建用户知识索引" in out
+    assert "index:" in out
+
+
+def test_knowledge_conflict_audit(ivyea_home, tmp_path):
+    src = tmp_path / "negative.md"
+    src.write_text("不建议使用 negative keywords，avoid negative targeting。", encoding="utf-8")
+    knowledge.import_file(
+        str(src),
+        title="Negative hot take",
+        source_type="user",
+        tags=["negative-keywords"],
+        card_id="user.negative_hot_take",
+    )
+    rows = knowledge.conflicts()
+    assert any(r["id"] == "user.negative_hot_take" for r in rows)
+    rendered = knowledge.render_conflicts()
+    assert "冲突审计" in rendered
+    assert "user.negative_hot_take" in rendered

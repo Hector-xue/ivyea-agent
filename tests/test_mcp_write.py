@@ -34,3 +34,71 @@ def test_cli_mcp_template_and_validate(ivyea_home, capsys):
     assert args.func(args) == 0
     assert "OK MCP 写入映射" in capsys.readouterr().out
 
+
+def test_mcp_data_source_suggestion():
+    from ivyea_agent import mcp_source
+
+    result = {
+        "structuredContent": {
+            "data": {
+                "rows": [{
+                    "date": "2026-06-01",
+                    "asin": "B0X",
+                    "campaignName": "SP Auto",
+                    "searchTerm": "karaoke machine",
+                    "clicks": 12,
+                    "spend": 8.5,
+                    "orders": 1,
+                    "sales": 39.99,
+                }]
+            }
+        }
+    }
+    suggestion = mcp_source.suggest_data_source("get_report", {"asin": "{asin}"}, result)
+    ds = suggestion["dataSource"]
+    assert ds["rows_path"] == "data.rows"
+    assert ds["field_map"]["ASIN"] == "asin"
+    assert ds["field_map"]["Customer Search Term"] == "searchTerm"
+    assert suggestion["coverage"]["mapped"] >= 7
+
+
+def test_cli_mcp_suggest(ivyea_home, monkeypatch, capsys):
+    from ivyea_agent import config, mcp_client
+    from ivyea_agent.cli import build_parser
+
+    config.mcp_set_server("reporter", {"transport": "http", "url": "http://mcp.test"})
+    calls = []
+
+    def fake_rpc(self, method, params=None):
+        calls.append(method)
+        if method == "initialize":
+            return {}
+        if method == "tools/call":
+            return {
+                "structuredContent": {
+                    "data": {
+                        "rows": [{
+                            "date": "2026-06-01",
+                            "asin": "B0X",
+                            "campaignName": "SP Auto",
+                            "searchTerm": "karaoke machine",
+                            "clicks": 12,
+                            "spend": 8.5,
+                            "orders": 1,
+                            "sales": 39.99,
+                        }]
+                    }
+                }
+            }
+        return {}
+
+    monkeypatch.setattr(mcp_client.MCPClient, "_rpc", fake_rpc)
+    monkeypatch.setattr(mcp_client.MCPClient, "_notify", lambda *a, **k: None)
+    parser = build_parser()
+    args = parser.parse_args(["mcp", "suggest", "reporter", "get_report", "--args", '{"asin":"{asin}"}'])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "MCP dataSource 映射建议" in out
+    assert '"rows_path": "data.rows"' in out
+    assert '"Customer Search Term": "searchTerm"' in out
+    assert calls[:2] == ["initialize", "tools/call"]

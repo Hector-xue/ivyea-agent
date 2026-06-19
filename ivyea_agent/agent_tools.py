@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from . import account_diagnosis, action_queue, actions as act_mod, executor, guardrails, knowledge, memory, permission, patrol as patrol_mod, profiles, tools_general
+from . import account_diagnosis, action_queue, actions as act_mod, competitor_audit, executor, guardrails, image_audit, knowledge, listing_audit, memory, ocr, offer_audit, permission, patrol as patrol_mod, profiles, review_audit, skills, tools_general
 from .rule_engine import RuleEngineError
 
 
@@ -26,6 +26,8 @@ class ToolContext:
     workspace: str = ""                                    # 通用工具的工作目录（默认 cwd）
     todos: list = field(default_factory=list)              # 当前任务计划（todo_write 维护）
     perm: permission.PermissionState = field(default_factory=permission.PermissionState)
+    session_id: str = ""                                   # 用于运行时间线
+    turn_id: str = ""                                      # 当前用户轮次
 
 
 # OpenAI function-calling schema
@@ -76,6 +78,75 @@ TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string"},
             "limit": {"type": "integer"}}, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "skill_search",
+        "description": "搜索 Ivyea 内置/用户 Skill（可复用运营流程）。复杂运营任务、周报、否词、预算、Listing、新品启动等优先调用。",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer"}}, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "run_listing_audit",
+        "description": "Listing 转化诊断：把广告搜索词/Review/价格信号映射到标题、五点、A+ 承接缺口。不要替代真实图片审核。",
+        "parameters": {"type": "object", "properties": {
+            "title": {"type": "string"},
+            "bullets": {"type": "string"},
+            "aplus": {"type": "string"},
+            "search_terms": {"type": "array", "items": {"type": "string"}},
+            "reviews": {"type": "string"},
+            "price": {"type": "number"},
+            "rating": {"type": "number"},
+            "review_count": {"type": "integer"}},
+            "required": []}}},
+    {"type": "function", "function": {
+        "name": "run_review_audit",
+        "description": "Review/Q&A/Offer 归因：判断差评、评分、评论数、价格/coupon 是否导致广告低转化，避免误否相关词。",
+        "parameters": {"type": "object", "properties": {
+            "reviews": {"type": "string"},
+            "qa": {"type": "string"},
+            "rating": {"type": "number"},
+            "review_count": {"type": "integer"},
+            "price": {"type": "number"},
+            "coupon": {"type": "string"},
+            "competitor_price": {"type": "number"}},
+            "required": []}}},
+    {"type": "function", "function": {
+        "name": "run_offer_audit",
+        "description": "Offer/库存/利润诊断：根据售价、竞品价、毛利率、目标ACOS、库存天数、coupon、广告花费销售判断能否放量。",
+        "parameters": {"type": "object", "properties": {
+            "price": {"type": "number"},
+            "competitor_price": {"type": "number"},
+            "margin_rate": {"type": "number"},
+            "target_acos": {"type": "number"},
+            "inventory_days": {"type": "number"},
+            "coupon": {"type": "string"},
+            "spend": {"type": "number"},
+            "sales": {"type": "number"}},
+            "required": []}}},
+    {"type": "function", "function": {
+        "name": "run_competitor_audit",
+        "description": "竞品/类目关键词诊断：识别竞品词、ASIN串号词、保护词、类目扩展和核心词缺口。",
+        "parameters": {"type": "object", "properties": {
+            "own_terms": {"type": "array", "items": {"type": "string"}},
+            "search_terms": {"type": "array", "items": {"type": "string"}},
+            "competitor_terms": {"type": "array", "items": {"type": "string"}},
+            "category_terms": {"type": "array", "items": {"type": "string"}},
+            "protected_terms": {"type": "array", "items": {"type": "string"}}},
+            "required": []}}},
+    {"type": "function", "function": {
+        "name": "run_image_audit",
+        "description": "图片资产本地诊断：扫描 Listing 图片尺寸/比例/命名/缺图风险，并生成多模态大模型审核提示。",
+        "parameters": {"type": "object", "properties": {
+            "paths": {"type": "array", "items": {"type": "string"}},
+            "product_context": {"type": "string"},
+            "include_prompt": {"type": "boolean"}},
+            "required": ["paths"]}}},
+    {"type": "function", "function": {
+        "name": "run_image_ocr",
+        "description": "图片 OCR：使用本机 tesseract 识别图片文字；未安装时给出可操作提示。",
+        "parameters": {"type": "object", "properties": {
+            "paths": {"type": "array", "items": {"type": "string"}},
+            "lang": {"type": "string", "description": "tesseract 语言，如 eng/chi_sim/eng+chi_sim"}},
+            "required": ["paths"]}}},
     {"type": "function", "function": {
         "name": "recall",
         "description": "检索历史记忆(过往巡检、决策、记的要点)，跨会话回忆。",
@@ -243,6 +314,77 @@ def _t_knowledge_search(args: dict, ctx: ToolContext) -> str:
     return knowledge.render_search(args.get("query", ""), limit=int(args.get("limit") or 5))
 
 
+def _t_skill_search(args: dict, ctx: ToolContext) -> str:
+    return skills.render_search(args.get("query", ""), limit=int(args.get("limit") or 5))
+
+
+def _t_run_listing_audit(args: dict, ctx: ToolContext) -> str:
+    result = listing_audit.audit(
+        title=args.get("title", ""),
+        bullets=args.get("bullets", ""),
+        aplus=args.get("aplus", ""),
+        search_terms=args.get("search_terms") or [],
+        reviews=args.get("reviews", ""),
+        price=args.get("price"),
+        rating=args.get("rating"),
+        review_count=args.get("review_count"),
+    )
+    return listing_audit.render(result)
+
+
+def _t_run_review_audit(args: dict, ctx: ToolContext) -> str:
+    result = review_audit.audit(
+        reviews=args.get("reviews", ""),
+        qa=args.get("qa", ""),
+        rating=args.get("rating"),
+        review_count=args.get("review_count"),
+        price=args.get("price"),
+        coupon=args.get("coupon", ""),
+        competitor_price=args.get("competitor_price"),
+    )
+    return review_audit.render(result)
+
+
+def _t_run_offer_audit(args: dict, ctx: ToolContext) -> str:
+    result = offer_audit.audit(
+        price=args.get("price"),
+        competitor_price=args.get("competitor_price"),
+        margin_rate=args.get("margin_rate"),
+        target_acos=args.get("target_acos"),
+        inventory_days=args.get("inventory_days"),
+        coupon=args.get("coupon", ""),
+        spend=args.get("spend"),
+        sales=args.get("sales"),
+    )
+    return offer_audit.render(result)
+
+
+def _t_run_competitor_audit(args: dict, ctx: ToolContext) -> str:
+    profile = profiles.resolve(asin=ctx.asin)
+    result = competitor_audit.audit(
+        own_terms=args.get("own_terms") or profile.get("core_terms") or [],
+        search_terms=args.get("search_terms") or [],
+        competitor_terms=args.get("competitor_terms") or profile.get("competitor_terms") or [],
+        category_terms=args.get("category_terms") or profile.get("core_terms") or [],
+        protected_terms=args.get("protected_terms") or profile.get("protected_terms") or ctx.protected or [],
+    )
+    return competitor_audit.render(result)
+
+
+def _t_run_image_audit(args: dict, ctx: ToolContext) -> str:
+    result = image_audit.audit(args.get("paths") or [])
+    text = image_audit.render(result)
+    if args.get("include_prompt"):
+        text += "\n## 多模态审核 Prompt\n\n" + image_audit.multimodal_prompt(
+            result, product_context=args.get("product_context") or ""
+        ) + "\n"
+    return text
+
+
+def _t_run_image_ocr(args: dict, ctx: ToolContext) -> str:
+    return ocr.render(ocr.run(args.get("paths") or [], lang=args.get("lang") or "eng"))
+
+
 def _t_recall(args: dict, ctx: ToolContext) -> str:
     hits = memory.search(args.get("query", ""), limit=8)
     if not hits:
@@ -264,6 +406,13 @@ _DISPATCH = {
     "rollback": _t_rollback,
     "remember": _t_remember,
     "knowledge_search": _t_knowledge_search,
+    "skill_search": _t_skill_search,
+    "run_listing_audit": _t_run_listing_audit,
+    "run_review_audit": _t_run_review_audit,
+    "run_offer_audit": _t_run_offer_audit,
+    "run_competitor_audit": _t_run_competitor_audit,
+    "run_image_audit": _t_run_image_audit,
+    "run_image_ocr": _t_run_image_ocr,
     "recall": _t_recall,
     **tools_general.GENERAL_DISPATCH,
 }

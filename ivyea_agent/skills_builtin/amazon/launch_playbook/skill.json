@@ -1,0 +1,14 @@
+{
+  "id": "amazon.launch_playbook",
+  "title": "Amazon Launch Playbook",
+  "domain": "amazon",
+  "version": "2026.06",
+  "description": "Guide launch-stage ASIN advertising without prematurely suppressing discovery traffic.",
+  "triggers": ["launch", "新品", "新品期", "冷启动", "自动广告", "测词"],
+  "knowledge_ids": [
+    "playbook.launch_maturity_strategy",
+    "playbook.search_term_lifecycle",
+    "playbook.budget_bid_scaling"
+  ],
+  "tools": ["knowledge_search", "run_patrol", "run_account_diagnosis", "recall"]
+}

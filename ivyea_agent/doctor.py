@@ -60,7 +60,7 @@ def _data_dir() -> Check:
     except Exception:
         writable = False
     if not writable:
-        return Check("数据目录", "fail", f"{p} 不可写", f"检查权限或设置 IVYEA_HOME")
+        return Check("数据目录", "fail", f"{p} 不可写", "检查权限或设置 IVYEA_HOME")
     return Check("数据目录", "ok", str(p))
 
 
@@ -75,10 +75,11 @@ def _model() -> Check:
 
 
 def _knowledge() -> Check:
-    cards = knowledge.list_cards()
-    if not cards:
+    builtin = knowledge.list_builtin_cards()
+    user = knowledge.list_user_cards()
+    if not builtin:
         return Check("知识库", "fail", "未找到内置知识卡")
-    return Check("知识库", "ok", f"{len(cards)} 张内置知识卡")
+    return Check("知识库", "ok", f"{len(builtin)} 张内置知识卡，{len(user)} 张用户知识卡")
 
 
 def _profiles() -> Check:

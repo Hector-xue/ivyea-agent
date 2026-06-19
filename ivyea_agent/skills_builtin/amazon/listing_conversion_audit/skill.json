@@ -1,0 +1,14 @@
+{
+  "id": "amazon.listing_conversion_audit",
+  "title": "Amazon Listing Conversion Audit",
+  "domain": "amazon",
+  "version": "2026.06",
+  "description": "Connect ad search-term signals to title, bullet, image, A+, and conversion improvement tasks.",
+  "triggers": ["listing", "转化", "CVR", "主图", "五点", "A+", "图片", "素材", "详情页"],
+  "knowledge_ids": [
+    "listing.product_detail_page",
+    "playbook.listing_ad_feedback_loop",
+    "playbook.content_conversion_assets"
+  ],
+  "tools": ["run_account_diagnosis", "knowledge_search", "read_file", "web_fetch"]
+}

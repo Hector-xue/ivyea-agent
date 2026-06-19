@@ -51,7 +51,6 @@ def test_daily_limit_setting(ivyea_home):
 def test_onboard_registered():
     from ivyea_agent.cli import build_parser
     p = build_parser()
-    sub = {a.dest: a for a in p._subparsers._group_actions}
     # onboard 子命令可解析
     args = p.parse_args(["onboard"])
     assert getattr(args, "func", None) is not None

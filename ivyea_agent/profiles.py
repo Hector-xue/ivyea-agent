@@ -7,7 +7,7 @@ form AGENTS.md with structured fields that tools can consume.
 from __future__ import annotations
 
 import json
-from pathlib import Path
+import time
 from typing import Any
 
 from . import config
@@ -21,6 +21,12 @@ DEFAULT_PROFILE: dict[str, Any] = {
     "protected_terms": [],
     "core_terms": [],
     "competitor_terms": [],
+    "margin_rate": None,
+    "breakeven_acos": None,
+    "price": None,
+    "currency": "USD",
+    "listing_risks": [],
+    "last_reviewed_at": "",
     "notes": "",
 }
 
@@ -49,17 +55,20 @@ def _clean_profile(raw: dict[str, Any] | None) -> dict[str, Any]:
     p = dict(DEFAULT_PROFILE)
     if raw:
         p.update(raw)
-    for key in ("protected_terms", "core_terms", "competitor_terms"):
+    for key in ("protected_terms", "core_terms", "competitor_terms", "listing_risks"):
         p[key] = _clean_list(p.get(key))
-    if p.get("target_acos") in ("", None):
-        p["target_acos"] = None
-    else:
+    for num_key in ("target_acos", "margin_rate", "breakeven_acos", "price"):
+        if p.get(num_key) in ("", None):
+            p[num_key] = None
+            continue
         try:
-            p["target_acos"] = float(p["target_acos"])
+            p[num_key] = float(p[num_key])
         except (TypeError, ValueError):
-            p["target_acos"] = None
+            p[num_key] = None
     p["site"] = str(p.get("site") or "").strip().upper() or "US"
     p["stage"] = str(p.get("stage") or "").strip()
+    p["currency"] = str(p.get("currency") or "USD").strip().upper()
+    p["last_reviewed_at"] = str(p.get("last_reviewed_at") or "").strip()
     p["notes"] = str(p.get("notes") or "").strip()
     return p
 
@@ -110,6 +119,7 @@ def update(key: str = "default", **fields: Any) -> dict[str, Any]:
     for name, value in fields.items():
         if value is not None:
             merged[name] = value
+    merged["last_reviewed_at"] = time.strftime("%Y-%m-%d")
     cleaned = _clean_profile(merged)
     if bucket == "default":
         data["default"] = cleaned
@@ -137,9 +147,10 @@ def resolve(*, asin: str = "", store: str = "") -> dict[str, Any]:
         if bucket != "default":
             specific = data.get(bucket, {}).get(norm, {})
             for field, value in specific.items():
-                if field in ("protected_terms", "core_terms", "competitor_terms") and not value:
+                if field in ("protected_terms", "core_terms", "competitor_terms", "listing_risks") and not value:
                     continue
-                if field in ("target_acos", "stage", "notes") and value in ("", None):
+                if field in ("target_acos", "margin_rate", "breakeven_acos", "price", "stage", "notes",
+                             "last_reviewed_at") and value in ("", None):
                     continue
                 merged[field] = value
     return _clean_profile(merged)
@@ -150,6 +161,12 @@ def context_text(profile: dict[str, Any], label: str = "default") -> str:
     parts = [f"[运营画像:{label}]", f"- 站点: {p['site']}"]
     if p.get("target_acos") is not None:
         parts.append(f"- 目标 ACOS: {p['target_acos']:.0%}")
+    if p.get("margin_rate") is not None:
+        parts.append(f"- 毛利率: {p['margin_rate']:.0%}")
+    if p.get("breakeven_acos") is not None:
+        parts.append(f"- 盈亏平衡 ACOS: {p['breakeven_acos']:.0%}")
+    if p.get("price") is not None:
+        parts.append(f"- 价格: {p['currency']} {p['price']:.2f}")
     if p.get("stage"):
         parts.append(f"- 生命周期阶段: {p['stage']}")
     if p.get("protected_terms"):
@@ -158,6 +175,10 @@ def context_text(profile: dict[str, Any], label: str = "default") -> str:
         parts.append("- 核心词: " + ", ".join(p["core_terms"]))
     if p.get("competitor_terms"):
         parts.append("- 竞品/对标词: " + ", ".join(p["competitor_terms"]))
+    if p.get("listing_risks"):
+        parts.append("- Listing 风险: " + ", ".join(p["listing_risks"]))
+    if p.get("last_reviewed_at"):
+        parts.append("- 画像复核日期: " + p["last_reviewed_at"])
     if p.get("notes"):
         parts.append("- 打法备注: " + p["notes"])
     return "\n".join(parts)

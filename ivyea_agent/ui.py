@@ -10,6 +10,8 @@ import re
 import shutil
 import textwrap
 
+from . import security
+
 _X = "\033[0m"
 _B = "\033[1m"
 _DIM = "\033[2m"
@@ -119,7 +121,7 @@ def tool_call(name: str, args: dict | None = None, *, color: bool | None = None)
     args = args or {}
     pairs = []
     for key, value in args.items():
-        text = repr(value)
+        text = repr(security.redact_obj(value))
         if len(text) > 60:
             text = text[:57] + "..."
         pairs.append(f"{key}={text}")
@@ -128,7 +130,7 @@ def tool_call(name: str, args: dict | None = None, *, color: bool | None = None)
 
 
 def tool_result(text: str, *, color: bool | None = None) -> str:
-    first = (text or "").splitlines()[0] if text else "完成，无文本输出"
+    first = (security.redact_text(text or "").splitlines()[0]) if text else "完成，无文本输出"
     if len(first) > 120:
         first = first[:117] + "..."
     return f"  {paint(_ICONS['result'], 'muted', color=color)} {paint(first, 'muted', color=color)}"

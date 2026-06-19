@@ -7,8 +7,14 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
+import sqlite3
 from importlib import resources
+from pathlib import Path
+import time
 from typing import Any
+
+from . import config, security
 
 ALIASES = {
     "否词": ["negative", "negative targeting", "negative keywords"],
@@ -70,18 +76,99 @@ def _base():
     return resources.files("ivyea_agent").joinpath("knowledge_base")
 
 
+def _user_base() -> Path:
+    return config.IVYEA_DIR / "knowledge"
+
+
+def _sources_file() -> Path:
+    return _user_base() / "sources.jsonl"
+
+
+def _index_file() -> Path:
+    return _user_base() / "index.db"
+
+
 def list_cards() -> list[dict[str, Any]]:
-    """Return bundled knowledge card metadata."""
+    """Return bundled and user knowledge card metadata."""
     text = _base().joinpath("index.json").read_text(encoding="utf-8")
-    return json.loads(text)
+    cards = json.loads(text)
+    for card in cards:
+        card.setdefault("retrieved_at", card.get("version", ""))
+        card.setdefault("confidence", _confidence(card.get("source_type", "")))
+        card.setdefault("freshness", "reviewed")
+        card.setdefault("scope", "builtin")
+    cards.extend(list_user_cards())
+    return cards
+
+
+def list_builtin_cards() -> list[dict[str, Any]]:
+    text = _base().joinpath("index.json").read_text(encoding="utf-8")
+    rows = json.loads(text)
+    for card in rows:
+        card.setdefault("retrieved_at", card.get("version", ""))
+        card.setdefault("confidence", _confidence(card.get("source_type", "")))
+        card.setdefault("freshness", "reviewed")
+        card.setdefault("license", "amazon_public_docs_summary")
+        card.setdefault("scope", "builtin")
+        try:
+            body = _base().joinpath(card["path"]).read_text(encoding="utf-8")
+            card.setdefault("body_hash", _hash(body))
+        except Exception:
+            card.setdefault("body_hash", "")
+    return rows
+
+
+def list_user_cards() -> list[dict[str, Any]]:
+    p = _sources_file()
+    if not p.exists():
+        return []
+    rows = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            card = json.loads(line)
+        except Exception:
+            continue
+        card.setdefault("source_type", "user")
+        card.setdefault("confidence", _confidence(card.get("source_type", "")))
+        card.setdefault("retrieved_at", "")
+        card.setdefault("license", "user_supplied")
+        if not card.get("body_hash"):
+            try:
+                card["body_hash"] = _hash(_user_base().joinpath(card["path"]).read_text(encoding="utf-8"))
+            except Exception:
+                card["body_hash"] = ""
+        card.setdefault("scope", "user")
+        rows.append(card)
+    return rows
+
+
+def _confidence(source_type: str) -> str:
+    if source_type == "official":
+        return "high"
+    if source_type.startswith("official_plus"):
+        return "medium_high"
+    if source_type.startswith("community"):
+        return "medium"
+    if source_type == "user":
+        return "user_supplied"
+    return "unknown"
 
 
 def get_card(card_id: str) -> dict[str, Any] | None:
     for card in list_cards():
         if card["id"] == card_id:
-            body = _base().joinpath(card["path"]).read_text(encoding="utf-8")
+            body = _read_body(card)
             return {**card, "body": body}
     return None
+
+
+def _read_body(card: dict[str, Any]) -> str:
+    if card.get("scope") == "user":
+        p = _user_base().joinpath(card["path"])
+        return p.read_text(encoding="utf-8")
+    return _base().joinpath(card["path"]).read_text(encoding="utf-8")
 
 
 def _score(text: str, terms: list[str]) -> int:
@@ -89,8 +176,12 @@ def _score(text: str, terms: list[str]) -> int:
     return sum(low.count(t.lower()) for t in terms if t)
 
 
+def _hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
 def search(query: str, limit: int = 5) -> list[dict[str, Any]]:
-    """Simple deterministic search over bundled knowledge cards."""
+    """Simple deterministic search over bundled and user knowledge cards."""
     terms = re.findall(r"[\w\u4e00-\u9fff+.-]+", query)
     expanded = []
     for t in terms:
@@ -104,7 +195,7 @@ def search(query: str, limit: int = 5) -> list[dict[str, Any]]:
     terms = expanded
     rows = []
     for card in list_cards():
-        body = _base().joinpath(card["path"]).read_text(encoding="utf-8")
+        body = _read_body(card)
         hay = " ".join([card["id"], card["title"], " ".join(card.get("tags", [])), body])
         score = _score(hay, terms)
         if score:
@@ -135,7 +226,20 @@ def render_search(query: str, limit: int = 5) -> str:
     lines = []
     for h in hits:
         source = f" · {h['source_url']}" if h.get("source_url") else ""
-        lines.append(f"- {h['id']} · {h['title']} [{h['source_type']}]{source}\n  {h['snippet']}")
+        meta = f"{h['source_type']} confidence={h.get('confidence', 'unknown')} retrieved={h.get('retrieved_at', '-')}"
+        lines.append(f"- {h['id']} · {h['title']} [{meta}]{source}\n  {h['snippet']}")
+    return "\n".join(lines)
+
+
+def render_audit() -> str:
+    """Show source quality metadata for bundled and user knowledge cards."""
+    lines = ["Ivyea 知识库审计："]
+    for card in list_cards():
+        source = card.get("source_url") or "-"
+        lines.append(
+            f"- {card['id']} | {card.get('scope', 'builtin')} | {card['source_type']} | confidence={card.get('confidence')} | "
+            f"retrieved={card.get('retrieved_at')} | license={card.get('license', '-')} | hash={str(card.get('body_hash', ''))[:12]} | source={source}"
+        )
     return "\n".join(lines)
 
 
@@ -153,3 +257,233 @@ def context_for_query(query: str, limit: int = 3, max_chars: int = 1200) -> tupl
     if len(text) > max_chars:
         text = text[:max_chars].rstrip() + "\n..."
     return text, ids
+
+
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip().lower()).strip("-")
+    return slug[:80] or time.strftime("knowledge-%Y%m%d-%H%M%S")
+
+
+def import_text(title: str, body: str, *, source_url: str = "", source_type: str = "user",
+                confidence: str = "", tags: list[str] | None = None, card_id: str = "",
+                license: str = "user_supplied") -> dict[str, Any]:
+    """Import a user knowledge card into ~/.ivyea/knowledge."""
+    config.ensure_dirs()
+    base = _user_base()
+    base.mkdir(parents=True, exist_ok=True)
+    safe_id = card_id or f"user.{_slug(title)}"
+    rel = f"user/{_slug(safe_id)}.md"
+    out = base / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    clean_body = security.redact_text(body).strip() + "\n"
+    out.write_text(clean_body, encoding="utf-8")
+    card = {
+        "id": safe_id,
+        "title": title.strip() or safe_id,
+        "category": "user",
+        "source_type": source_type or "user",
+        "confidence": confidence or _confidence(source_type or "user"),
+        "retrieved_at": time.strftime("%Y-%m-%d"),
+        "license": license or "user_supplied",
+        "source_url": source_url,
+        "path": rel,
+        "tags": tags or [],
+        "scope": "user",
+        "body_hash": _hash(clean_body),
+    }
+    _upsert_source(card)
+    return card
+
+
+def import_file(path: str, *, title: str = "", source_type: str = "user",
+                confidence: str = "", tags: list[str] | None = None, card_id: str = "",
+                license: str = "user_supplied") -> dict[str, Any]:
+    p = Path(path).expanduser().resolve()
+    body = p.read_text(encoding="utf-8", errors="replace")
+    return import_text(
+        title or p.stem,
+        body,
+        source_url=str(p),
+        source_type=source_type,
+        confidence=confidence,
+        tags=tags,
+        card_id=card_id,
+        license=license,
+    )
+
+
+def import_url(url: str, *, title: str = "", source_type: str = "user",
+               confidence: str = "", tags: list[str] | None = None, card_id: str = "",
+               license: str = "user_supplied") -> dict[str, Any]:
+    import httpx
+
+    r = httpx.get(url, timeout=30, follow_redirects=True, headers={"User-Agent": "ivyea-agent/0.4"})
+    r.raise_for_status()
+    text = r.text
+    if "html" in r.headers.get("content-type", ""):
+        text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", "", text)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = re.sub(r"[ \t]+", " ", re.sub(r"\n\s*\n+", "\n", text)).strip()
+    return import_text(
+        title or url,
+        text,
+        source_url=url,
+        source_type=source_type,
+        confidence=confidence,
+        tags=tags,
+        card_id=card_id,
+        license=license,
+    )
+
+
+def _upsert_source(card: dict[str, Any]) -> None:
+    p = _sources_file()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    rows = [c for c in list_user_cards() if c.get("id") != card["id"]]
+    rows.append(card)
+    tmp = p.with_suffix(".jsonl.tmp")
+    tmp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
+    tmp.replace(p)
+
+
+def rebuild() -> dict[str, Any]:
+    """Validate user knowledge metadata and prune rows with missing files."""
+    rows = []
+    missing = []
+    for card in list_user_cards():
+        if _user_base().joinpath(card["path"]).exists():
+            rows.append(card)
+        else:
+            missing.append(card["id"])
+    p = _sources_file()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + ("\n" if rows else ""), encoding="utf-8")
+    idx = rebuild_index()
+    return {"user_cards": len(rows), "missing_pruned": missing, "sources": str(p), "index": idx}
+
+
+def _conn() -> sqlite3.Connection:
+    p = _index_file()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(p))
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE IF NOT EXISTS cards (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        scope TEXT,
+        source_type TEXT,
+        confidence TEXT,
+        retrieved_at TEXT,
+        license TEXT,
+        body_hash TEXT,
+        tags TEXT,
+        source_url TEXT,
+        body TEXT
+    )""")
+    return conn
+
+
+def _fts_ok(conn: sqlite3.Connection) -> bool:
+    try:
+        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS cards_fts USING fts5(id, title, tags, body)")
+        return True
+    except Exception:
+        return False
+
+
+def rebuild_index() -> dict[str, Any]:
+    conn = _conn()
+    fts = _fts_ok(conn)
+    conn.execute("DELETE FROM cards")
+    if fts:
+        conn.execute("DELETE FROM cards_fts")
+    count = 0
+    for card in list_cards():
+        body = _read_body(card)
+        body_hash = card.get("body_hash") or _hash(body)
+        tags = ",".join(card.get("tags") or [])
+        conn.execute(
+            "INSERT OR REPLACE INTO cards VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                card["id"], card.get("title", ""), card.get("scope", "builtin"),
+                card.get("source_type", ""), card.get("confidence", ""),
+                card.get("retrieved_at", ""), card.get("license", ""),
+                body_hash, tags, card.get("source_url", ""), body,
+            ),
+        )
+        if fts:
+            conn.execute("INSERT INTO cards_fts (id, title, tags, body) VALUES (?,?,?,?)",
+                         (card["id"], card.get("title", ""), tags, body))
+        count += 1
+    conn.commit()
+    conn.close()
+    return {"cards": count, "fts": fts, "db": str(_index_file())}
+
+
+def search_index(query: str, limit: int = 5) -> list[dict[str, Any]]:
+    if not _index_file().exists():
+        rebuild_index()
+    conn = _conn()
+    rows = []
+    try:
+        if _fts_ok(conn):
+            rows = conn.execute(
+                "SELECT c.* FROM cards_fts f JOIN cards c ON c.id=f.id "
+                "WHERE cards_fts MATCH ? LIMIT ?",
+                (query, limit),
+            ).fetchall()
+        if not rows:
+            like = f"%{query}%"
+            rows = conn.execute(
+                "SELECT * FROM cards WHERE id LIKE ? OR title LIKE ? OR tags LIKE ? OR body LIKE ? LIMIT ?",
+                (like, like, like, like, limit),
+            ).fetchall()
+    except Exception:
+        like = f"%{query}%"
+        rows = conn.execute(
+            "SELECT * FROM cards WHERE id LIKE ? OR title LIKE ? OR tags LIKE ? OR body LIKE ? LIMIT ?",
+            (like, like, like, like, limit),
+        ).fetchall()
+    conn.close()
+    out = []
+    for row in rows:
+        d = dict(row)
+        d["snippet"] = _snippet(d.get("body", ""), re.findall(r"[\w\u4e00-\u9fff+.-]+", query))
+        d["tags"] = [t for t in (d.get("tags") or "").split(",") if t]
+        out.append(d)
+    return out
+
+
+def conflicts() -> list[dict[str, Any]]:
+    cards = list_cards()
+    official = [c for c in cards if c.get("source_type") == "official" or str(c.get("source_type", "")).startswith("official_plus")]
+    user = [c for c in cards if c.get("scope") == "user"]
+    rows = []
+    for card in user:
+        if not card.get("license"):
+            rows.append({"level": "warn", "id": card["id"], "reason": "用户知识卡缺 license"})
+        tags = set(card.get("tags") or [])
+        body = _read_body(card).lower()
+        reverse = any(k in body for k in ("不要", "禁止", "不建议", "avoid", "do not", "never"))
+        if not reverse:
+            continue
+        overlaps = [o["id"] for o in official if tags and tags.intersection(set(o.get("tags") or []))]
+        if overlaps:
+            rows.append({
+                "level": "review",
+                "id": card["id"],
+                "reason": "用户/社区知识含反向表述，且标签与官方知识重叠；需要人工确认是否冲突",
+                "related": overlaps[:5],
+            })
+    return rows
+
+
+def render_conflicts() -> str:
+    rows = conflicts()
+    if not rows:
+        return "Ivyea 知识库冲突审计\n\nOK 未发现明显冲突风险。\n"
+    lines = ["Ivyea 知识库冲突审计", ""]
+    for r in rows:
+        related = f" related={','.join(r.get('related', []))}" if r.get("related") else ""
+        lines.append(f"- [{r['level']}] {r['id']}: {r['reason']}{related}")
+    return "\n".join(lines) + "\n"

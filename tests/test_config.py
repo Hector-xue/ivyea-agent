@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import importlib
+import os as _os
+
+import pytest
 
 
 def _cfg():
@@ -32,11 +35,6 @@ def test_env_key_add_update_remove(ivyea_home):
     config.set_env_key("LINGXING_OPENAPI_SECRET", "")
     txt = config.ENV_FILE.read_text(encoding="utf-8")
     assert "LINGXING_OPENAPI_SECRET" not in txt
-
-
-import os as _os
-
-import pytest
 
 
 @pytest.mark.skipif(_os.name == "nt", reason="Windows 无 POSIX 文件权限位（chmod 在此为 best-effort 空操作）")
