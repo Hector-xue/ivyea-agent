@@ -125,11 +125,11 @@ $ ivyea image vision ./listing --provider openai --call
     <section class="band">
       <div class="section">
         <h2>部署门户网站</h2>
-        <p class="lead">`site/` 是静态站点，可以部署到 GitHub Pages、Nginx 或 Cloudflare Pages。域名 `agent.ivyea.com` 需要在 DNS 添加 CNAME。</p>
+        <p class="lead">`site/` 是静态站点，正式部署方式和 ivyea.com 一样：文件同步到服务器 `/var/www/agent.ivyea.com/`，由 Nginx 对外提供服务。</p>
         <div class="steps">
-          <div class="step"><span class="step-num">1</span><div><strong>部署 site/</strong><p>GitHub Pages workflow 已包含在仓库中，也可以把目录上传到任意静态托管。</p></div></div>
-          <div class="step"><span class="step-num">2</span><div><strong>配置 DNS</strong><p>添加 `agent.ivyea.com CNAME Hector-xue.github.io`，或指向你自己的服务器。</p></div></div>
-          <div class="step"><span class="step-num">3</span><div><strong>开启 HTTPS</strong><p>GitHub Pages 可自动签发证书；Nginx 部署可用 certbot。</p></div></div>
+          <div class="step"><span class="step-num">1</span><div><strong>同步 site/</strong><p>执行 `rsync -a --delete site/ /var/www/agent.ivyea.com/`。</p></div></div>
+          <div class="step"><span class="step-num">2</span><div><strong>配置 Nginx</strong><p>使用 `deploy/nginx/agent.ivyea.com.conf`，风格和 `ivyea.com.conf` 一致。</p></div></div>
+          <div class="step"><span class="step-num">3</span><div><strong>开启 HTTPS</strong><p>DNS 指向服务器后执行 `certbot --nginx -d agent.ivyea.com`。</p></div></div>
         </div>
       </div>
     </section>

@@ -136,9 +136,12 @@ ivyea policy show
 ivyea policy check-command "git reset --hard"</pre>
 
       <h2 id="deploy">门户部署</h2>
-      <p>本网站源码在 `site/`。GitHub Pages workflow 已配置，仓库 Settings → Pages 选择 GitHub Actions 即可。</p>
-      <pre>agent.ivyea.com CNAME Hector-xue.github.io</pre>
-      <p>如果部署到自己的服务器，把 `site/` 同步到 Nginx root，并为 `agent.ivyea.com` 配置 HTTPS。</p>
+      <p>本网站源码在 `site/`。正式部署和 `ivyea.com` 一样，静态文件放到 `/var/www/agent.ivyea.com/`，Nginx 读取该目录。</p>
+      <pre>rsync -a --delete site/ /var/www/agent.ivyea.com/
+cp deploy/nginx/agent.ivyea.com.conf /etc/nginx/conf.d/agent.ivyea.com.conf
+nginx -t &amp;&amp; systemctl reload nginx
+certbot --nginx -d agent.ivyea.com</pre>
+      <p>DNS 需要把 `agent.ivyea.com` 的 A 记录指向当前服务器公网 IP。</p>
     </article>
   </main>
 
