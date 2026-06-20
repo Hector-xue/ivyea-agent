@@ -1,6 +1,6 @@
 name: Release
 
-# 打 tag（v*）即发布：构建 sdist+wheel，作为 GitHub Release 资产上传（同 ivyea-ops 方式，零外部配置）。
+# 打 tag（v*）即发布：构建 sdist+wheel + 离线部署包，作为 GitHub Release 资产上传。
 # 用户安装：pip install <release 里的 .whl 链接>，或 pipx install git+https://github.com/Hector-xue/ivyea-agent.git
 on:
   push:
@@ -19,6 +19,8 @@ jobs:
           python-version: "3.11"
       - name: Build sdist + wheel
         run: python -m pip install --upgrade build && python -m build
+      - name: Build offline installer bundles
+        run: python scripts/build_offline_bundle.py
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -26,3 +28,5 @@ jobs:
           files: |
             dist/*.whl
             dist/*.tar.gz
+            dist/offline/*.zip
+            dist/offline/*.tar.gz

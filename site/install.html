@@ -48,7 +48,7 @@ ivyea chat</pre>
         <li>以普通 PowerShell 执行一键安装脚本。</li>
         <li>重开 PowerShell 后运行 `ivyea --version`。</li>
       </ol>
-      <pre>$env:IVYEA_VERSION="v0.5.0"
+      <pre>$env:IVYEA_VERSION="v0.5.1"
 iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</pre>
 
       <h2 id="linux">Linux</h2>
@@ -69,8 +69,8 @@ pipx uninstall ivyea-agent</pre>
 
       <h2 id="offline">离线部署</h2>
       <p>从 Release 下载 wheel 和依赖 wheel，复制到内网后安装：</p>
-      <pre>pip download ivyea_agent-0.5.0-py3-none-any.whl -d wheelhouse
-pipx install --pip-args="--no-index --find-links ./wheelhouse" ./wheelhouse/ivyea_agent-0.5.0-py3-none-any.whl</pre>
+      <pre>pip download ivyea_agent-0.5.1-py3-none-any.whl -d wheelhouse
+pipx install --pip-args="--no-index --find-links ./wheelhouse" ./wheelhouse/ivyea_agent-0.5.1-py3-none-any.whl</pre>
 
       <h2 id="trouble">故障排查</h2>
       <table>
