@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>安装 Ivyea Agent</title>
+  <meta name="description" content="Ivyea Agent Windows、macOS、Linux 一键安装和企业部署说明。">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <nav class="nav" aria-label="主导航">
+      <a class="brand" href="index.html"><span class="brand-mark">I</span><span>Ivyea Agent</span></a>
+      <div class="nav-links">
+        <a href="install.html">安装</a>
+        <a href="docs.html">文档</a>
+        <a class="button secondary" href="https://github.com/Hector-xue/ivyea-agent">GitHub</a>
+      </div>
+    </nav>
+  </header>
+
+  <main class="doc-layout">
+    <aside class="toc">
+      <a href="#quick">快速安装</a>
+      <a href="#windows">Windows</a>
+      <a href="#linux">Linux</a>
+      <a href="#macos">macOS</a>
+      <a href="#upgrade">升级卸载</a>
+      <a href="#offline">离线部署</a>
+      <a href="#trouble">故障排查</a>
+    </aside>
+    <article class="doc">
+      <h1>安装 Ivyea Agent</h1>
+      <p>推荐使用 pipx 安装。它会把 `ivyea` 作为独立 CLI 放进 PATH，不污染系统 Python。</p>
+
+      <h2 id="quick">快速安装</h2>
+      <h3>Linux / macOS</h3>
+      <pre>curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash</pre>
+      <h3>Windows PowerShell</h3>
+      <pre>iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</pre>
+      <p>安装后重开终端，执行：</p>
+      <pre>ivyea config
+ivyea chat</pre>
+
+      <h2 id="windows">Windows</h2>
+      <ol>
+        <li>安装 Python 3.9+，勾选 Add Python to PATH。</li>
+        <li>以普通 PowerShell 执行一键安装脚本。</li>
+        <li>重开 PowerShell 后运行 `ivyea --version`。</li>
+      </ol>
+      <pre>$env:IVYEA_VERSION="v0.5.0"
+iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</pre>
+
+      <h2 id="linux">Linux</h2>
+      <p>Debian / Ubuntu 如未安装 Python：</p>
+      <pre>sudo apt update
+sudo apt install -y python3 python3-pip python3-venv
+curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash</pre>
+
+      <h2 id="macos">macOS</h2>
+      <p>如果没有 Python，可先用 Homebrew 安装：</p>
+      <pre>brew install python
+curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash</pre>
+
+      <h2 id="upgrade">升级卸载</h2>
+      <pre>pipx upgrade ivyea-agent
+pipx uninstall ivyea-agent</pre>
+      <p>卸载不会删除 `~/.ivyea/`，因此配置、记忆和知识库会保留。</p>
+
+      <h2 id="offline">离线部署</h2>
+      <p>从 Release 下载 wheel 和依赖 wheel，复制到内网后安装：</p>
+      <pre>pip download ivyea_agent-0.5.0-py3-none-any.whl -d wheelhouse
+pipx install --pip-args="--no-index --find-links ./wheelhouse" ./wheelhouse/ivyea_agent-0.5.0-py3-none-any.whl</pre>
+
+      <h2 id="trouble">故障排查</h2>
+      <table>
+        <thead><tr><th>问题</th><th>处理</th></tr></thead>
+        <tbody>
+          <tr><td>找不到 `ivyea`</td><td>运行 `pipx ensurepath` 后重开终端。</td></tr>
+          <tr><td>Release 读取失败</td><td>私有仓库设置 `GITHUB_TOKEN`，或设置 `IVYEA_REF=main` 从 git 安装。</td></tr>
+          <tr><td>中文 CSV 乱码</td><td>优先使用 `.xlsx`，或把 CSV 另存为 UTF-8。</td></tr>
+          <tr><td>真实写入失败</td><td>运行 `ivyea doctor` 和 `ivyea mcp validate <名称>`。</td></tr>
+        </tbody>
+      </table>
+    </article>
+  </main>
+
+  <footer class="site-footer"><div class="footer-inner"><span>Ivyea Agent</span><a href="docs.html">完整文档</a></div></footer>
+</body>
+</html>

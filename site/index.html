@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ivyea Agent - Amazon 运营 CLI Agent</title>
+  <meta name="description" content="Ivyea Agent 是自托管的亚马逊运营 CLI Agent，支持广告巡检、知识库、skills、审批写入、视觉诊断和自动化预警。">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <nav class="nav" aria-label="主导航">
+      <a class="brand" href="index.html"><span class="brand-mark">I</span><span>Ivyea Agent</span></a>
+      <div class="nav-links">
+        <a href="install.html">安装</a>
+        <a href="docs.html">文档</a>
+        <a href="docs.html#operations">运营能力</a>
+        <a href="docs.html#security">安全</a>
+        <a class="button secondary" href="https://github.com/Hector-xue/ivyea-agent">GitHub</a>
+      </div>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">Self-hosted Amazon operations agent</p>
+        <h1>Ivyea Agent</h1>
+        <p class="hero-copy">
+          面向亚马逊运营的命令行 Agent：用确定性规则引擎做广告巡检，用 LLM 做复核和解释，用审批、记忆、知识库和护栏保证真实写入可控。
+        </p>
+        <div class="hero-actions">
+          <a class="button" href="install.html">开始安装</a>
+          <a class="button secondary" href="docs.html">查看完整文档</a>
+        </div>
+        <div class="hero-meta">
+          <span class="pill">Windows / macOS / Linux</span>
+          <span class="pill">pipx 一键安装</span>
+          <span class="pill">v0.5.0</span>
+        </div>
+      </div>
+
+      <div class="console-visual" aria-label="Ivyea Agent 产品界面预览">
+        <div class="console-head"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+        <div class="console-grid">
+          <div class="terminal">
+            <pre>$ ivyea patrol search-term.xlsx --asin B0XXXX
+✓ 读取搜索词报告
+✓ 应用否词/调 bid/放量规则
+✓ 注入 Amazon skills 与知识库
+✓ 输出证据链与动作队列
+
+$ ivyea alert check --notify
+WARN profile.incomplete
+INFO shadow.review_due
+
+$ ivyea image vision ./listing --provider openai --call
+✓ 主图卖点识别
+✓ 包装/文案风险检查</pre>
+          </div>
+          <div class="panel">
+            <p class="panel-title">Run summary</p>
+            <div class="metric"><span>Rule engine</span><strong class="status-ok">PASS</strong></div>
+            <div class="metric"><span>Knowledge recall</span><strong class="status-ok">FTS5</strong></div>
+            <div class="metric"><span>Write actions</span><strong class="status-warn">Approval</strong></div>
+            <div class="metric"><span>Policy guard</span><strong class="status-ok">Enabled</strong></div>
+            <div class="metric"><span>Eval suite</span><strong class="status-ok">198 passed</strong></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="band">
+      <div class="section compact">
+        <h2>为什么要单独做一个 Amazon Agent</h2>
+        <p class="lead">通用编码 Agent 解决不了广告报表、否词误伤、Listing 承接、预算节奏和真实写入审批这些运营问题。Ivyea Agent 把这些流程产品化。</p>
+        <div class="grid">
+          <article class="card">
+            <h3>广告巡检</h3>
+            <p>读取搜索词报告，输出否词、放量、降 bid、Listing 反馈和人工复核建议，每条建议都有证据。</p>
+          </article>
+          <article class="card">
+            <h3>知识库和 Skills</h3>
+            <p>内置 Amazon Ads、Listing、预算、Launch、周度复盘等运营流程，支持导入团队知识。</p>
+          </article>
+          <article class="card">
+            <h3>审批式执行</h3>
+            <p>真实写入前逐条确认，保护品牌词/核心词，记录审计日志并支持回滚。</p>
+          </article>
+          <article class="card">
+            <h3>视觉诊断</h3>
+            <p>本地图片尺寸检查、OCR、多模态模型审核请求包，以及可选真实调用。</p>
+          </article>
+          <article class="card">
+            <h3>自动预警</h3>
+            <p>检查动作积压、工具失败、知识库缺失、画像配置和磁盘空间，可发 webhook 或飞书通知。</p>
+          </article>
+          <article class="card">
+            <h3>本地私有</h3>
+            <p>配置、API key、记忆、知识库默认都在本机 `~/.ivyea/`，不依赖外部数据库。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>一条命令安装</h2>
+      <p class="lead">普通用户不需要 clone 仓库。脚本会安装 pipx，并优先从 GitHub Release wheel 安装最新稳定版本。</p>
+      <div class="grid">
+        <article class="card">
+          <h3>Linux / macOS</h3>
+          <pre>curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash</pre>
+        </article>
+        <article class="card">
+          <h3>Windows PowerShell</h3>
+          <pre>iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</pre>
+        </article>
+        <article class="card">
+          <h3>固定版本</h3>
+          <pre>curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v0.5.0 bash</pre>
+        </article>
+      </div>
+    </section>
+
+    <section class="band">
+      <div class="section">
+        <h2>部署门户网站</h2>
+        <p class="lead">`site/` 是静态站点，可以部署到 GitHub Pages、Nginx 或 Cloudflare Pages。域名 `agent.ivyea.com` 需要在 DNS 添加 CNAME。</p>
+        <div class="steps">
+          <div class="step"><span class="step-num">1</span><div><strong>部署 site/</strong><p>GitHub Pages workflow 已包含在仓库中，也可以把目录上传到任意静态托管。</p></div></div>
+          <div class="step"><span class="step-num">2</span><div><strong>配置 DNS</strong><p>添加 `agent.ivyea.com CNAME Hector-xue.github.io`，或指向你自己的服务器。</p></div></div>
+          <div class="step"><span class="step-num">3</span><div><strong>开启 HTTPS</strong><p>GitHub Pages 可自动签发证书；Nginx 部署可用 certbot。</p></div></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <span>Ivyea Agent</span>
+      <span>Amazon operations, local-first agent.</span>
+    </div>
+  </footer>
+</body>
+</html>

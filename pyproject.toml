@@ -30,8 +30,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Hector-xue/ivyea-agent"
+Homepage = "https://agent.ivyea.com"
 Repository = "https://github.com/Hector-xue/ivyea-agent"
+Documentation = "https://agent.ivyea.com/docs.html"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6", "build>=1.2"]

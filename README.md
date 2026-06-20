@@ -4,6 +4,44 @@
 
 > 哲学：**确定性规则引擎 + LLM 复核**；证据驱动+标签化；写操作审核制；护栏内置；数据私有。
 
+## 快速入口
+
+- 门户网站：`https://agent.ivyea.com`（静态站点源码在 `site/`）
+- 完整部署指南：[docs/部署指南.md](docs/部署指南.md)
+- 操作文档：[docs/使用与操作文档.md](docs/使用与操作文档.md)
+- 最新版本：`v0.5.0`
+
+## 三分钟安装
+
+Linux / macOS：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash
+ivyea config
+ivyea chat
+```
+
+Windows PowerShell：
+
+```powershell
+iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex
+ivyea config
+ivyea chat
+```
+
+固定版本安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v0.5.0 bash
+```
+
+```powershell
+$env:IVYEA_VERSION="v0.5.0"
+iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex
+```
+
+一键脚本默认安装 GitHub 最新 Release wheel；Release 不可用时自动回退到 git 源码安装。私有仓库读取 Release 可设置 `GITHUB_TOKEN`。
+
 ## P1（当前）：只读广告巡检
 
 输入一份亚马逊搜索词报告（CSV/xlsx），输出可执行的**只读巡检报告**：否词候选 / 放量 / 降 bid / Listing 反馈 / 观察 / 人工复核，每条带证据与置信度。**不会自动改广告。**
@@ -21,9 +59,18 @@ curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts
 # Windows PowerShell
 iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
-脚本会自动装好 pipx 并把 `ivyea` 装到 PATH。国内慢可加镜像：`PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` 前缀。装完重开终端，`ivyea config` 即可。
+脚本会自动装好 pipx 并把 `ivyea` 装到 PATH。默认安装最新 GitHub Release wheel，失败时回退到 git main。国内慢可加镜像：`curl ... | PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple bash`。装完重开终端，`ivyea config` 即可。
 
-> 仓库私有期间 `git+https` 安装需你的 GitHub 凭据；转公开或发 PyPI 后任何人可直接装。
+常用变量：
+
+| 变量 | 用途 |
+| --- | --- |
+| `IVYEA_VERSION=v0.5.0` | 固定安装某个 Release |
+| `IVYEA_REF=main` | 从 git 分支/tag 安装 |
+| `IVYEA_LOCAL=/path/to/repo` | 从本地源码安装 |
+| `GITHUB_TOKEN=...` | 私有仓库读取 Release 资产 |
+
+更完整的安装、升级、离线部署、企业内网部署见 [docs/部署指南.md](docs/部署指南.md)。
 
 ### 手动安装（pipx / venv）
 跨平台纯 Python（≥3.9），依赖 pandas / openpyxl / httpx，**无需 Node/数据库**。

@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ivyea Agent 文档</title>
+  <meta name="description" content="Ivyea Agent 完整文档：安装、配置、亚马逊广告巡检、知识库、skills、MCP、审批写入、视觉诊断和部署。">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <nav class="nav" aria-label="主导航">
+      <a class="brand" href="index.html"><span class="brand-mark">I</span><span>Ivyea Agent</span></a>
+      <div class="nav-links">
+        <a href="install.html">安装</a>
+        <a href="docs.html">文档</a>
+        <a href="#deploy">门户部署</a>
+        <a class="button secondary" href="https://github.com/Hector-xue/ivyea-agent">GitHub</a>
+      </div>
+    </nav>
+  </header>
+
+  <main class="doc-layout">
+    <aside class="toc">
+      <a href="#overview">概览</a>
+      <a href="#install">安装</a>
+      <a href="#config">配置</a>
+      <a href="#operations">运营能力</a>
+      <a href="#knowledge">Skills / 知识库</a>
+      <a href="#execution">审批执行</a>
+      <a href="#mcp">MCP</a>
+      <a href="#vision">图片视觉</a>
+      <a href="#automation">自动化</a>
+      <a href="#security">安全</a>
+      <a href="#deploy">门户部署</a>
+    </aside>
+
+    <article class="doc">
+      <h1>Ivyea Agent 文档</h1>
+      <p>Ivyea Agent 是本地优先的 Amazon 运营 CLI Agent。核心原则是：规则引擎先给确定性结论，LLM 负责解释、复核、补充知识和执行流程，但真实写入必须经过审批。</p>
+
+      <h2 id="overview">概览</h2>
+      <table>
+        <thead><tr><th>模块</th><th>能力</th></tr></thead>
+        <tbody>
+          <tr><td>广告巡检</td><td>搜索词报告分析、否词候选、降 bid、放量、Listing 反馈、人工复核。</td></tr>
+          <tr><td>对话 Agent</td><td>自然语言触发巡检、知识检索、动作队列和工具调用。</td></tr>
+          <tr><td>Skills</td><td>内置 Amazon 搜索词优化、否词风控、预算节奏、Listing 诊断、新品启动、周度复盘。</td></tr>
+          <tr><td>知识库</td><td>官方/社区/用户知识卡，SQLite FTS5 索引，冲突审计。</td></tr>
+          <tr><td>写入执行</td><td>人工审批、保护词、动作队列、审计日志、回滚。</td></tr>
+          <tr><td>视觉诊断</td><td>图片资产检查、OCR、多模态模型请求包和可选真实调用。</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="install">安装</h2>
+      <p>普通用户推荐一键脚本。更完整的离线、内网和企业部署见仓库内 `docs/部署指南.md`。</p>
+      <pre># Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash
+
+# Windows PowerShell
+iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</pre>
+      <p>安装固定版本：</p>
+      <pre>curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v0.5.0 bash</pre>
+
+      <h2 id="config">配置</h2>
+      <pre>ivyea config
+ivyea config show
+ivyea model list
+ivyea model deepseek-chat</pre>
+      <p>配置文件都存放在本机 `~/.ivyea/`。API key 写入 `.env`，模型、站点和默认 ACOS 写入 `settings.json`。</p>
+
+      <h2 id="operations">运营能力</h2>
+      <h3>广告巡检</h3>
+      <pre>ivyea patrol 搜索词报告.xlsx --asin B0XXXXXXXX --site US --target-acos 0.3
+ivyea patrol 搜索词报告.csv --no-llm</pre>
+      <p>输出 Markdown 报告，包含动作、证据、风险和置信度。无模型 key 时会自动降级为规则引擎。</p>
+
+      <h3>Listing / Review / Offer / 竞品诊断</h3>
+      <pre>ivyea listing audit --title "Karaoke Machine" --search-terms "karaoke machine kids,studio mic"
+ivyea review audit --reviews "质量差，不能用，少件" --rating 3.7 --review-count 4
+ivyea offer audit --margin-rate 0.3 --target-acos 0.35 --inventory-days 9
+ivyea competitor audit --own-terms "karaoke machine" --search-terms "acme karaoke,B0ABCDEFGH"</pre>
+      <p>这些命令用于判断广告表现差是流量问题、Listing 承接问题、评论信任问题、价格/库存问题还是竞品串号问题。</p>
+
+      <h2 id="knowledge">Skills / 知识库</h2>
+      <pre>ivyea skill list
+ivyea skill search 否词
+ivyea skill show amazon.search_term_optimizer
+ivyea knowledge audit
+ivyea knowledge import ./note.md --id user.playbook --tags "listing,预算"
+ivyea knowledge index
+ivyea knowledge conflicts</pre>
+      <p>用户知识库存放在 `~/.ivyea/knowledge/`。导入时会记录来源类型、可信度、更新时间、URL、license 和正文 hash。</p>
+
+      <h2 id="execution">审批执行</h2>
+      <pre>ivyea apply 巡检输出目录
+ivyea apply 巡检输出目录 --protected "品牌词,核心词"
+ivyea apply 巡检输出目录 --execute --from-mcp writer
+ivyea audit list
+ivyea audit rollback &lt;审计ID&gt;</pre>
+      <p>默认 dry-run。真实写入需要显式 `--execute`，并且 MCP 服务器必须配置 `writeActions`。品牌词、核心词、保护词、低置信度动作会被护栏拦截。</p>
+
+      <h2 id="mcp">MCP</h2>
+      <pre>ivyea mcp add
+ivyea mcp tools &lt;名称&gt;
+ivyea mcp call &lt;名称&gt; &lt;工具&gt; --args '{"asin":"B0..."}'
+ivyea mcp suggest &lt;名称&gt; &lt;工具&gt; --args '{"asin":"{asin}","site":"{site}","days":"{days}"}'
+ivyea mcp validate &lt;名称&gt;</pre>
+      <p>MCP 客户端是通用映射模式，不绑定厂商字段。`mcp suggest` 会根据工具返回自动推断 `dataSource.rows_path` 和搜索词报告字段映射。</p>
+
+      <h2 id="vision">图片视觉</h2>
+      <pre>ivyea image audit ./listing-images --prompt
+ivyea image ocr ./listing-images --lang eng+chi_sim
+ivyea image vision ./listing-images --provider openai --payload --output reports/openai-vision.json
+OPENAI_API_KEY=... ivyea image vision ./listing-images --provider openai --call</pre>
+      <p>`image vision` 默认只生成请求包；传 `--call` 才会真实调用 OpenAI、Anthropic 或 Gemini 多模态 API。</p>
+
+      <h2 id="automation">自动化</h2>
+      <pre>ivyea weekly review --output reports/weekly.md
+ivyea alert check
+ivyea alert check --notify --channel feishu
+ivyea schedule set daily-alert alert --every-hours 24 --notify --channel webhook
+ivyea schedule run-due
+ivyea eval</pre>
+      <p>`schedule` 不是常驻服务，适合由 cron、systemd timer、Windows Task Scheduler 或 IvyeaOps 定时调用。</p>
+
+      <h2 id="security">安全</h2>
+      <ul>
+        <li>API key、token、secret 在工具输出、trace 和通知中会脱敏。</li>
+        <li>写文件、执行命令、真实广告写入都有审批或策略限制。</li>
+        <li>`~/.ivyea/policy.json` 可限制读写目录和命令 allow/deny。</li>
+        <li>真实写入有审计记录和回滚入口。</li>
+      </ul>
+      <pre>ivyea policy init
+ivyea policy show
+ivyea policy check-command "git reset --hard"</pre>
+
+      <h2 id="deploy">门户部署</h2>
+      <p>本网站源码在 `site/`。GitHub Pages workflow 已配置，仓库 Settings → Pages 选择 GitHub Actions 即可。</p>
+      <pre>agent.ivyea.com CNAME Hector-xue.github.io</pre>
+      <p>如果部署到自己的服务器，把 `site/` 同步到 Nginx root，并为 `agent.ivyea.com` 配置 HTTPS。</p>
+    </article>
+  </main>
+
+  <footer class="site-footer"><div class="footer-inner"><span>Ivyea Agent Docs</span><a href="install.html">安装指南</a></div></footer>
+</body>
+</html>
