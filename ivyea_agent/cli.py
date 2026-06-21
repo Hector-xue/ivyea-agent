@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -682,6 +684,9 @@ SLASH_COMMANDS = [
     ("/tools", "列出 Agent 可用工具"),
     ("/knowledge", "搜索内置亚马逊知识库：/knowledge 否词"),
     ("/skill", "搜索可复用运营 Skill：/skill listing"),
+    ("/workspace", "项目理解：/workspace map|search|explain"),
+    ("/patch", "结构化补丁：/patch make|validate|apply|tests"),
+    ("/gitops", "Git 工作流：/gitops status|diff|stage|commit|tag"),
     ("/memory", "记忆：状态/最近巡检；/memory <词> 检索"),
     ("/plan", "进入/退出计划模式（只读，不写入）"),
     ("/approve", "批准并退出计划模式，继续执行"),
@@ -726,6 +731,17 @@ def _help_text() -> str:
     lines.append(f"  {_C['d']}· 帮我分析这份搜索词报告 /path/report.csv，asin B0...{_C['x']}")
     lines.append(f"{_C['d']}写操作会逐条弹人工审批，未确认不会执行。{_C['x']}")
     return "\n".join(lines)
+
+
+def _run_embedded_cli(line: str) -> int:
+    try:
+        argv = shlex.split(line[1:])
+    except ValueError as e:
+        print(ui.message("warn", f"命令解析失败：{e}"))
+        return 2
+    if not argv:
+        return 2
+    return main(argv)
 
 
 def _setup_readline() -> None:
@@ -931,6 +947,13 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 print(skills.render_list())
             else:
                 print(skills.render_search(q, limit=8))
+            continue
+        if (
+            line == "/workspace" or line.startswith("/workspace ")
+            or line == "/patch" or line.startswith("/patch ")
+            or line == "/gitops" or line.startswith("/gitops ")
+        ):
+            _run_embedded_cli(line)
             continue
         if line == "/tools":
             for t in agent_tools.TOOL_SCHEMAS:
@@ -1740,7 +1763,7 @@ def _cmd_task(args: argparse.Namespace) -> int:
 
 
 def _cmd_gitops(args: argparse.Namespace) -> int:
-    from . import git_workflow
+    from . import git_workflow, permission
     root = args.root or "."
     if args.action == "status":
         print(git_workflow.render_status(git_workflow.status(root)))
@@ -1755,6 +1778,39 @@ def _cmd_gitops(args: argparse.Namespace) -> int:
         plan = git_workflow.release_plan(args.version or "", root)
         print(git_workflow.render_release_plan(plan))
         return 0 if plan.get("ok") else 1
+    if args.action in ("stage", "commit", "tag"):
+        result = git_workflow.write_action(
+            args.action,
+            root=root,
+            files=args.file or [],
+            message=args.message or "",
+            tag=args.tag or "",
+            execute=False,
+            timeout=args.timeout,
+        )
+        preview = git_workflow.render_write_action(result)
+        if not result.get("ok"):
+            print(preview)
+            return 1
+        if args.execute:
+            if not args.yes:
+                state = permission.PermissionState()
+                intent = {"op_type": f"git.{args.action}"}
+                decision = permission.request_intent(intent, preview, state)
+                if decision != permission.APPROVE:
+                    print("已取消。")
+                    return 1
+            result = git_workflow.write_action(
+                args.action,
+                root=root,
+                files=args.file or [],
+                message=args.message or "",
+                tag=args.tag or "",
+                execute=True,
+                timeout=args.timeout,
+            )
+        print(git_workflow.render_write_action(result))
+        return 0 if result.get("ok") else 1
     return 2
 
 
@@ -1765,6 +1821,58 @@ def _cmd_codereview(args: argparse.Namespace) -> int:
     if not result.get("ok"):
         return 1
     return 1 if any(f.get("severity") == "high" for f in result.get("findings", [])) else 0
+
+
+def _cmd_patch(args: argparse.Namespace) -> int:
+    from . import patcher, permission
+
+    try:
+        if args.action == "make":
+            spec = patcher.make_spec(args.path or "", args.old or "", args.new or "")
+            text = json.dumps(spec, ensure_ascii=False, indent=2)
+            if args.output:
+                out = Path(args.output).expanduser()
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(text + "\n", encoding="utf-8")
+                print(f"已写入 patch spec：{out}")
+            else:
+                print(text)
+            return 0
+        if args.action in ("validate", "apply"):
+            spec = patcher.load_spec(args.spec)
+            if args.action == "validate":
+                result = patcher.validate_spec(spec, root=args.root or ".")
+                print(patcher.render_validation(result))
+                return 0 if result["ok"] else 1
+            validation = patcher.validate_spec(spec, root=args.root or ".")
+            if not validation["ok"]:
+                print(patcher.render_apply({"ok": False, "applied": False, "validation": validation, "message": "patch 校验失败"}))
+                return 1
+            execute = bool(args.execute)
+            if execute and not args.yes:
+                preview = patcher.render_validation(validation)
+                state = permission.PermissionState()
+                decision = permission.request_intent({"op_type": "patch_apply"}, preview, state)
+                execute = decision == permission.APPROVE
+                if decision == permission.ABORT:
+                    print("用户终止。")
+                    return 1
+            result = patcher.apply_spec(spec, root=args.root or ".", execute=execute)
+            print(patcher.render_apply(result))
+            return 0 if result["ok"] else 1
+        if args.action == "tests":
+            cmds = patcher.suggested_tests(args.root or ".")
+            print(patcher.render_tests(cmds))
+            return 0
+        if args.action == "run-tests":
+            cmd = args.test_command or "python -m pytest"
+            result = patcher.run_test_command(cmd, root=args.root or ".", timeout=args.timeout)
+            print(patcher.render_test_result(result))
+            return 0 if result["ok"] else 1
+    except Exception as e:  # noqa: BLE001
+        print(f"patch 失败：{e}", file=sys.stderr)
+        return 1
+    return 2
 
 
 def _cmd_image(args: argparse.Namespace) -> int:
@@ -2077,17 +2185,37 @@ def build_parser() -> argparse.ArgumentParser:
     ptask.add_argument("--limit", type=int, default=20)
     ptask.set_defaults(func=_cmd_task)
 
-    pgit = sub.add_parser("gitops", help="Git/CI 只读工作流：status/diff/workflows/release-plan")
-    pgit.add_argument("action", choices=["status", "diff", "workflows", "release-plan"])
+    pgit = sub.add_parser("gitops", help="Git/CI 工作流：status/diff/workflows/release-plan/stage/commit/tag")
+    pgit.add_argument("action", choices=["status", "diff", "workflows", "release-plan", "stage", "commit", "tag"])
     pgit.add_argument("--root", default=".")
     pgit.add_argument("--staged", action="store_true", help="diff 查看 staged 变更")
-    pgit.add_argument("--version", help="release-plan 检查的版本，如 v0.5.2")
+    pgit.add_argument("--version", help="release-plan 检查的版本，如 v0.5.3")
+    pgit.add_argument("--file", action="append", help="stage 指定文件；可重复。不传则 stage -A")
+    pgit.add_argument("--message", help="commit message")
+    pgit.add_argument("--tag", help="tag 名称，如 v0.5.3")
+    pgit.add_argument("--execute", action="store_true", help="真实执行；默认只预览")
+    pgit.add_argument("--yes", action="store_true", help="写操作跳过交互审批")
+    pgit.add_argument("--timeout", type=int, default=30)
     pgit.set_defaults(func=_cmd_gitops)
 
     pcoderev = sub.add_parser("codereview", help="代码审查：只读扫描 git diff 风险")
     pcoderev.add_argument("--root", default=".")
     pcoderev.add_argument("--staged", action="store_true", help="审查 staged diff")
     pcoderev.set_defaults(func=_cmd_codereview)
+
+    ppatch = sub.add_parser("patch", help="结构化补丁：make/validate/apply/tests/run-tests")
+    ppatch.add_argument("action", choices=["make", "validate", "apply", "tests", "run-tests"])
+    ppatch.add_argument("spec", nargs="?", help="validate/apply 的 patch JSON")
+    ppatch.add_argument("--root", default=".")
+    ppatch.add_argument("--path", help="make 的目标文件")
+    ppatch.add_argument("--old", help="make 的原文")
+    ppatch.add_argument("--new", help="make 的新文")
+    ppatch.add_argument("--output", help="make 输出 JSON 文件")
+    ppatch.add_argument("--execute", action="store_true", help="apply 时真实写入；默认 dry-run")
+    ppatch.add_argument("--yes", action="store_true", help="apply --execute 时跳过交互审批")
+    ppatch.add_argument("--command", dest="test_command", help="run-tests 的测试命令")
+    ppatch.add_argument("--timeout", type=int, default=120)
+    ppatch.set_defaults(func=_cmd_patch)
 
     pvis = sub.add_parser("vision", help="通用多模态视觉：截图/UI/报表 inspect")
     pvis.add_argument("paths", nargs="+", help="图片文件或目录")

@@ -3,7 +3,7 @@
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash
 # 可选环境变量：
-#   IVYEA_VERSION=latest      # latest 或 v0.5.2 这种 tag；默认 latest release wheel
+#   IVYEA_VERSION=latest      # latest 或 v0.5.3 这种 tag；默认 latest release wheel
 #   IVYEA_REF=main            # 从 git 分支/标签安装（开发/私有仓库 fallback）
 #   IVYEA_LOCAL=/path/to/repo # 从本地仓库装（离线/开发）
 #   IVYEA_AUTO_INSTALL=1      # 缺 Python/pipx 时尽量自动安装；默认 1

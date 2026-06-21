@@ -56,3 +56,44 @@ def test_release_plan(tmp_path):
 def test_non_repo(tmp_path):
     assert git_workflow.status(tmp_path)["ok"] is False
     assert git_workflow.release_plan("v1", tmp_path)["ok"] is False
+
+
+def test_write_action_dry_run_does_not_stage(tmp_path):
+    root = _repo(tmp_path)
+    (root / "demo.txt").write_text("hello\n", encoding="utf-8")
+
+    result = git_workflow.write_action("stage", root, files=["demo.txt"], execute=False)
+    assert result["ok"] is True
+    assert result["dry_run"] is True
+    assert result["files"] == ["demo.txt"]
+
+    staged = git_workflow.diff_summary(root, staged=True)
+    assert staged["files"] == []
+
+
+def test_write_action_stage_commit_tag(tmp_path):
+    root = _repo(tmp_path)
+    (root / "demo.txt").write_text("hello\n", encoding="utf-8")
+
+    staged = git_workflow.write_action("stage", root, files=["demo.txt"], execute=True)
+    assert staged["ok"] is True
+
+    committed = git_workflow.write_action("commit", root, message="add demo", execute=True)
+    assert committed["ok"] is True
+    assert "add demo" in committed["command"]
+
+    tagged = git_workflow.write_action("tag", root, tag="v0.1.1", execute=True)
+    assert tagged["ok"] is True
+    assert "v0.1.1" in git_workflow.render_write_action(tagged)
+
+
+def test_write_action_rejects_unsafe_path_and_bad_tag(tmp_path):
+    root = _repo(tmp_path)
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("x\n", encoding="utf-8")
+
+    bad_path = git_workflow.write_action("stage", root, files=[str(outside)], execute=False)
+    assert bad_path["ok"] is False
+
+    bad_tag = git_workflow.write_action("tag", root, tag="release", execute=False)
+    assert bad_tag["ok"] is False
