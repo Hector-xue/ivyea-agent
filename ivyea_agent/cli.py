@@ -1171,6 +1171,29 @@ def _cmd_skill(args: argparse.Namespace) -> int:
     if args.action == "list":
         print(skills.render_list())
         return 0
+    if args.action == "audit":
+        print(skills.render_audit())
+        return 0
+    if args.action == "create":
+        if not args.query:
+            print("用法: ivyea skill create <skill_id> --title ...", file=sys.stderr)
+            return 2
+        body = args.body or ""
+        if args.body_file:
+            body = Path(args.body_file).expanduser().read_text(encoding="utf-8")
+        sk = skills.create_user_skill(
+            args.query,
+            title=args.title or "",
+            domain=args.domain or "",
+            description=args.description or "",
+            triggers=args.trigger or [],
+            tools=args.tool or [],
+            knowledge_ids=args.knowledge or [],
+            body=body,
+            overwrite=args.force,
+        )
+        print(f"已创建 skill：{sk.id} -> {sk.path}")
+        return 0
     if args.action == "search":
         if not args.query:
             print("用法: ivyea skill search <关键词>", file=sys.stderr)
@@ -1636,7 +1659,112 @@ def _cmd_policy(args: argparse.Namespace) -> int:
         ok, msg = policy.check_command(args.value or "")
         print("OK" if ok else msg)
         return 0 if ok else 1
+    if args.action == "explain-command":
+        result = policy.assess_command(args.value or "")
+        print(policy.render_command_assessment(args.value or ""))
+        return 0 if result.get("ok") else 1
     return 2
+
+
+def _cmd_workspace(args: argparse.Namespace) -> int:
+    from . import workspace
+    root = args.root or "."
+    options = workspace.ScanOptions(
+        max_files=args.max_files,
+        max_bytes=args.max_bytes,
+        include_hidden=args.include_hidden,
+    )
+    if args.action == "index":
+        idx = workspace.build_index(root, options)
+        path = workspace.save_index(idx)
+        print(workspace.render_index(idx, path))
+        return 0
+    if args.action == "search":
+        rows = workspace.search(args.query or "", root=root, limit=args.limit)
+        print(workspace.render_search(rows, args.query or ""))
+        return 0 if rows else 1
+    if args.action == "map":
+        idx = workspace.load_index(root)
+        if not idx or args.refresh:
+            idx = workspace.build_index(root, options)
+            workspace.save_index(idx)
+        print(workspace.render_map(workspace.project_map(root)))
+        return 0
+    if args.action == "explain":
+        idx = workspace.load_index(root)
+        if not idx or args.refresh:
+            idx = workspace.build_index(root, options)
+            workspace.save_index(idx)
+        print(workspace.render_explain(workspace.explain(args.target or args.query or ".", root=root)))
+        return 0
+    return 2
+
+
+def _cmd_task(args: argparse.Namespace) -> int:
+    from . import task_runner
+    try:
+        if args.action == "create":
+            steps = []
+            if args.step:
+                steps.extend(args.step)
+            elif args.steps:
+                steps.extend([s.strip() for s in args.steps.split("|") if s.strip()])
+            task = task_runner.create(args.title or "", steps=steps, notes=args.notes or "", workspace=args.workspace or "")
+            print(task_runner.render(task))
+            return 0
+        if args.action == "list":
+            print(task_runner.render_list(task_runner.list_tasks(limit=args.limit, status=args.status or "")))
+            return 0
+        if args.action == "show":
+            print(task_runner.render(task_runner.load(args.id)))
+            return 0
+        if args.action == "start":
+            print(task_runner.render(task_runner.start_next(args.id, note=args.notes or "")))
+            return 0
+        if args.action == "step":
+            print(task_runner.render(task_runner.update_step(args.id, args.index, args.status, note=args.notes or "")))
+            return 0
+        if args.action == "status":
+            print(task_runner.render(task_runner.set_status(args.id, args.status, note=args.notes or "")))
+            return 0
+        if args.action == "log":
+            print(task_runner.render(task_runner.append_log(args.id, args.notes or "")))
+            return 0
+        if args.action == "resume":
+            print(task_runner.render_resume(task_runner.load(args.id)))
+            return 0
+    except Exception as e:  # noqa: BLE001
+        print(f"task 失败：{e}", file=sys.stderr)
+        return 1
+    return 2
+
+
+def _cmd_gitops(args: argparse.Namespace) -> int:
+    from . import git_workflow
+    root = args.root or "."
+    if args.action == "status":
+        print(git_workflow.render_status(git_workflow.status(root)))
+        return 0
+    if args.action == "diff":
+        print(git_workflow.render_diff(git_workflow.diff_summary(root, staged=args.staged)))
+        return 0
+    if args.action == "workflows":
+        print(git_workflow.render_workflows(git_workflow.workflows(root)))
+        return 0
+    if args.action == "release-plan":
+        plan = git_workflow.release_plan(args.version or "", root)
+        print(git_workflow.render_release_plan(plan))
+        return 0 if plan.get("ok") else 1
+    return 2
+
+
+def _cmd_codereview(args: argparse.Namespace) -> int:
+    from . import code_review
+    result = code_review.review_diff(args.root or ".", staged=args.staged)
+    print(code_review.render(result))
+    if not result.get("ok"):
+        return 1
+    return 1 if any(f.get("severity") == "high" for f in result.get("findings", [])) else 0
 
 
 def _cmd_image(args: argparse.Namespace) -> int:
@@ -1677,6 +1805,30 @@ def _cmd_image(args: argparse.Namespace) -> int:
             text += f"\n已导出多模态审核 Prompt：{out}\n"
         else:
             text += "\n## 多模态审核 Prompt\n\n" + prompt + "\n"
+    print(text)
+    return 0
+
+
+def _cmd_vision(args: argparse.Namespace) -> int:
+    from . import vision
+    pkg = vision.build_general(
+        args.provider,
+        args.paths or [],
+        task=args.task or "",
+        context=args.context or "",
+        model=args.model or "",
+        max_images=args.max_images,
+    )
+    text = vision.render_package(pkg, include_payload=args.payload)
+    if args.output:
+        out = vision.write_package(pkg, args.output)
+        text += f"\n已导出视觉请求包：{out}\n"
+    if args.call:
+        result = vision.call(pkg, api_key=args.api_key or "", timeout=args.timeout)
+        text += "\n" + vision.render_call(result)
+        if not result.get("ok"):
+            print(text)
+            return 1
     print(text)
     return 0
 
@@ -1893,12 +2045,63 @@ def build_parser() -> argparse.ArgumentParser:
     psch.add_argument("--title", help="通知标题")
     psch.set_defaults(func=_cmd_schedule)
 
-    ppol = sub.add_parser("policy", help="本地安全策略：show/init/check-path/check-command")
-    ppol.add_argument("action", choices=["show", "init", "check-path", "check-command"])
+    ppol = sub.add_parser("policy", help="本地安全策略：show/init/check-path/check-command/explain-command")
+    ppol.add_argument("action", choices=["show", "init", "check-path", "check-command", "explain-command"])
     ppol.add_argument("value", nargs="?")
     ppol.add_argument("--op", choices=["read", "write"], default="read")
     ppol.add_argument("--force", action="store_true")
     ppol.set_defaults(func=_cmd_policy)
+
+    pws = sub.add_parser("workspace", help="通用项目理解：index/search/map/explain")
+    pws.add_argument("action", choices=["index", "search", "map", "explain"])
+    pws.add_argument("query", nargs="?", help="search 查询词；explain 目标路径")
+    pws.add_argument("--root", default=".", help="项目根目录，默认当前目录")
+    pws.add_argument("--target", help="explain 的目标文件/目录；不填则使用 query 或 .")
+    pws.add_argument("--limit", type=int, default=10)
+    pws.add_argument("--max-files", type=int, default=2000)
+    pws.add_argument("--max-bytes", type=int, default=256_000)
+    pws.add_argument("--include-hidden", action="store_true", help="包含隐藏目录/文件")
+    pws.add_argument("--refresh", action="store_true", help="map/explain 前强制重建索引")
+    pws.set_defaults(func=_cmd_workspace)
+
+    ptask = sub.add_parser("task", help="通用长任务：create/list/show/start/step/status/log/resume")
+    ptask.add_argument("action", choices=["create", "list", "show", "start", "step", "status", "log", "resume"])
+    ptask.add_argument("id", nargs="?", help="任务 ID（show/start/step/status/log/resume）")
+    ptask.add_argument("--title", help="create 的任务标题")
+    ptask.add_argument("--step", action="append", help="create 的步骤，可重复")
+    ptask.add_argument("--steps", help="create 的步骤，用 | 分隔")
+    ptask.add_argument("--index", type=int, default=1, help="step 的步骤序号")
+    ptask.add_argument("--status", help="list 过滤任务状态；step/status 设置状态")
+    ptask.add_argument("--notes", help="备注/日志")
+    ptask.add_argument("--workspace", help="关联工作区路径")
+    ptask.add_argument("--limit", type=int, default=20)
+    ptask.set_defaults(func=_cmd_task)
+
+    pgit = sub.add_parser("gitops", help="Git/CI 只读工作流：status/diff/workflows/release-plan")
+    pgit.add_argument("action", choices=["status", "diff", "workflows", "release-plan"])
+    pgit.add_argument("--root", default=".")
+    pgit.add_argument("--staged", action="store_true", help="diff 查看 staged 变更")
+    pgit.add_argument("--version", help="release-plan 检查的版本，如 v0.5.2")
+    pgit.set_defaults(func=_cmd_gitops)
+
+    pcoderev = sub.add_parser("codereview", help="代码审查：只读扫描 git diff 风险")
+    pcoderev.add_argument("--root", default=".")
+    pcoderev.add_argument("--staged", action="store_true", help="审查 staged diff")
+    pcoderev.set_defaults(func=_cmd_codereview)
+
+    pvis = sub.add_parser("vision", help="通用多模态视觉：截图/UI/报表 inspect")
+    pvis.add_argument("paths", nargs="+", help="图片文件或目录")
+    pvis.add_argument("--task", help="希望模型完成的视觉任务")
+    pvis.add_argument("--context", help="业务/页面/报表上下文")
+    pvis.add_argument("--provider", choices=["openai", "anthropic", "gemini"], default="openai")
+    pvis.add_argument("--model", help="覆盖默认视觉模型名")
+    pvis.add_argument("--max-images", type=int, default=8)
+    pvis.add_argument("--payload", action="store_true", help="显示截断后的 payload 预览")
+    pvis.add_argument("--output", help="导出截断后的请求包 JSON")
+    pvis.add_argument("--call", action="store_true", help="真实调用多模态模型；默认只生成请求包")
+    pvis.add_argument("--api-key", help="覆盖 provider 对应环境变量中的 API key")
+    pvis.add_argument("--timeout", type=float, default=120.0)
+    pvis.set_defaults(func=_cmd_vision)
 
     pimg = sub.add_parser("image", help="Listing 图片资产诊断：audit / ocr / vision")
     pimg.add_argument("action", choices=["audit", "ocr", "vision"])
@@ -1945,10 +2148,19 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--tags", help="标签，逗号分隔")
     pk.set_defaults(func=_cmd_knowledge)
 
-    pski = sub.add_parser("skill", help="可复用运营 Skill：list / search <词> / show <ID> / run <ID>")
-    pski.add_argument("action", choices=["list", "search", "show", "run"])
+    pski = sub.add_parser("skill", help="可复用 Skill：list/search/show/run/create/audit")
+    pski.add_argument("action", choices=["list", "search", "show", "run", "create", "audit"])
     pski.add_argument("query", nargs="?")
     pski.add_argument("--limit", type=int, default=8)
+    pski.add_argument("--title")
+    pski.add_argument("--domain")
+    pski.add_argument("--description")
+    pski.add_argument("--trigger", action="append")
+    pski.add_argument("--tool", action="append")
+    pski.add_argument("--knowledge", action="append")
+    pski.add_argument("--body")
+    pski.add_argument("--body-file")
+    pski.add_argument("--force", action="store_true")
     pski.set_defaults(func=_cmd_skill)
 
     pch = sub.add_parser("chat", help="对话式 Agent（自然语言 + 斜杠命令 + 人工审批）")

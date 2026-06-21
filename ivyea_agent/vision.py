@@ -42,8 +42,73 @@ def build(provider: str, paths: list[str], *, product_context: str = "",
     prompt = image_audit.multimodal_prompt(result, product_context=product_context)
     images = _image_paths(result, limit=max_images)
     model = model or DEFAULT_MODELS[provider]
+    payload = _payload(provider, model, prompt, images)
+    return {
+        "provider": provider,
+        "model": model,
+        "images": images,
+        "prompt": prompt,
+        "local_audit": result,
+        "payload": payload,
+    }
+
+
+def build_general(provider: str, paths: list[str], *, task: str = "", context: str = "",
+                  model: str = "", max_images: int = 8) -> dict[str, Any]:
+    """Build a generic screenshot/report/UI multimodal request package."""
+    provider = (provider or "openai").lower()
+    if provider not in DEFAULT_MODELS:
+        raise ValueError("provider 仅支持 openai / anthropic / gemini")
+    result = image_audit.audit(paths)
+    images = _image_paths(result, limit=max_images)
+    model = model or DEFAULT_MODELS[provider]
+    prompt = generic_prompt(result, task=task, context=context)
+    payload = _payload(provider, model, prompt, images)
+    return {
+        "provider": provider,
+        "model": model,
+        "images": images,
+        "prompt": prompt,
+        "local_audit": result,
+        "payload": payload,
+        "mode": "general",
+    }
+
+
+def generic_prompt(result: dict[str, Any], *, task: str = "", context: str = "") -> str:
+    images = result.get("images", [])
+    lines = [
+        "你是 Ivyea Agent 的通用多模态视觉分析器。",
+        "",
+        "请基于图片内容完成用户任务，优先输出可执行结论，不要编造图片中不存在的信息。",
+        "",
+        "## 用户任务",
+        task or "识别图片/截图/报表中的关键信息、异常、风险和下一步建议。",
+    ]
+    if context:
+        lines.extend(["", "## 上下文", context])
+    lines.extend(["", "## 本地图片预检查"])
+    if not images:
+        lines.append("- 未发现可用图片。")
+    for img in images[:12]:
+        lines.append(
+            f"- {img.get('path')} size={img.get('width')}x{img.get('height')} "
+            f"bytes={img.get('bytes')} role={img.get('role')}"
+        )
+    lines.extend([
+        "",
+        "## 输出格式",
+        "1. 先给结论摘要。",
+        "2. 列出图片中直接可见的证据。",
+        "3. 标出不确定点和需要人工确认的内容。",
+        "4. 给出下一步动作清单。",
+    ])
+    return "\n".join(lines)
+
+
+def _payload(provider: str, model: str, prompt: str, images: list[str]) -> dict[str, Any]:
     if provider == "openai":
-        payload = {
+        return {
             "model": model,
             "input": [{
                 "role": "user",
@@ -53,7 +118,7 @@ def build(provider: str, paths: list[str], *, product_context: str = "",
                 ),
             }],
         }
-    elif provider == "anthropic":
+    if provider == "anthropic":
         content = [{"type": "text", "text": prompt}]
         for p in images:
             data_url = image_audit.data_url(p)
@@ -66,8 +131,8 @@ def build(provider: str, paths: list[str], *, product_context: str = "",
                     "data": b64,
                 },
             })
-        payload = {"model": model, "max_tokens": 3000, "messages": [{"role": "user", "content": content}]}
-    else:
+        return {"model": model, "max_tokens": 3000, "messages": [{"role": "user", "content": content}]}
+    if provider == "gemini":
         parts = [{"text": prompt}]
         for p in images:
             data_url = image_audit.data_url(p)
@@ -76,15 +141,8 @@ def build(provider: str, paths: list[str], *, product_context: str = "",
                 "mime_type": mime.split(":", 1)[1].split(";", 1)[0],
                 "data": b64,
             }})
-        payload = {"model": model, "contents": [{"role": "user", "parts": parts}]}
-    return {
-        "provider": provider,
-        "model": model,
-        "images": images,
-        "prompt": prompt,
-        "local_audit": result,
-        "payload": payload,
-    }
+        return {"model": model, "contents": [{"role": "user", "parts": parts}]}
+    raise ValueError(f"未知 provider: {provider}")
 
 
 def render_package(pkg: dict[str, Any], *, include_payload: bool = False) -> str:

@@ -35,6 +35,23 @@ def test_policy_path_and_command_rules(ivyea_home, tmp_path):
     assert policy.check_command("python -V")[0] is False
 
 
+def test_policy_command_assessment(ivyea_home):
+    from ivyea_agent import policy
+
+    low = policy.assess_command("git status --short")
+    assert low["ok"] is True
+    assert low["risk"] == "low"
+
+    med = policy.assess_command("git push origin main")
+    assert med["ok"] is True
+    assert med["risk"] == "medium"
+
+    high = policy.assess_command("rm -rf /")
+    assert high["ok"] is False
+    assert high["risk"] == "blocked"
+    assert "Ivyea Command Policy" in policy.render_command_assessment("git status")
+
+
 def test_policy_cli_and_tools(ivyea_home, tmp_path, capsys):
     from ivyea_agent import policy, tools_general as tg
     from ivyea_agent.agent_tools import ToolContext
@@ -62,3 +79,5 @@ def test_policy_cli_and_tools(ivyea_home, tmp_path, capsys):
     assert "Ivyea Policy" in capsys.readouterr().out
     assert main(["policy", "check-path", str(ok_file)]) == 0
     assert "OK" in capsys.readouterr().out
+    assert main(["policy", "explain-command", "git status --short"]) == 0
+    assert "risk: low" in capsys.readouterr().out

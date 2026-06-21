@@ -49,6 +49,28 @@ def test_user_skill_directory(ivyea_home):
     assert "Custom Review" in skills.render_list([sk])
 
 
+def test_create_user_skill_and_audit(ivyea_home):
+    sk = skills.create_user_skill(
+        "general.release_check",
+        title="Release Check",
+        description="Check release readiness.",
+        triggers=["发版", "release"],
+        tools=["gitops"],
+        knowledge_ids=["missing.card"],
+        body="# Release Check\n\nInspect git status.",
+    )
+    assert sk.scope == "user"
+    assert sk.domain == "general"
+    assert "release" in sk.triggers
+    loaded = skills.get_skill("general.release_check")
+    assert loaded and "Inspect git status" in loaded.body
+    rows = skills.audit()
+    row = next(r for r in rows if r["id"] == "general.release_check")
+    assert row["ok"] is False
+    assert "missing_knowledge:missing.card" in row["issues"]
+    assert "Skill Audit" in skills.render_audit(rows)
+
+
 def test_skill_cli(capsys):
     from ivyea_agent.cli import main
 
@@ -63,3 +85,16 @@ def test_skill_cli(capsys):
     assert main(["skill", "show", "amazon.budget_pacing"]) == 0
     out = capsys.readouterr().out
     assert "Amazon Budget Pacing" in out
+
+    assert main([
+        "skill", "create", "general.my_skill",
+        "--title", "My Skill",
+        "--trigger", "测试",
+        "--body", "# My Skill\n\nDo it.",
+    ]) == 0
+    out = capsys.readouterr().out
+    assert "已创建 skill：general.my_skill" in out
+
+    assert main(["skill", "audit"]) == 0
+    out = capsys.readouterr().out
+    assert "Skill Audit" in out

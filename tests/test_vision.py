@@ -37,6 +37,44 @@ def test_image_vision_cli(tmp_path, capsys):
     assert "base64 truncated" in out.read_text(encoding="utf-8")
 
 
+def test_build_general_vision_package(tmp_path):
+    from ivyea_agent import vision
+
+    img = tmp_path / "screen.png"
+    _png(img, 800, 1200)
+    pkg = vision.build_general(
+        "openai",
+        [str(tmp_path)],
+        task="检查手机端是否需要横向滚动",
+        context="agent.ivyea.com mobile screenshot",
+        max_images=1,
+    )
+    assert pkg["mode"] == "general"
+    assert "通用多模态视觉分析器" in pkg["prompt"]
+    assert "横向滚动" in pkg["prompt"]
+    out = vision.render_package(pkg, include_payload=True)
+    assert "agent.ivyea.com" in out
+    assert "<base64 truncated>" in out
+
+
+def test_general_vision_cli(tmp_path, capsys):
+    from ivyea_agent.cli import main
+
+    img = tmp_path / "screen.png"
+    _png(img, 800, 1200)
+    out = tmp_path / "generic-vision.json"
+    assert main([
+        "vision", str(tmp_path),
+        "--task", "检查 UI 是否重叠",
+        "--context", "mobile",
+        "--payload",
+        "--output", str(out),
+    ]) == 0
+    stdout = capsys.readouterr().out
+    assert "通用多模态视觉分析器" in stdout
+    assert out.exists()
+
+
 def test_call_openai_vision(monkeypatch, tmp_path):
     from ivyea_agent import vision
 

@@ -26,6 +26,46 @@ DEFAULT_POLICY: dict[str, Any] = {
     "block_dangerous_commands": True,
 }
 
+HIGH_RISK_PATTERNS = [
+    r"\brm\s+-rf\b",
+    r"\bgit\s+reset\s+--hard\b",
+    r"\bgit\s+clean\s+-fd",
+    r"\bmkfs(?:\.[\w-]+)?\b",
+    r"\bdd\s+if=.*\s+of=/dev/",
+    r"\bshutdown\b",
+    r"\breboot\b",
+    r"\bchmod\s+-R\s+777\b",
+]
+
+MEDIUM_RISK_PATTERNS = [
+    r"\bgit\s+push\b",
+    r"\bgit\s+commit\b",
+    r"\bgit\s+tag\b",
+    r"\brm\b",
+    r"\bmv\b",
+    r"\bcp\b",
+    r"\bpython(?:3)?\s+-m\s+pip\s+install\b",
+    r"\bnpm\s+(?:install|update|audit\s+fix)\b",
+    r"\bpnpm\s+(?:install|update)\b",
+    r"\byarn\s+(?:add|install|upgrade)\b",
+]
+
+LOW_RISK_PREFIXES = (
+    "ls",
+    "pwd",
+    "cat",
+    "sed",
+    "rg",
+    "grep",
+    "find",
+    "git status",
+    "git diff",
+    "git show",
+    "git log",
+    "python -m pytest",
+    "python3 -m pytest",
+)
+
 
 def load() -> dict[str, Any]:
     data = dict(DEFAULT_POLICY)
@@ -87,6 +127,48 @@ def check_command(command: str) -> tuple[bool, str]:
     if allow and not any(fnmatch.fnmatch(cmd, pat) for pat in allow):
         return False, "policy 拒绝命令：不匹配 command_allow"
     return True, ""
+
+
+def assess_command(command: str) -> dict[str, Any]:
+    """Return allow/deny and a coarse risk level for a shell command."""
+    cmd = _norm_cmd(command)
+    ok, msg = check_command(cmd)
+    reasons: list[str] = []
+    if not ok:
+        return {"ok": False, "risk": "blocked", "command": cmd, "reasons": [msg]}
+
+    risk = "medium"
+    if any(re.search(p, cmd, re.I) for p in HIGH_RISK_PATTERNS):
+        risk = "high"
+        reasons.append("匹配高风险命令模式")
+    elif any(re.search(p, cmd, re.I) for p in MEDIUM_RISK_PATTERNS):
+        risk = "medium"
+        reasons.append("可能修改代码、依赖、Git 远端或本地文件")
+    elif any(cmd == p or cmd.startswith(p + " ") for p in LOW_RISK_PREFIXES):
+        risk = "low"
+        reasons.append("只读/测试类命令")
+    else:
+        reasons.append("未命中明确只读模式，按中风险处理")
+
+    if load().get("block_dangerous_commands", True) and risk == "high":
+        return {"ok": False, "risk": "blocked", "command": cmd, "reasons": reasons}
+    return {"ok": True, "risk": risk, "command": cmd, "reasons": reasons}
+
+
+def render_command_assessment(command: str) -> str:
+    a = assess_command(command)
+    lines = [
+        "Ivyea Command Policy",
+        "",
+        f"- command: {a.get('command')}",
+        f"- allowed: {a.get('ok')}",
+        f"- risk: {a.get('risk')}",
+    ]
+    reasons = a.get("reasons") or []
+    if reasons:
+        lines.append("- reasons:")
+        lines.extend(f"  - {r}" for r in reasons)
+    return "\n".join(lines)
 
 
 def render() -> str:
