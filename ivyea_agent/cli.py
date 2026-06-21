@@ -1774,6 +1774,10 @@ def _cmd_gitops(args: argparse.Namespace) -> int:
     if args.action == "workflows":
         print(git_workflow.render_workflows(git_workflow.workflows(root)))
         return 0
+    if args.action == "ci":
+        result = git_workflow.ci_status(root, remote=args.remote, limit=args.limit, timeout=args.timeout)
+        print(git_workflow.render_ci_status(result))
+        return 0 if result.get("ok") else 1
     if args.action == "release-plan":
         plan = git_workflow.release_plan(args.version or "", root)
         print(git_workflow.render_release_plan(plan))
@@ -2185,16 +2189,18 @@ def build_parser() -> argparse.ArgumentParser:
     ptask.add_argument("--limit", type=int, default=20)
     ptask.set_defaults(func=_cmd_task)
 
-    pgit = sub.add_parser("gitops", help="Git/CI 工作流：status/diff/workflows/release-plan/stage/commit/tag")
-    pgit.add_argument("action", choices=["status", "diff", "workflows", "release-plan", "stage", "commit", "tag"])
+    pgit = sub.add_parser("gitops", help="Git/CI 工作流：status/diff/workflows/ci/release-plan/stage/commit/tag")
+    pgit.add_argument("action", choices=["status", "diff", "workflows", "ci", "release-plan", "stage", "commit", "tag"])
     pgit.add_argument("--root", default=".")
+    pgit.add_argument("--remote", default="origin", help="ci 使用的 GitHub remote，默认 origin")
     pgit.add_argument("--staged", action="store_true", help="diff 查看 staged 变更")
-    pgit.add_argument("--version", help="release-plan 检查的版本，如 v0.5.3")
+    pgit.add_argument("--version", help="release-plan 检查的版本，如 v0.5.4")
     pgit.add_argument("--file", action="append", help="stage 指定文件；可重复。不传则 stage -A")
     pgit.add_argument("--message", help="commit message")
-    pgit.add_argument("--tag", help="tag 名称，如 v0.5.3")
+    pgit.add_argument("--tag", help="tag 名称，如 v0.5.4")
     pgit.add_argument("--execute", action="store_true", help="真实执行；默认只预览")
     pgit.add_argument("--yes", action="store_true", help="写操作跳过交互审批")
+    pgit.add_argument("--limit", type=int, default=5, help="ci 显示最近 run 数量")
     pgit.add_argument("--timeout", type=int, default=30)
     pgit.set_defaults(func=_cmd_gitops)
 

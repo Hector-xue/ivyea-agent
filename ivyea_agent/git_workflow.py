@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import re
+import json
+import os
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +92,117 @@ def workflows(root: str | Path = ".") -> list[dict[str, str]]:
                 break
         out.append({"path": path.relative_to(r).as_posix(), "name": name or path.stem})
     return out
+
+
+def parse_github_remote(url: str) -> tuple[str, str] | None:
+    value = url.strip()
+    patterns = [
+        r"^https://github\.com/([^/\s]+)/([^/\s]+?)(?:\.git)?/?$",
+        r"^git@github\.com:([^/\s]+)/([^/\s]+?)(?:\.git)?$",
+        r"^ssh://git@github\.com/([^/\s]+)/([^/\s]+?)(?:\.git)?/?$",
+    ]
+    for pat in patterns:
+        m = re.match(pat, value)
+        if m:
+            return m.group(1), m.group(2)
+    return None
+
+
+def github_repo(root: str | Path = ".", remote: str = "origin") -> dict[str, Any]:
+    r = repo_root(root)
+    if not r:
+        return {"ok": False, "error": "不是 Git 仓库"}
+    code, url = _run_git(r, ["remote", "get-url", remote])
+    if code != 0 or not url:
+        return {"ok": False, "error": f"未找到 remote：{remote}", "root": str(r)}
+    parsed = parse_github_remote(url)
+    if not parsed:
+        return {"ok": False, "error": f"不是 GitHub remote：{url}", "root": str(r), "remote_url": url}
+    owner, repo = parsed
+    return {"ok": True, "root": str(r), "remote": remote, "remote_url": url, "owner": owner, "repo": repo, "full_name": f"{owner}/{repo}"}
+
+
+def _runs_from_gh(full_name: str, limit: int, timeout: int) -> tuple[bool, list[dict[str, Any]], str]:
+    try:
+        proc = subprocess.run(
+            [
+                "gh", "run", "list",
+                "--repo", full_name,
+                "--limit", str(limit),
+                "--json", "databaseId,status,conclusion,workflowName,headBranch,headSha,event,createdAt,url",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, [], str(e)
+    if proc.returncode != 0:
+        return False, [], proc.stdout.strip()
+    try:
+        rows = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError as e:
+        return False, [], f"gh 输出不是 JSON：{e}"
+    return True, rows if isinstance(rows, list) else [], ""
+
+
+def _runs_from_api(full_name: str, limit: int, timeout: int) -> tuple[bool, list[dict[str, Any]], str]:
+    url = f"https://api.github.com/repos/{full_name}/actions/runs?per_page={max(1, min(limit, 30))}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "ivyea-agent",
+        },
+    )
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as e:
+        hint = "；私有仓库请先 gh auth login，或设置 GH_TOKEN/GITHUB_TOKEN" if e.code in (401, 403, 404) else ""
+        return False, [], f"GitHub API HTTP {e.code}{hint}"
+    except (OSError, TimeoutError, json.JSONDecodeError) as e:
+        return False, [], str(e)
+    rows = []
+    for run in payload.get("workflow_runs", [])[:limit]:
+        rows.append({
+            "databaseId": run.get("id"),
+            "status": run.get("status"),
+            "conclusion": run.get("conclusion"),
+            "workflowName": run.get("name"),
+            "headBranch": run.get("head_branch"),
+            "headSha": run.get("head_sha"),
+            "event": run.get("event"),
+            "createdAt": run.get("created_at"),
+            "url": run.get("html_url"),
+        })
+    return True, rows, ""
+
+
+def ci_status(root: str | Path = ".", remote: str = "origin", limit: int = 5, timeout: int = 15) -> dict[str, Any]:
+    repo = github_repo(root, remote=remote)
+    if not repo.get("ok"):
+        return {"ok": False, "error": repo.get("error"), "repo": repo}
+    full_name = repo["full_name"]
+    ok, rows, gh_error = _runs_from_gh(full_name, limit=limit, timeout=timeout)
+    if ok:
+        return {"ok": True, "repo": repo, "source": "gh", "runs": rows[:limit]}
+    ok, rows, api_error = _runs_from_api(full_name, limit=limit, timeout=timeout)
+    if ok:
+        return {"ok": True, "repo": repo, "source": "github_api", "runs": rows[:limit], "gh_error": gh_error}
+    return {
+        "ok": False,
+        "repo": repo,
+        "error": api_error or gh_error or "无法读取 GitHub Actions",
+        "gh_error": gh_error,
+    }
 
 
 def _repo_path(root: Path, value: str) -> str | None:
@@ -254,6 +369,39 @@ def render_workflows(rows: list[dict[str, str]]) -> str:
         return "GitHub Workflows\n\n（未发现 .github/workflows）"
     lines = ["GitHub Workflows", ""]
     lines.extend(f"- {r['path']} · {r['name']}" for r in rows)
+    return "\n".join(lines)
+
+
+def render_ci_status(data: dict[str, Any]) -> str:
+    repo = data.get("repo") or {}
+    title = "GitHub CI"
+    if not data.get("ok"):
+        lines = [title, "", f"- repo: {repo.get('full_name', '?')}", f"- error: {data.get('error')}"]
+        if data.get("gh_error"):
+            lines.append(f"- gh: {data.get('gh_error')}")
+        return "\n".join(lines)
+    lines = [
+        title,
+        "",
+        f"- repo: {repo.get('full_name')}",
+        f"- source: {data.get('source')}",
+    ]
+    runs = data.get("runs") or []
+    if not runs:
+        lines.append("")
+        lines.append("（未发现 workflow run）")
+        return "\n".join(lines)
+    lines.append("")
+    lines.append("Runs:")
+    for run in runs:
+        sha = (run.get("headSha") or "")[:7]
+        state = run.get("conclusion") or run.get("status") or "unknown"
+        lines.append(
+            f"- {state} · {run.get('workflowName') or '?'} · {run.get('event') or '?'} · "
+            f"{run.get('headBranch') or '?'}@{sha} · {run.get('createdAt') or ''}"
+        )
+        if run.get("url"):
+            lines.append(f"  {run['url']}")
     return "\n".join(lines)
 
 

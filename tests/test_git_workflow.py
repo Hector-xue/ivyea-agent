@@ -97,3 +97,53 @@ def test_write_action_rejects_unsafe_path_and_bad_tag(tmp_path):
 
     bad_tag = git_workflow.write_action("tag", root, tag="release", execute=False)
     assert bad_tag["ok"] is False
+
+
+def test_parse_github_remote():
+    assert git_workflow.parse_github_remote("https://github.com/Hector-xue/ivyea-agent.git") == ("Hector-xue", "ivyea-agent")
+    assert git_workflow.parse_github_remote("git@github.com:Hector-xue/ivyea-agent.git") == ("Hector-xue", "ivyea-agent")
+    assert git_workflow.parse_github_remote("ssh://git@github.com/Hector-xue/ivyea-agent.git") == ("Hector-xue", "ivyea-agent")
+    assert git_workflow.parse_github_remote("https://example.com/Hector-xue/ivyea-agent.git") is None
+
+
+def test_github_repo_from_remote(tmp_path):
+    root = _repo(tmp_path)
+    _git(root, "remote", "add", "origin", "git@github.com:Hector-xue/ivyea-agent.git")
+
+    repo = git_workflow.github_repo(root)
+    assert repo["ok"] is True
+    assert repo["full_name"] == "Hector-xue/ivyea-agent"
+
+
+def test_render_ci_status_success_and_error():
+    ok = {
+        "ok": True,
+        "repo": {"full_name": "Hector-xue/ivyea-agent"},
+        "source": "gh",
+        "runs": [
+            {
+                "workflowName": "Release",
+                "status": "completed",
+                "conclusion": "success",
+                "event": "push",
+                "headBranch": "main",
+                "headSha": "abcdef123456",
+                "createdAt": "2026-06-21T10:00:00Z",
+                "url": "https://github.com/Hector-xue/ivyea-agent/actions/runs/1",
+            }
+        ],
+    }
+    rendered = git_workflow.render_ci_status(ok)
+    assert "GitHub CI" in rendered
+    assert "success" in rendered
+    assert "Release" in rendered
+
+    bad = {
+        "ok": False,
+        "repo": {"full_name": "Hector-xue/ivyea-agent"},
+        "error": "GitHub API HTTP 404",
+        "gh_error": "gh auth login",
+    }
+    rendered = git_workflow.render_ci_status(bad)
+    assert "GitHub API HTTP 404" in rendered
+    assert "gh auth login" in rendered

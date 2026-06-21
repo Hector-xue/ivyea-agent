@@ -2,7 +2,7 @@
 # 用法：
 #   iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex
 # 可选环境变量：
-#   $env:IVYEA_VERSION = "latest" 或 "v0.5.3"
+#   $env:IVYEA_VERSION = "latest" 或 "v0.5.4"
 #   $env:IVYEA_REF     = "main" / tag，从 git 安装
 #   $env:IVYEA_LOCAL   = "C:\path\to\repo"，从本地安装
 #   $env:IVYEA_AUTO_INSTALL = "1"，缺 Python/pipx 时尽量自动安装；默认 1
