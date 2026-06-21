@@ -50,13 +50,29 @@ class ChatInput:
             try:
                 from prompt_toolkit import PromptSession
                 from prompt_toolkit.history import FileHistory
+                from prompt_toolkit.styles import Style
                 config.ensure_dirs()
                 self._session = PromptSession(
                     history=FileHistory(str(config.IVYEA_DIR / "chat_history")),
-                    completer=self._completer(), complete_while_typing=True)
+                    completer=self._completer(), complete_while_typing=True,
+                    style=Style.from_dict(self._style_dict()))
                 self._mode = "session"
             except Exception:
                 self._mode = "plain"
+
+    @staticmethod
+    def _style_dict() -> dict[str, str]:
+        return {
+            "frame.border": "ansicyan",
+            "hint": "ansibrightblack",
+            "prompt": "ansicyan bold",
+            "completion-menu": "bg:#f8fafc #111827",
+            "completion-menu.completion": "bg:#f8fafc #111827",
+            "completion-menu.completion.current": "bg:#d1fae5 #064e3b bold",
+            "completion-menu.meta.completion": "bg:#f8fafc #64748b",
+            "scrollbar.background": "bg:#f8fafc",
+            "scrollbar.button": "bg:#94a3b8",
+        }
 
     def _read_boxed(self) -> object:
         from prompt_toolkit.application import Application
@@ -68,7 +84,7 @@ class ChatInput:
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.styles import Style
 
-        ta = TextArea(prompt="❯ ", multiline=False, wrap_lines=True,
+        ta = TextArea(prompt=[("class:prompt", "❯ ")], multiline=False, wrap_lines=True,
                       completer=self._completer(), complete_while_typing=True,
                       history=self._history)
         frame = Frame(ta)
@@ -90,13 +106,7 @@ class ChatInput:
         def _(event):
             event.app.exit(result=EXIT)
 
-        style = Style.from_dict({
-            "frame.border": "ansicyan",
-            "hint": "ansibrightblack",
-            "completion-menu.completion": "bg:#1f2937 #e5e7eb",
-            "completion-menu.completion.current": "bg:#06b6d4 #001018",
-            "completion-menu.meta.completion": "bg:#111827 #9ca3af",
-        })
+        style = Style.from_dict(self._style_dict())
         app = Application(layout=Layout(root), key_bindings=kb,
                           style=style, full_screen=False, mouse_support=False)
         return app.run()

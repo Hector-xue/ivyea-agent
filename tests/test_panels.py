@@ -94,3 +94,18 @@ def test_ui_tool_call_truncates_args():
     from ivyea_agent import ui
     out = ui.tool_call("read_file", {"path": "/tmp/" + "x" * 100}, color=False)
     assert "read_file" in out and "..." in out
+
+
+def test_ui_tool_call_step_and_stage_no_color():
+    from ivyea_agent import ui
+    call = ui.tool_call("read_file", {"path": "a.py"}, step="1/48.1", color=False)
+    stage = ui.stage("Code", "计划 → 测试", color=False)
+    assert "[1/48.1]" in call and "read_file" in call
+    assert "Code" in stage and "计划" in stage
+
+
+def test_chat_input_style_uses_light_completion_menu():
+    from ivyea_agent.chat_input import ChatInput
+    styles = ChatInput._style_dict()
+    assert styles["completion-menu.completion"].startswith("bg:#f8fafc")
+    assert "bg:#1f2937" not in " ".join(styles.values())

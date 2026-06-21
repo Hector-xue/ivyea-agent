@@ -12,6 +12,8 @@ ENGINEERING_TERMS = {
     "readme", "bug", "修复", "实现", "优化", "重构",
 }
 
+CONVENTION_FILES = ("AGENTS.md", "CLAUDE.md", "README.md", "pyproject.toml", "package.json")
+
 
 def should_include(query: str) -> bool:
     q = (query or "").lower()
@@ -67,6 +69,57 @@ def build(root: str | Path = ".", query: str = "", max_chars: int = 2200) -> str
     if len(text) > max_chars:
         text = text[:max_chars].rstrip() + "\n..."
     return text
+
+
+def repo_conventions(root: str | Path = ".", max_chars: int = 2800) -> dict:
+    root_path = Path(root).expanduser().resolve()
+    inspected = workspace.project_inspect(root_path)
+    files: list[dict[str, str]] = []
+    for name in CONVENTION_FILES:
+        path = root_path / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        summary = _convention_summary(text, max_chars=max_chars // 2 if name in {"README.md", "pyproject.toml"} else max_chars)
+        if summary:
+            files.append({"path": name, "summary": summary})
+    return {
+        "root": str(root_path),
+        "files": files,
+        "entrypoints": inspected.get("entrypoints", [])[:8],
+        "tests": inspected.get("tests", [])[:12],
+        "suggested_commands": inspected.get("suggested_commands", [])[:8],
+        "risks": inspected.get("risks", []),
+    }
+
+
+def _convention_summary(text: str, max_chars: int = 1400) -> str:
+    picked: list[str] = []
+    capture = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            if capture and picked:
+                picked.append("")
+            continue
+        lower = line.lower()
+        if line.startswith("#"):
+            capture = any(key in lower for key in (
+                "install", "test", "usage", "development", "deploy", "安全", "测试", "开发", "安装", "部署", "约定", "规范",
+            ))
+        important = capture or any(key in lower for key in (
+            "pytest", "ruff", "mypy", "npm test", "cargo test", "go test", "pip install", "python -m", "write", "commit", "push",
+        ))
+        if important:
+            picked.append(line)
+        if len("\n".join(picked)) >= max_chars:
+            break
+    if not picked:
+        picked = [line.rstrip() for line in text.splitlines() if line.strip()][:12]
+    return "\n".join(picked)[:max_chars].strip()
 
 
 def _entry_label(entry: dict) -> str:

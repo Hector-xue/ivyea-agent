@@ -12,8 +12,11 @@ class _FakeProvider:
 
 
 def test_should_compact_threshold(ivyea_home):
-    from ivyea_agent import context
-    assert context.should_compact(60000) is True
+    from ivyea_agent import config, context
+    assert context.should_compact(120000) is False
+    assert context.should_warn_compact(120000) is True
+    config.set_setting("auto_compact", True)
+    assert context.should_compact(120000) is True
     assert context.should_compact(100) is False
 
 

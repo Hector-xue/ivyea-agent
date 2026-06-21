@@ -6,6 +6,7 @@ project scans that later task/code agents can use before asking a model.
 from __future__ import annotations
 
 import hashlib
+import ast
 import json
 import os
 import re
@@ -17,7 +18,7 @@ from typing import Any
 
 from . import config
 
-INDEX_VERSION = 1
+INDEX_VERSION = 2
 WORKSPACE_DIR = config.IVYEA_DIR / "workspaces"
 
 DEFAULT_EXCLUDE_DIRS = {
@@ -236,6 +237,126 @@ def _imports(text: str, language: str, limit: int = 80) -> list[str]:
     return out
 
 
+def _call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _call_name(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    return ""
+
+
+def _python_ast(text: str, limit: int = 240) -> dict[str, Any]:
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return {"definitions": [], "calls": []}
+
+    definitions: list[dict[str, Any]] = []
+    calls: list[str] = []
+    seen_calls: set[str] = set()
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.stack: list[str] = []
+
+        def _definition(self, node: ast.AST, name: str, kind: str) -> None:
+            qualname = ".".join([*self.stack, name]) if self.stack else name
+            definitions.append({
+                "name": name,
+                "kind": kind,
+                "qualname": qualname,
+                "lineno": getattr(node, "lineno", 0),
+                "end_lineno": getattr(node, "end_lineno", getattr(node, "lineno", 0)),
+            })
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> Any:  # noqa: N802
+            if len(definitions) < limit:
+                self._definition(node, node.name, "class")
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:  # noqa: N802
+            if len(definitions) < limit:
+                self._definition(node, node.name, "function" if not self.stack else "method")
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:  # noqa: N802
+            if len(definitions) < limit:
+                self._definition(node, node.name, "async_function" if not self.stack else "async_method")
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        def visit_Call(self, node: ast.Call) -> Any:  # noqa: N802
+            name = _call_name(node.func)
+            if name and name not in seen_calls and len(calls) < limit:
+                seen_calls.add(name)
+                calls.append(name)
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    return {"definitions": definitions[:limit], "calls": calls[:limit]}
+
+
+JS_DEFINITION_PATTERNS = [
+    ("class", re.compile(r"^\s*export\s+class\s+([A-Za-z_$][\w$]*)|^\s*class\s+([A-Za-z_$][\w$]*)", re.M)),
+    ("function", re.compile(r"^\s*export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(|^\s*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(", re.M)),
+    ("function", re.compile(r"^\s*export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>|^\s*const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>", re.M)),
+    ("constant", re.compile(r"^\s*export\s+const\s+([A-Za-z_$][\w$]*)\s*=|^\s*const\s+([A-Za-z_$][\w$]*)\s*=", re.M)),
+]
+
+JS_CALL_PATTERN = re.compile(r"\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\(")
+
+
+def _line_no(text: str, pos: int) -> int:
+    return text.count("\n", 0, pos) + 1
+
+
+def _javascript_semantics(text: str, limit: int = 240) -> dict[str, Any]:
+    definitions: list[dict[str, Any]] = []
+    seen_defs: set[str] = set()
+    for kind, pattern in JS_DEFINITION_PATTERNS:
+        for match in pattern.finditer(text):
+            name = next((g for g in match.groups() if g), "")
+            if not name or name in seen_defs:
+                continue
+            seen_defs.add(name)
+            line = _line_no(text, match.start())
+            definitions.append({
+                "name": name,
+                "kind": kind,
+                "qualname": name,
+                "lineno": line,
+                "end_lineno": line,
+            })
+            if len(definitions) >= limit:
+                break
+    calls: list[str] = []
+    seen_calls: set[str] = set()
+    for match in JS_CALL_PATTERN.finditer(text):
+        name = match.group(1)
+        if name in {"if", "for", "while", "switch", "catch", "function"}:
+            continue
+        if name not in seen_calls:
+            seen_calls.add(name)
+            calls.append(name)
+        if len(calls) >= limit:
+            break
+    return {"definitions": definitions[:limit], "calls": calls[:limit]}
+
+
+def _semantic_index(text: str, language: str) -> dict[str, Any]:
+    if language == "Python":
+        return _python_ast(text)
+    if language in {"JavaScript", "TypeScript"}:
+        return _javascript_semantics(text)
+    return {"definitions": [], "calls": []}
+
+
 def iter_files(root: Path, options: ScanOptions | None = None) -> list[Path]:
     options = options or ScanOptions()
     files: list[Path] = []
@@ -273,6 +394,7 @@ def build_index(root: str | os.PathLike[str] | None = None, options: ScanOptions
             continue
         rel = path.relative_to(root_path).as_posix()
         language = language_for(path)
+        ast_info = _semantic_index(text, language)
         entries.append({
             "path": rel,
             "size": size,
@@ -280,6 +402,8 @@ def build_index(root: str | os.PathLike[str] | None = None, options: ScanOptions
             "language": language,
             "symbols": _symbols(text),
             "imports": _imports(text, language),
+            "definitions": ast_info["definitions"],
+            "calls": ast_info["calls"],
             "preview": _preview(text),
         })
     return {
@@ -338,6 +462,8 @@ def search(query: str, root: str | os.PathLike[str] | None = None, limit: int = 
             entry.get("path", ""),
             entry.get("language", ""),
             " ".join(entry.get("symbols", [])),
+            " ".join(d.get("qualname", "") for d in entry.get("definitions", []) or []),
+            " ".join(entry.get("calls", []) or []),
             entry.get("preview", ""),
         ]).lower()
         score = sum(hay.count(t) for t in terms)
@@ -350,6 +476,7 @@ def search(query: str, root: str | os.PathLike[str] | None = None, limit: int = 
             "lines": entry.get("lines", 0),
             "score": score,
             "symbols": entry.get("symbols", [])[:8],
+            "definitions": entry.get("definitions", [])[:8],
             "snippet": snippet,
         })
     matches.sort(key=lambda x: (-int(x["score"]), x["path"]))
@@ -448,6 +575,91 @@ def dependency_graph(root: str | os.PathLike[str] | None = None, limit: int = 40
     }
 
 
+def symbol_index(root: str | os.PathLike[str] | None = None, query: str = "", limit: int = 80) -> dict[str, Any]:
+    idx = ensure_index(root)
+    q = (query or "").strip().lower()
+    symbols: list[dict[str, Any]] = []
+    for entry in idx.get("files", []):
+        for definition in entry.get("definitions", []) or []:
+            name = str(definition.get("name") or "")
+            qualname = str(definition.get("qualname") or name)
+            if q and q not in name.lower() and q not in qualname.lower() and q not in str(entry.get("path", "")).lower():
+                continue
+            symbols.append({
+                "path": entry.get("path", ""),
+                "language": entry.get("language", ""),
+                "name": name,
+                "qualname": qualname,
+                "kind": definition.get("kind", ""),
+                "lineno": definition.get("lineno", 0),
+                "end_lineno": definition.get("end_lineno", definition.get("lineno", 0)),
+            })
+            if len(symbols) >= limit:
+                return {"root": idx.get("root"), "query": query, "symbols": symbols}
+    return {"root": idx.get("root"), "query": query, "symbols": symbols}
+
+
+def impact_analysis(target: str, root: str | os.PathLike[str] | None = None, limit: int = 80) -> dict[str, Any]:
+    idx = ensure_index(root)
+    files = idx.get("files", [])
+    target_value = (target or "").strip()
+    target_lower = target_value.lower()
+    target_path = target_value.replace("\\", "/")
+    module = _module_for_path(target_path) if "." in target_path or "/" in target_path else target_value
+    definitions = symbol_index(root, target_value, limit=limit).get("symbols", [])
+    direct_files: list[str] = []
+    importers: list[dict[str, str]] = []
+    callers: list[dict[str, str]] = []
+    tests: list[str] = []
+
+    for entry in files:
+        path = str(entry.get("path", ""))
+        if path == target_path or path.endswith("/" + target_path):
+            direct_files.append(path)
+        if _module_for_path(path) == module:
+            direct_files.append(path)
+        for raw in entry.get("imports", []) or []:
+            dep = str(raw).lstrip(".")
+            if dep == module or dep.startswith(module + ".") or module.startswith(dep + ".") or target_lower in dep.lower():
+                importers.append({"path": path, "import": str(raw)})
+        for call in entry.get("calls", []) or []:
+            call_s = str(call)
+            if target_lower and (call_s.lower() == target_lower or call_s.lower().endswith("." + target_lower)):
+                callers.append({"path": path, "call": call_s})
+        low = path.lower()
+        if low.startswith("tests/") or "/tests/" in low or Path(path).name.startswith("test_"):
+            hay = "\n".join([
+                path,
+                " ".join(entry.get("imports", []) or []),
+                " ".join(entry.get("symbols", []) or []),
+                " ".join(entry.get("calls", []) or []),
+                entry.get("preview", ""),
+            ]).lower()
+            if target_lower and target_lower in hay:
+                tests.append(path)
+
+    affected = sorted(set(direct_files + [i["path"] for i in importers] + [c["path"] for c in callers] + tests))
+    return {
+        "root": idx.get("root"),
+        "target": target,
+        "definitions": definitions[:limit],
+        "direct_files": sorted(set(direct_files))[:limit],
+        "importers": importers[:limit],
+        "callers": callers[:limit],
+        "tests": sorted(set(tests))[:limit],
+        "affected_files": affected[:limit],
+        "suggested_tests": _impact_tests(tests, affected),
+    }
+
+
+def _impact_tests(tests: list[str], affected: list[str]) -> list[str]:
+    if tests:
+        return ["python -m pytest " + " ".join(sorted(set(tests))[:12])]
+    if any(p.endswith(".py") for p in affected):
+        return ["python -m pytest"]
+    return []
+
+
 def _read_indexed_file(root: Path, rel: str, max_bytes: int = 128_000) -> str:
     text = _read_text(root / rel, max_bytes)
     return text or ""
@@ -539,12 +751,16 @@ def explain(target: str | os.PathLike[str] | None = None, root: str | os.PathLik
         if not entry:
             text = _read_text(target_path, ScanOptions().max_bytes)
             if text is not None:
+                language = language_for(target_path)
+                semantic = _semantic_index(text, language)
                 entry = {
                     "path": rel,
                     "size": target_path.stat().st_size,
                     "lines": len(text.splitlines()),
-                    "language": language_for(target_path),
+                    "language": language,
                     "symbols": _symbols(text),
+                    "definitions": semantic["definitions"],
+                    "calls": semantic["calls"],
                     "preview": _preview(text),
                 }
         return {
@@ -579,11 +795,14 @@ def _file_summary(entry: dict[str, Any] | None) -> str:
     if not entry:
         return "文件未在索引中。"
     symbols = entry.get("symbols") or []
+    definitions = entry.get("definitions") or []
     parts = [
         f"{entry.get('language', 'Text')} 文件",
         f"{entry.get('lines', 0)} 行",
         f"{entry.get('size', 0)} bytes",
     ]
+    if definitions:
+        parts.append("定义：" + ", ".join(f"{d.get('qualname')}:{d.get('lineno')}" for d in definitions[:12]))
     if symbols:
         parts.append("主要符号：" + ", ".join(symbols[:12]))
     return "；".join(parts)
@@ -617,6 +836,9 @@ def render_search(rows: list[dict[str, Any]], query: str) -> str:
         lines.append(f"- {r['path']} ({r['language']}, score={r['score']})")
         if r.get("symbols"):
             lines.append("  symbols: " + ", ".join(r["symbols"]))
+        if r.get("definitions"):
+            defs = ", ".join(f"{d.get('qualname')}:{d.get('lineno')}" for d in r["definitions"][:5])
+            lines.append("  definitions: " + defs)
         if r.get("snippet"):
             lines.append("  " + r["snippet"])
     return "\n".join(lines)
@@ -685,6 +907,44 @@ def render_graph(data: dict[str, Any]) -> str:
         lines.append("")
         lines.append("Edges:")
         lines.extend(f"- {e['from']} -> {e['to']} ({e['import']})" for e in edges[:20])
+    return "\n".join(lines)
+
+
+def render_symbols(data: dict[str, Any]) -> str:
+    symbols = data.get("symbols") or []
+    lines = ["Workspace Symbols", "", f"- root: {data.get('root')}", f"- query: {data.get('query') or '*'}", f"- symbols: {len(symbols)}"]
+    if symbols:
+        lines.append("")
+        for item in symbols:
+            lines.append(
+                f"- {item.get('path')}:{item.get('lineno')} "
+                f"{item.get('kind')} {item.get('qualname')}"
+            )
+    return "\n".join(lines)
+
+
+def render_impact(data: dict[str, Any]) -> str:
+    lines = ["Workspace Impact", "", f"- root: {data.get('root')}", f"- target: {data.get('target')}"]
+    definitions = data.get("definitions") or []
+    if definitions:
+        lines.extend(["", "Definitions"])
+        for item in definitions[:12]:
+            lines.append(f"- {item.get('path')}:{item.get('lineno')} {item.get('kind')} {item.get('qualname')}")
+    if data.get("direct_files"):
+        lines.extend(["", "Direct Files"])
+        lines.extend(f"- {path}" for path in data["direct_files"][:20])
+    if data.get("importers"):
+        lines.extend(["", "Importers"])
+        lines.extend(f"- {item.get('path')} imports {item.get('import')}" for item in data["importers"][:20])
+    if data.get("callers"):
+        lines.extend(["", "Callers"])
+        lines.extend(f"- {item.get('path')} calls {item.get('call')}" for item in data["callers"][:20])
+    if data.get("tests"):
+        lines.extend(["", "Likely Tests"])
+        lines.extend(f"- {path}" for path in data["tests"][:20])
+    if data.get("suggested_tests"):
+        lines.extend(["", "Suggested Tests"])
+        lines.extend(f"- `{cmd}`" for cmd in data["suggested_tests"])
     return "\n".join(lines)
 
 

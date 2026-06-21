@@ -696,7 +696,7 @@ SLASH_COMMANDS = [
     ("/plan", "进入/退出计划模式（只读，不写入）"),
     ("/approve", "批准并退出计划模式，继续执行"),
     ("/cost", "本会话 token 用量与成本估算"),
-    ("/compact", "压缩上下文（LLM 摘要历史，省 token）"),
+    ("/compact", "压缩上下文；/compact auto on|off 控制自动压缩"),
     ("/init", "生成账户指令模板 AGENTS.md（长期打法/边界，自动注入）"),
     ("/raw", "切换 Markdown 渲染 / 原始流式输出"),
     ("/clear", "清空当前对话上下文"),
@@ -924,6 +924,16 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             print(ui.message("success", f"已压缩上下文（约 {before}→{after} 字），摘要已入库。") if summary
                   else ui.message("info", "上下文较短，无需压缩。"))
             continue
+        if line in ("/compact auto", "/compact auto status"):
+            state = "开启" if bool(cfg.get_setting("auto_compact", False)) else "关闭"
+            th = int(cfg.get_setting("compact_at_tokens", ctx_mod.DEFAULT_COMPACT_AT))
+            print(ui.message("info", f"自动压缩：{state} · 阈值 {th} prompt tokens"))
+            continue
+        if line in ("/compact auto on", "/compact auto off"):
+            enabled = line.endswith(" on")
+            cfg.set_setting("auto_compact", enabled)
+            print(ui.message("success", f"自动压缩已{'开启' if enabled else '关闭'}。手动压缩仍可用 /compact。"))
+            continue
         if line == "/init":
             p = memory.init_agents(str(cfg.IVYEA_DIR / "AGENTS.md"))
             if p[0]:
@@ -1017,6 +1027,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         user_content = line
         if ectx:
             user_content += "\n\n[工程上下文]\n" + ectx
+            print(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))
             print(ui.message("muted", "已注入工程上下文"))
         if sctx:
             user_content += ("\n\n[Ivyea Skill：本轮相关可复用流程]\n"
@@ -1060,12 +1071,14 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             hint = memory.nudge_hint(out.get("text", ""))
             if hint:
                 print(f"{_C['d']}  💡 {hint}{_C['x']}")
-            # 自动压缩 + 摘要入库 + 落盘
+            # 自动压缩默认关闭；长上下文只提醒，避免完整任务中途被压缩打断。
             if ctx_mod.should_compact(int((out.get('usage') or {}).get('prompt_tokens') or 0)):
                 messages, _s = ctx_mod.compact(messages, provider)
                 if _s:
                     memory.remember_summary(_s, sid)
                     print(ui.message("info", "上下文较长，已自动压缩并入库摘要以省 token"))
+            elif ctx_mod.should_warn_compact(int((out.get('usage') or {}).get('prompt_tokens') or 0)):
+                print(ui.message("muted", "上下文已经较长；需要节省 token 时手动执行 /compact，或 /compact auto on 开启自动压缩。"))
             _persist()
         except KeyboardInterrupt:
             print("\n" + ui.message("info", "已中断本轮，会话保留。继续输入即可。"))
@@ -1774,6 +1787,20 @@ def _cmd_workspace(args: argparse.Namespace) -> int:
             workspace.save_index(idx)
         print(workspace.render_inspect(workspace.project_inspect(root)))
         return 0
+    if args.action == "symbols":
+        idx = workspace.load_index(root)
+        if not idx or args.refresh:
+            idx = workspace.build_index(root, options)
+            workspace.save_index(idx)
+        print(workspace.render_symbols(workspace.symbol_index(root, query=args.query or "", limit=args.limit)))
+        return 0
+    if args.action == "impact":
+        idx = workspace.load_index(root)
+        if not idx or args.refresh:
+            idx = workspace.build_index(root, options)
+            workspace.save_index(idx)
+        print(workspace.render_impact(workspace.impact_analysis(args.target or args.query or "", root=root, limit=args.limit)))
+        return 0
     if args.action == "explain":
         idx = workspace.load_index(root)
         if not idx or args.refresh:
@@ -1936,6 +1963,108 @@ def _cmd_patch(args: argparse.Namespace) -> int:
             return 0 if result["ok"] else 1
     except Exception as e:  # noqa: BLE001
         print(f"patch 失败：{e}", file=sys.stderr)
+        return 1
+    return 2
+
+
+def _cmd_code(args: argparse.Namespace) -> int:
+    from . import code_agent
+
+    try:
+        root = args.root or "."
+        if args.action == "plan":
+            print(code_agent.render_plan(code_agent.task_plan(args.goal or "", root=root)))
+            return 0
+        if args.action == "context":
+            print(code_agent.render_context(code_agent.context(args.goal or "", root=root, limit=args.limit)))
+            return 0
+        if args.action == "brief":
+            print(code_agent.render_brief(code_agent.brief(args.goal or "", root=root, budget=args.budget)))
+            return 0
+        if args.action == "quality":
+            print(code_agent.render_quality(code_agent.quality(root=root)))
+            return 0
+        if args.action == "diff-brief":
+            print(code_agent.render_diff_brief(code_agent.diff_brief(root=root, staged=args.staged)))
+            return 0
+        if args.action == "release-check":
+            print(code_agent.render_release_check(code_agent.release_check(root=root, version=args.version or "")))
+            return 0
+        if args.action == "refs":
+            print(code_agent.render_refs(code_agent.refs(args.goal or args.target or "", root=root, limit=args.limit)))
+            return 0
+        if args.action == "rename-plan":
+            print(code_agent.render_rename_plan(code_agent.rename_plan(args.goal or args.target or "", args.new_name or "", root=root, limit=args.limit)))
+            return 0
+        if args.action == "run":
+            provider = None
+            if args.llm_patch and args.call:
+                from .providers import from_settings
+                provider = from_settings(config.get_model_config(), config.get_active_key())
+            result = code_agent.run_loop(
+                args.goal or "",
+                root=root,
+                test_command=args.test_command or "",
+                run_tests_enabled=bool(args.run_tests),
+                max_rounds=args.max_rounds,
+                persist=True,
+                llm_patch=bool(args.llm_patch),
+                patch_provider=provider,
+                timeout=args.timeout,
+            )
+            print(code_agent.render_run(result))
+            return 0 if not result.get("test_result") or result["test_result"].get("ok") else 1
+        if args.action == "runs":
+            print(code_agent.render_run_list(code_agent.list_runs(limit=args.limit)))
+            return 0
+        if args.action == "show":
+            print(code_agent.render_run(code_agent.load_run(args.goal or "")))
+            return 0
+        if args.action == "sandbox":
+            print(code_agent.render_sandbox_plan(code_agent.sandbox_plan(root=root, name=args.name or "")))
+            return 0
+        if args.action == "test":
+            result = code_agent.run_tests(args.test_command or "python -m pytest", root=root, timeout=args.timeout)
+            print(code_agent.render_test_result(result))
+            return 0 if result.get("ok") else 1
+        if args.action == "repair":
+            if args.output_file:
+                text = Path(args.output_file).expanduser().read_text(encoding="utf-8", errors="replace")
+            else:
+                text = args.text or sys.stdin.read()
+            print(code_agent.render_repair(code_agent.repair_plan(text, root=root)))
+            return 0
+        if args.action == "impact":
+            print(code_agent.render_impact(code_agent.impact(args.goal or args.target or "", root=root)))
+            return 0
+        if args.action == "patch":
+            if args.llm:
+                provider = None
+                if args.call:
+                    from .providers import from_settings
+                    provider = from_settings(config.get_model_config(), config.get_active_key())
+                result = code_agent.llm_patch_candidate(
+                    args.goal or "",
+                    root=root,
+                    path=args.path or "",
+                    provider=provider,
+                    timeout=args.timeout,
+                )
+            else:
+                result = code_agent.patch_candidate(
+                    args.goal or "",
+                    root=root,
+                    path=args.path or "",
+                    old=args.old or "",
+                    new=args.new or "",
+                )
+            print(code_agent.render_patch_candidate(result))
+            return 0 if result.get("status") != "invalid" else 1
+        if args.action == "review":
+            print(code_agent.render_review(code_agent.review_ready(root=root, staged=args.staged)))
+            return 0
+    except Exception as e:  # noqa: BLE001
+        print(f"code 失败：{e}", file=sys.stderr)
         return 1
     return 2
 
@@ -2237,8 +2366,8 @@ def build_parser() -> argparse.ArgumentParser:
     ppol.add_argument("--force", action="store_true")
     ppol.set_defaults(func=_cmd_policy)
 
-    pws = sub.add_parser("workspace", help="通用项目理解：index/search/map/graph/inspect/explain")
-    pws.add_argument("action", choices=["index", "search", "map", "graph", "inspect", "explain"])
+    pws = sub.add_parser("workspace", help="通用项目理解：index/search/map/graph/inspect/symbols/impact/explain")
+    pws.add_argument("action", choices=["index", "search", "map", "graph", "inspect", "symbols", "impact", "explain"])
     pws.add_argument("query", nargs="?", help="search 查询词；explain 目标路径")
     pws.add_argument("--root", default=".", help="项目根目录，默认当前目录")
     pws.add_argument("--target", help="explain 的目标文件/目录；不填则使用 query 或 .")
@@ -2281,6 +2410,31 @@ def build_parser() -> argparse.ArgumentParser:
     pcoderev.add_argument("--root", default=".")
     pcoderev.add_argument("--staged", action="store_true", help="审查 staged diff")
     pcoderev.set_defaults(func=_cmd_codereview)
+
+    pcode = sub.add_parser("code", help="代码 Agent 闭环：plan/context/brief/quality/refs/rename-plan/diff-brief/release-check/run/runs/show/sandbox/impact/patch/test/repair/review")
+    pcode.add_argument("action", choices=["plan", "context", "brief", "quality", "refs", "rename-plan", "diff-brief", "release-check", "run", "runs", "show", "sandbox", "impact", "patch", "test", "repair", "review"])
+    pcode.add_argument("goal", nargs="?", help="plan/context/run 的自然语言目标；refs/rename-plan 的符号；show 的 run id")
+    pcode.add_argument("--target", help="impact 的符号、模块或文件目标")
+    pcode.add_argument("--path", help="patch 候选目标文件")
+    pcode.add_argument("--old", help="patch 候选原文；必须在目标文件中唯一匹配")
+    pcode.add_argument("--new", help="patch 候选新文本")
+    pcode.add_argument("--llm", action="store_true", help="patch 时生成 LLM 请求包；默认不调用模型")
+    pcode.add_argument("--llm-patch", action="store_true", help="code run 时在 patch 阶段生成 LLM patch 请求包")
+    pcode.add_argument("--call", action="store_true", help="与 --llm 配合，真实调用当前模型生成 patch 并 dry-run validate")
+    pcode.add_argument("--root", default=".")
+    pcode.add_argument("--limit", type=int, default=8, help="context 输出文件数量")
+    pcode.add_argument("--budget", type=int, default=6000, help="brief 字符预算")
+    pcode.add_argument("--command", dest="test_command", help="test 要运行的命令，默认 python -m pytest")
+    pcode.add_argument("--run-tests", action="store_true", help="code run 时真实运行测试；默认只列建议测试")
+    pcode.add_argument("--max-rounds", type=int, default=1, help="code run 最大轮次；当前骨架只执行首轮 dry-run")
+    pcode.add_argument("--name", help="sandbox 计划名称")
+    pcode.add_argument("--timeout", type=int, default=120)
+    pcode.add_argument("--output-file", help="repair 读取 pytest 输出文件")
+    pcode.add_argument("--text", help="repair 直接传入失败输出文本；不传则读取 stdin")
+    pcode.add_argument("--staged", action="store_true", help="review 审查 staged diff")
+    pcode.add_argument("--version", help="release-check 版本，如 v0.5.6；不传则读取 pyproject.toml")
+    pcode.add_argument("--new-name", help="rename-plan 的新符号名")
+    pcode.set_defaults(func=_cmd_code)
 
     ppatch = sub.add_parser("patch", help="结构化补丁：make/validate/apply/tests/run-tests")
     ppatch.add_argument("action", choices=["make", "validate", "apply", "tests", "run-tests"])

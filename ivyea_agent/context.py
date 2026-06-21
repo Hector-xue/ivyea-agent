@@ -9,8 +9,10 @@ from typing import Optional
 
 from . import config
 
-# 默认：上一轮 prompt_tokens 超过此值就自动压缩（deepseek-chat 上限 64K，留足余量）
-DEFAULT_COMPACT_AT = 48000
+# 默认只提示，不自动压缩。真正需要节省上下文时由用户执行 /compact。
+# 对支持更长上下文的模型，96K 仍保留一定余量；小上下文模型可自行 config set compact_at_tokens。
+DEFAULT_COMPACT_AT = 96000
+DEFAULT_AUTO_COMPACT = False
 
 _SUMMARY_SYS = "你是对话压缩器。把给定的多轮对话压缩成简洁要点，必须保留：关键事实、已做的决策、ASIN/店铺SID/具体数字、用户偏好与未完成事项。用中文分条，不要寒暄。"
 
@@ -33,6 +35,14 @@ def _render_history(messages: list[dict]) -> str:
 
 
 def should_compact(last_prompt_tokens: int, threshold: Optional[int] = None) -> bool:
+    if not bool(config.get_setting("auto_compact", DEFAULT_AUTO_COMPACT)):
+        return False
+    th = threshold if threshold is not None else int(config.get_setting("compact_at_tokens", DEFAULT_COMPACT_AT))
+    return last_prompt_tokens > th
+
+
+def should_warn_compact(last_prompt_tokens: int, threshold: Optional[int] = None) -> bool:
+    """Return True when history is long enough to suggest manual /compact."""
     th = threshold if threshold is not None else int(config.get_setting("compact_at_tokens", DEFAULT_COMPACT_AT))
     return last_prompt_tokens > th
 

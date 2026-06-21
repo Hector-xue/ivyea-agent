@@ -73,6 +73,13 @@ def message(kind: str, text: str, *, color: bool | None = None) -> str:
     return f"{paint(icon, kind, color=color)} {text}"
 
 
+def stage(title: str, text: str = "", *, color: bool | None = None) -> str:
+    """Render a compact process/status line for long-running code work."""
+    label = paint(title, "bold", "info", color=color)
+    body = f" {paint(text, 'muted', color=color)}" if text else ""
+    return f"{paint('◆', 'info', color=color)} {label}{body}"
+
+
 def kv(rows: list[tuple[str, object]], *, color: bool | None = None, indent: int = 0) -> str:
     """Render aligned key/value rows."""
     if not rows:
@@ -117,7 +124,8 @@ def panel(title: str, body: str | list[str], *, kind: str = "info",
     return "\n".join(out)
 
 
-def tool_call(name: str, args: dict | None = None, *, color: bool | None = None) -> str:
+def tool_call(name: str, args: dict | None = None, *, color: bool | None = None,
+              step: str = "") -> str:
     args = args or {}
     pairs = []
     for key, value in args.items():
@@ -126,7 +134,8 @@ def tool_call(name: str, args: dict | None = None, *, color: bool | None = None)
             text = text[:57] + "..."
         pairs.append(f"{key}={text}")
     suffix = f"({', '.join(pairs)})" if pairs else "()"
-    return f"{paint(_ICONS['tool'], 'info', color=color)} {paint(name, _B, color=color)}{paint(suffix, 'muted', color=color)}"
+    prefix = f"[{step}] " if step else ""
+    return f"{paint(_ICONS['tool'], 'info', color=color)} {paint(prefix, 'muted', color=color)}{paint(name, _B, color=color)}{paint(suffix, 'muted', color=color)}"
 
 
 def tool_result(text: str, *, color: bool | None = None) -> str:

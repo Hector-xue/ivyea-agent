@@ -102,3 +102,20 @@ def test_run_turn_stream_with_tool(ivyea_home):
     assert out["usage"]["prompt_tokens"] == 110 and out["usage"]["completion_tokens"] == 18
     # 含一次 assistant(tool_calls) + 一次 tool 结果
     assert any(m.get("role") == "tool" for m in msgs)
+
+
+class _AlwaysToolProvider:
+    def stream_chat(self, messages, tools=None, temperature=0.3, timeout=120.0):
+        yield {"type": "final", "content": "", "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+               "tool_calls": [{"id": f"c{len(messages)}", "name": "recall", "arguments": {"query": "x"}}]}
+
+
+def test_run_turn_stream_uses_configured_tool_step_limit(ivyea_home):
+    from ivyea_agent import agent_loop, agent_tools, config
+    config.set_setting("chat_max_tool_steps", 2)
+    ctx = agent_tools.ToolContext()
+    msgs = [{"role": "system", "content": "x"}, {"role": "user", "content": "一直查"}]
+    out = agent_loop.run_turn_stream(_AlwaysToolProvider(), ctx, msgs,
+                                     render=lambda s: None, narrate=lambda s: None)
+    assert "工具调用步数上限 2" in out["text"]
+    assert out["usage"]["prompt_tokens"] == 2
