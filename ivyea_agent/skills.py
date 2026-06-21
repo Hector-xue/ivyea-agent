@@ -100,6 +100,98 @@ def list_skills(include_user: bool = True) -> list[Skill]:
     return sorted(by_id.values(), key=lambda s: (s.domain, s.id))
 
 
+def inventory() -> dict[str, list[Skill]]:
+    """Return every skill variant grouped by id, without applying overrides."""
+    rows: dict[str, list[Skill]] = {}
+    for sk in _iter_builtin() + _iter_user():
+        rows.setdefault(sk.id, []).append(sk)
+    for variants in rows.values():
+        variants.sort(key=lambda s: (s.scope != "builtin", s.path))
+    return dict(sorted(rows.items()))
+
+
+def _version_key(value: str) -> tuple[int, tuple[int, ...], str]:
+    raw = (value or "").strip().lower().lstrip("v")
+    if raw in ("", "local"):
+        return (0, (), raw)
+    m = re.match(r"^(\d+(?:\.\d+)*)(.*)$", raw)
+    if not m:
+        return (0, (), raw)
+    return (1, tuple(int(p) for p in m.group(1).split(".")), m.group(2))
+
+
+def compare_versions(left: str, right: str) -> int:
+    lk = _version_key(left)
+    rk = _version_key(right)
+    if lk == rk:
+        return 0
+    return 1 if lk > rk else -1
+
+
+def status() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for skill_id, variants in inventory().items():
+        builtin = next((s for s in variants if s.scope == "builtin"), None)
+        user = next((s for s in variants if s.scope == "user"), None)
+        active = user or builtin or variants[0]
+        issues: list[str] = []
+        if len(variants) > 1:
+            issues.append("overridden_by_user" if user and builtin else "duplicate_id")
+        if user and builtin:
+            cmp = compare_versions(user.version, builtin.version)
+            if cmp < 0:
+                issues.append(f"user_version_behind_builtin:{user.version or '-'}<{builtin.version or '-'}")
+            elif cmp > 0:
+                issues.append(f"user_version_ahead_builtin:{user.version or '-'}>{builtin.version or '-'}")
+            else:
+                issues.append("user_override_same_version")
+        for kid in active.knowledge_ids:
+            if not knowledge.get_card(kid):
+                issues.append(f"missing_knowledge:{kid}")
+        rows.append({
+            "id": skill_id,
+            "active_scope": active.scope,
+            "active_version": active.version,
+            "builtin_version": builtin.version if builtin else "",
+            "user_version": user.version if user else "",
+            "domain": active.domain,
+            "title": active.title,
+            "variant_count": len(variants),
+            "path": active.path,
+            "issues": issues,
+            "ok": not issues or issues == ["user_override_same_version"],
+        })
+    return rows
+
+
+def lockfile() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "generated_by": "ivyea-agent",
+        "skills": [
+            {
+                "id": sk.id,
+                "scope": sk.scope,
+                "domain": sk.domain,
+                "version": sk.version,
+                "title": sk.title,
+                "path": sk.path,
+                "knowledge_ids": sk.knowledge_ids,
+                "tools": sk.tools,
+                "triggers": sk.triggers,
+            }
+            for sk in list_skills()
+        ],
+    }
+
+
+def write_lockfile(path: str | Path | None = None) -> Path:
+    out = Path(path).expanduser() if path else _user_base() / "skills.lock.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(lockfile(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return out
+
+
 def create_user_skill(
     skill_id: str,
     title: str = "",
@@ -162,12 +254,11 @@ def get_skill(skill_id: str) -> Skill | None:
 
 def audit() -> list[dict[str, Any]]:
     rows = []
-    ids = set()
-    for sk in list_skills():
+    for skill_id, variants in inventory().items():
+        sk = variants[-1]
         issues = []
-        if sk.id in ids:
-            issues.append("duplicate_id")
-        ids.add(sk.id)
+        if len(variants) > 1:
+            issues.append("overridden_by_user" if any(v.scope == "user" for v in variants) else "duplicate_id")
         if not sk.triggers:
             issues.append("missing_triggers")
         if not sk.body.strip():
@@ -176,7 +267,7 @@ def audit() -> list[dict[str, Any]]:
             if not knowledge.get_card(kid):
                 issues.append(f"missing_knowledge:{kid}")
         rows.append({
-            "id": sk.id,
+            "id": skill_id,
             "scope": sk.scope,
             "title": sk.title,
             "path": sk.path,
@@ -283,4 +374,24 @@ def render_audit(rows: list[dict[str, Any]] | None = None) -> str:
         status = "OK" if row["ok"] else "WARN"
         issues = ", ".join(row["issues"]) if row["issues"] else "-"
         lines.append(f"- {status} {row['id']} [{row['scope']}] issues={issues}")
+    return "\n".join(lines)
+
+
+def render_status(rows: list[dict[str, Any]] | None = None) -> str:
+    rows = rows if rows is not None else status()
+    if not rows:
+        return "Skill Status\n\n（暂无 skills）"
+    lines = ["Skill Status", ""]
+    for row in rows:
+        issues = ", ".join(row["issues"]) if row["issues"] else "-"
+        versions = []
+        if row.get("builtin_version"):
+            versions.append(f"builtin={row['builtin_version']}")
+        if row.get("user_version"):
+            versions.append(f"user={row['user_version']}")
+        lines.append(
+            f"- {'OK' if row['ok'] else 'WARN'} {row['id']} "
+            f"active={row['active_scope']}:{row['active_version'] or '-'} "
+            f"variants={row['variant_count']} {' '.join(versions)} issues={issues}"
+        )
     return "\n".join(lines)

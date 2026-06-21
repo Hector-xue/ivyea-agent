@@ -1,0 +1,48 @@
+{
+  "version": "v0.5.5",
+  "generated_at": "2026-06-21T03:20:30+00:00",
+  "sources": [
+    "README.md",
+    "docs/部署指南.md",
+    "docs/使用与操作文档.md"
+  ],
+  "commands": [
+    "curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash",
+    "ivyea config",
+    "ivyea chat",
+    "iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex",
+    "curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v0.5.5 bash",
+    "python scripts/build_offline_bundle.py",
+    "python scripts/build_standalone.py --clean",
+    "ivyea config             # 进配置向导",
+    "ivyea --version",
+    "ivyea self status",
+    "ivyea self backup",
+    "ivyea self upgrade            # dry-run，输出升级计划",
+    "ivyea self uninstall          # dry-run，输出卸载计划",
+    "ivyea config            # 交互向导：provider / 模型 / 站点 / 目标ACoS / API key",
+    "ivyea config show       # 查看当前配置",
+    "ivyea config set target_acos 0.3   # 单项设置",
+    "ivyea config edit       # 用 $EDITOR 直接编辑 .env",
+    "ivyea model            # 交互：列出国内外主流模型 + 登录制，选编号配置(含 key)",
+    "ivyea model list       # 只列清单",
+    "ivyea model deepseek-chat   # 按 id 直接切",
+    "ivyea mcp add               # 对话式添加：名称 / 传输(http·sse·stdio) / URL / 鉴权(header·query)",
+    "ivyea mcp list",
+    "ivyea mcp tools <名称>       # 连上并列出该服务器暴露的工具(发现工具名/入参)",
+    "ivyea mcp call <名称> <工具> --args '{\"asin\":\"B0..\"}'   # 看某工具返回结构",
+    "ivyea mcp suggest <名称> <工具> --args '{\"asin\":\"{asin}\",\"days\":\"{days}\"}'  # 根据返回自动建议 dataSource",
+    "ivyea mcp doctor            # 检查 transport/dataSource/writeActions 配置",
+    "ivyea mcp edit              # 编辑 mcp.json(填 dataSource 映射)",
+    "ivyea mcp remove <名称>"
+  ],
+  "capabilities": [
+    "Amazon 广告巡检",
+    "Amazon Skills / 知识库",
+    "审批式写入与审计回滚",
+    "Workspace 项目理解",
+    "Patch / Git / CI 工作流",
+    "图片 OCR 与多模态视觉",
+    "安装生命周期管理"
+  ]
+}

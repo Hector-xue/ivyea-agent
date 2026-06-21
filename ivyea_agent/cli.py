@@ -243,6 +243,11 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
         from . import mcp_write
         print(mcp_write.template_json())
         return 0
+    if args.action == "doctor":
+        from . import mcp_status
+        rows = mcp_status.status()
+        print(mcp_status.render(rows))
+        return 1 if any(not r["ok"] for r in rows) else 0
     if args.action == "validate":
         from . import mcp_write
         if not args.name:
@@ -1005,10 +1010,14 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             if not _ask(f"今日已花 ¥{pricing.today_spend():.2f} 达上限 ¥{_lim:.2f}，仍继续？(y/N)").strip().lower().startswith("y"):
                 print(ui.message("info", "已暂停。调整上限：ivyea config set daily_cost_limit_cny <元>"))
                 continue
-        from . import knowledge, skills
+        from . import engineering_context, knowledge, skills
         kctx, kids = knowledge.context_for_query(line, limit=3)
         sctx, sids = skills.context_for_query(line, limit=2)
+        ectx = engineering_context.build(os.getcwd(), line)
         user_content = line
+        if ectx:
+            user_content += "\n\n[工程上下文]\n" + ectx
+            print(ui.message("muted", "已注入工程上下文"))
         if sctx:
             user_content += ("\n\n[Ivyea Skill：本轮相关可复用流程]\n"
                              + sctx
@@ -1197,6 +1206,13 @@ def _cmd_skill(args: argparse.Namespace) -> int:
     if args.action == "audit":
         print(skills.render_audit())
         return 0
+    if args.action == "status":
+        print(skills.render_status())
+        return 0
+    if args.action == "export-lock":
+        path = skills.write_lockfile(args.output)
+        print(f"已写入 skill lockfile：{path}")
+        return 0
     if args.action == "create":
         if not args.query:
             print("用法: ivyea skill create <skill_id> --title ...", file=sys.stderr)
@@ -1241,6 +1257,37 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     checks = doctor.run_checks()
     print(doctor.render(checks))
     return 1 if any(c.status == "fail" for c in checks) else 0
+
+
+def _cmd_self(args: argparse.Namespace) -> int:
+    from . import permission, self_manage
+
+    if args.action == "status":
+        print(self_manage.render_status())
+        return 0
+    if args.action == "backup":
+        path = self_manage.backup(args.output)
+        print(f"已写入备份：{path}")
+        return 0
+    if args.action in ("upgrade", "uninstall"):
+        if args.action == "upgrade":
+            plan = self_manage.upgrade_plan(version=args.version or "latest", ref=args.ref or "", method=args.method or "")
+        else:
+            plan = self_manage.uninstall_plan(keep_data=not args.remove_data, method=args.method or "")
+        preview = self_manage.render_plan(plan)
+        if not args.execute:
+            print(preview)
+            print("\n（这是 dry-run。确认后加 --execute 真实执行。）")
+            return 0
+        if not args.yes:
+            state = permission.PermissionState()
+            decision = permission.request_intent({"op_type": f"self.{args.action}"}, preview, state)
+            if decision != permission.APPROVE:
+                print("已取消。")
+                return 1
+        print(self_manage.render_execution(self_manage.execute_plan(plan, timeout=args.timeout)))
+        return 0
+    return 2
 
 
 def _cmd_action(args: argparse.Namespace) -> int:
@@ -1713,6 +1760,20 @@ def _cmd_workspace(args: argparse.Namespace) -> int:
             workspace.save_index(idx)
         print(workspace.render_map(workspace.project_map(root)))
         return 0
+    if args.action == "graph":
+        idx = workspace.load_index(root)
+        if not idx or args.refresh:
+            idx = workspace.build_index(root, options)
+            workspace.save_index(idx)
+        print(workspace.render_graph(workspace.dependency_graph(root, limit=args.limit)))
+        return 0
+    if args.action == "inspect":
+        idx = workspace.load_index(root)
+        if not idx or args.refresh:
+            idx = workspace.build_index(root, options)
+            workspace.save_index(idx)
+        print(workspace.render_inspect(workspace.project_inspect(root)))
+        return 0
     if args.action == "explain":
         idx = workspace.load_index(root)
         if not idx or args.refresh:
@@ -1960,8 +2021,8 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("value", nargs="?")
     pc.set_defaults(func=_cmd_config)
 
-    pm = sub.add_parser("mcp", help="MCP 配置/自检（add/list/remove/edit/tools/call/suggest/template/validate）")
-    pm.add_argument("action", choices=["add", "list", "remove", "edit", "tools", "call", "suggest", "template", "validate"])
+    pm = sub.add_parser("mcp", help="MCP 配置/自检（add/list/remove/edit/tools/call/suggest/template/validate/doctor）")
+    pm.add_argument("action", choices=["add", "list", "remove", "edit", "tools", "call", "suggest", "template", "validate", "doctor"])
     pm.add_argument("name", nargs="?", help="服务器名（remove/tools/call 需要）")
     pm.add_argument("tool", nargs="?", help="工具名（call 需要）")
     pm.add_argument("--args", help="call 的入参 JSON，如 '{\"asin\":\"B0..\"}'")
@@ -2018,6 +2079,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     pdoc = sub.add_parser("doctor", help="环境体检：配置、依赖、知识库、磁盘、领星/MCP")
     pdoc.set_defaults(func=_cmd_doctor)
+
+    pself = sub.add_parser("self", help="安装生命周期：status/backup/upgrade/uninstall")
+    pself.add_argument("action", choices=["status", "backup", "upgrade", "uninstall"])
+    pself.add_argument("--output", help="backup 输出路径")
+    pself.add_argument("--version", help="upgrade 固定版本，如 v0.5.5")
+    pself.add_argument("--ref", help="upgrade 指定 git ref")
+    pself.add_argument("--method", choices=["pipx", "ivyea-runtime", "venv", "unknown"], help="覆盖自动识别的安装方式")
+    pself.add_argument("--remove-data", action="store_true", help="uninstall 时同时删除 ~/.ivyea 数据")
+    pself.add_argument("--execute", action="store_true", help="真实执行 upgrade/uninstall；默认 dry-run")
+    pself.add_argument("--yes", action="store_true", help="执行时跳过交互审批")
+    pself.add_argument("--timeout", type=int, default=300)
+    pself.set_defaults(func=_cmd_self)
 
     pact = sub.add_parser("action", help="动作队列：import/list/show/report/approve/deny/done/pending/execute/clear")
     pact.add_argument("action", choices=[
@@ -2164,8 +2237,8 @@ def build_parser() -> argparse.ArgumentParser:
     ppol.add_argument("--force", action="store_true")
     ppol.set_defaults(func=_cmd_policy)
 
-    pws = sub.add_parser("workspace", help="通用项目理解：index/search/map/explain")
-    pws.add_argument("action", choices=["index", "search", "map", "explain"])
+    pws = sub.add_parser("workspace", help="通用项目理解：index/search/map/graph/inspect/explain")
+    pws.add_argument("action", choices=["index", "search", "map", "graph", "inspect", "explain"])
     pws.add_argument("query", nargs="?", help="search 查询词；explain 目标路径")
     pws.add_argument("--root", default=".", help="项目根目录，默认当前目录")
     pws.add_argument("--target", help="explain 的目标文件/目录；不填则使用 query 或 .")
@@ -2194,10 +2267,10 @@ def build_parser() -> argparse.ArgumentParser:
     pgit.add_argument("--root", default=".")
     pgit.add_argument("--remote", default="origin", help="ci 使用的 GitHub remote，默认 origin")
     pgit.add_argument("--staged", action="store_true", help="diff 查看 staged 变更")
-    pgit.add_argument("--version", help="release-plan 检查的版本，如 v0.5.4")
+    pgit.add_argument("--version", help="release-plan 检查的版本，如 v0.5.5")
     pgit.add_argument("--file", action="append", help="stage 指定文件；可重复。不传则 stage -A")
     pgit.add_argument("--message", help="commit message")
-    pgit.add_argument("--tag", help="tag 名称，如 v0.5.4")
+    pgit.add_argument("--tag", help="tag 名称，如 v0.5.5")
     pgit.add_argument("--execute", action="store_true", help="真实执行；默认只预览")
     pgit.add_argument("--yes", action="store_true", help="写操作跳过交互审批")
     pgit.add_argument("--limit", type=int, default=5, help="ci 显示最近 run 数量")
@@ -2282,8 +2355,8 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--tags", help="标签，逗号分隔")
     pk.set_defaults(func=_cmd_knowledge)
 
-    pski = sub.add_parser("skill", help="可复用 Skill：list/search/show/run/create/audit")
-    pski.add_argument("action", choices=["list", "search", "show", "run", "create", "audit"])
+    pski = sub.add_parser("skill", help="可复用 Skill：list/search/show/run/create/audit/status/export-lock")
+    pski.add_argument("action", choices=["list", "search", "show", "run", "create", "audit", "status", "export-lock"])
     pski.add_argument("query", nargs="?")
     pski.add_argument("--limit", type=int, default=8)
     pski.add_argument("--title")
@@ -2294,6 +2367,7 @@ def build_parser() -> argparse.ArgumentParser:
     pski.add_argument("--knowledge", action="append")
     pski.add_argument("--body")
     pski.add_argument("--body-file")
+    pski.add_argument("--output")
     pski.add_argument("--force", action="store_true")
     pski.set_defaults(func=_cmd_skill)
 

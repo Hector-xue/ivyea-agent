@@ -22,6 +22,7 @@ def test_build_index_skips_noise_and_extracts_symbols(tmp_path, monkeypatch):
     assert app["language"] == "Python"
     assert "App" in app["symbols"]
     assert "run" in app["symbols"]
+    assert app["imports"] == []
 
 
 def test_save_load_search_map_and_explain(tmp_path, monkeypatch):
@@ -65,6 +66,41 @@ def test_renderers_are_stable(tmp_path, monkeypatch):
     assert "Workspace Search" in workspace.render_search(workspace.search("hello", tmp_path), "hello")
     assert "Workspace Map" in workspace.render_map(workspace.project_map(tmp_path))
     assert "Workspace Explain" in workspace.render_explain(workspace.explain(".", tmp_path))
+
+
+def test_dependency_graph_and_project_inspect(tmp_path, monkeypatch):
+    monkeypatch.setattr(workspace, "WORKSPACE_DIR", tmp_path / ".ivyea" / "workspaces")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg" / "core.py").write_text("import json\nfrom pkg.util import helper\n\ndef run():\n    return helper()\n", encoding="utf-8")
+    (tmp_path / "pkg" / "util.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_core.py").write_text("from pkg.core import run\n", encoding="utf-8")
+    (tmp_path / ".github" / "workflows" / "ci.yml").write_text("name: CI\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='demo'\n\n[project.scripts]\ndemo='pkg.core:run'\n",
+        encoding="utf-8",
+    )
+
+    idx = workspace.build_index(tmp_path)
+    workspace.save_index(idx)
+    core = next(f for f in idx["files"] if f["path"] == "pkg/core.py")
+    assert "json" in core["imports"]
+    assert "pkg.util" in core["imports"]
+
+    graph = workspace.dependency_graph(tmp_path)
+    assert graph["edge_count"] >= 1
+    assert any(e["from"] == "pkg/core.py" and e["to"] == "pkg/util.py" for e in graph["edges"])
+    assert "json" in graph["external"]
+    assert "Workspace Graph" in workspace.render_graph(graph)
+
+    inspected = workspace.project_inspect(tmp_path)
+    assert any(e.get("name") == "demo" for e in inspected["entrypoints"])
+    assert "tests/test_core.py" in inspected["tests"]
+    assert "python -m pytest" in inspected["suggested_commands"]
+    assert "ivyea gitops ci --root ." in inspected["suggested_commands"]
+    assert "Workspace Inspect" in workspace.render_inspect(inspected)
 
 
 def test_index_json_is_serializable(tmp_path, monkeypatch):

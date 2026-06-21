@@ -52,6 +52,8 @@ DEFAULT_EXCLUDE_FILES = {
     "uv.lock",
 }
 
+VISIBLE_HIDDEN_DIRS = {".github"}
+
 TEXT_EXTENSIONS = {
     ".py": "Python",
     ".js": "JavaScript",
@@ -111,6 +113,23 @@ SYMBOL_PATTERNS = [
     re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=", re.M),
 ]
 
+IMPORT_PATTERNS = {
+    "Python": [
+        re.compile(r"^\s*import\s+([A-Za-z_][\w.]*)(?:\s+as\s+\w+)?", re.M),
+        re.compile(r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\s+", re.M),
+    ],
+    "JavaScript": [
+        re.compile(r"^\s*import\s+.*?\s+from\s+['\"]([^'\"]+)['\"]", re.M),
+        re.compile(r"^\s*(?:const|let|var)\s+.*?=\s*require\(['\"]([^'\"]+)['\"]\)", re.M),
+    ],
+    "TypeScript": [
+        re.compile(r"^\s*import\s+.*?\s+from\s+['\"]([^'\"]+)['\"]", re.M),
+        re.compile(r"^\s*(?:const|let|var)\s+.*?=\s*require\(['\"]([^'\"]+)['\"]\)", re.M),
+    ],
+    "Go": [re.compile(r"^\s*import\s+(?:\(\s*)?[\"`]([^\"`]+)[\"`]", re.M)],
+    "Rust": [re.compile(r"^\s*use\s+([A-Za-z_][\w:]*)", re.M)],
+}
+
 
 @dataclass
 class ScanOptions:
@@ -138,7 +157,7 @@ def _is_hidden(path: Path, root: Path) -> bool:
         rel = path.relative_to(root)
     except ValueError:
         rel = path
-    return any(part.startswith(".") and part not in (".", "..") for part in rel.parts)
+    return any(part.startswith(".") and part not in (".", "..") and part not in VISIBLE_HIDDEN_DIRS for part in rel.parts)
 
 
 def _skip_dir(path: Path, root: Path, include_hidden: bool) -> bool:
@@ -203,6 +222,20 @@ def _preview(text: str, max_chars: int = 700) -> str:
     return "\n".join(lines)[:max_chars]
 
 
+def _imports(text: str, language: str, limit: int = 80) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for pattern in IMPORT_PATTERNS.get(language, []):
+        for match in pattern.finditer(text):
+            name = match.group(1).strip()
+            if name and name not in seen:
+                seen.add(name)
+                out.append(name)
+            if len(out) >= limit:
+                return out
+    return out
+
+
 def iter_files(root: Path, options: ScanOptions | None = None) -> list[Path]:
     options = options or ScanOptions()
     files: list[Path] = []
@@ -239,12 +272,14 @@ def build_index(root: str | os.PathLike[str] | None = None, options: ScanOptions
             skipped["binary_or_unreadable"] += 1
             continue
         rel = path.relative_to(root_path).as_posix()
+        language = language_for(path)
         entries.append({
             "path": rel,
             "size": size,
             "lines": len(text.splitlines()),
-            "language": language_for(path),
+            "language": language,
             "symbols": _symbols(text),
+            "imports": _imports(text, language),
             "preview": _preview(text),
         })
     return {
@@ -356,6 +391,138 @@ def project_map(root: str | os.PathLike[str] | None = None) -> dict[str, Any]:
         "sample_by_dir": dict(sorted(by_dir.items())),
         "skipped": idx.get("skipped", {}),
     }
+
+
+def _module_for_path(path: str) -> str:
+    if path.endswith(".py"):
+        if path.endswith("/__init__.py"):
+            return path[:-12].replace("/", ".")
+        return path[:-3].replace("/", ".")
+    stem = re.sub(r"\.(jsx?|tsx?|go|rs)$", "", path)
+    return stem.replace("/", ".")
+
+
+def dependency_graph(root: str | os.PathLike[str] | None = None, limit: int = 40) -> dict[str, Any]:
+    idx = ensure_index(root)
+    files = idx.get("files", [])
+    modules = {_module_for_path(f.get("path", "")): f.get("path", "") for f in files}
+    module_roots = {m.split(".", 1)[0] for m in modules if m}
+    edges: list[dict[str, str]] = []
+    external: Counter[str] = Counter()
+    inbound: Counter[str] = Counter()
+    outbound: Counter[str] = Counter()
+    for f in files:
+        src_path = f.get("path", "")
+        src_mod = _module_for_path(src_path)
+        for raw in f.get("imports", []) or []:
+            dep = raw.lstrip(".")
+            if not dep:
+                continue
+            target_path = ""
+            if dep in modules:
+                target_path = modules[dep]
+            else:
+                for mod, path in modules.items():
+                    if dep == mod or dep.startswith(mod + ".") or mod.startswith(dep + "."):
+                        target_path = path
+                        break
+            if target_path:
+                edges.append({"from": src_path, "to": target_path, "import": raw})
+                inbound[target_path] += 1
+                outbound[src_path] += 1
+            else:
+                name = dep.split(".", 1)[0].split("/", 1)[0].split(":", 1)[0]
+                if name and name not in module_roots and not raw.startswith((".", "/")):
+                    external[name] += 1
+    hubs = [
+        {"path": path, "inbound": inbound[path], "outbound": outbound[path]}
+        for path in sorted(set(inbound) | set(outbound), key=lambda p: (-(inbound[p] + outbound[p]), p))
+    ][:limit]
+    return {
+        "root": idx.get("root"),
+        "files": len(files),
+        "edges": edges[:limit],
+        "edge_count": len(edges),
+        "external": dict(external.most_common(limit)),
+        "hubs": hubs,
+    }
+
+
+def _read_indexed_file(root: Path, rel: str, max_bytes: int = 128_000) -> str:
+    text = _read_text(root / rel, max_bytes)
+    return text or ""
+
+
+def project_inspect(root: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    idx = ensure_index(root)
+    root_path = resolve_root(idx.get("root"))
+    files = idx.get("files", [])
+    paths = {f.get("path", "") for f in files}
+    entrypoints: list[dict[str, str]] = []
+    tests: list[str] = []
+    configs: list[str] = []
+    docs: list[str] = []
+    risks: list[str] = []
+
+    for path in sorted(paths):
+        name = path.rsplit("/", 1)[-1]
+        low = path.lower()
+        if name in {"README.md", "readme.md"} or low.startswith("docs/"):
+            docs.append(path)
+        if name in {"pyproject.toml", "package.json", "Cargo.toml", "go.mod", "Makefile", "Dockerfile"} or path.startswith(".github/workflows/"):
+            configs.append(path)
+        if low.startswith("tests/") or "/tests/" in low or name.startswith("test_") or name.endswith(".test.ts") or name.endswith(".spec.ts"):
+            tests.append(path)
+        if name in {"cli.py", "__main__.py", "main.py", "app.py", "server.py", "manage.py"}:
+            entrypoints.append({"path": path, "kind": "conventional"})
+
+    if "pyproject.toml" in paths:
+        text = _read_indexed_file(root_path, "pyproject.toml")
+        section = re.search(r"(?ms)^\[project\.scripts\]\s*$(.*?)(?=^\[|\Z)", text)
+        if section:
+            for match in re.finditer(r"^\s*([A-Za-z0-9_.-]+)\s*=\s*['\"]([^'\"]+)['\"]", section.group(1), re.M):
+                entrypoints.append({"path": "pyproject.toml", "kind": "script", "name": match.group(1), "target": match.group(2)})
+    if "package.json" in paths:
+        try:
+            pkg = json.loads(_read_indexed_file(root_path, "package.json"))
+            scripts = pkg.get("scripts") or {}
+            for name, cmd in sorted(scripts.items())[:12]:
+                entrypoints.append({"path": "package.json", "kind": "npm-script", "name": name, "target": str(cmd)})
+        except json.JSONDecodeError:
+            risks.append("package.json 不是合法 JSON")
+
+    if not tests:
+        risks.append("未发现测试文件")
+    if not any(p.startswith(".github/workflows/") for p in paths):
+        risks.append("未发现 GitHub Actions workflow")
+    if any(p.endswith((".env", ".pem", ".key")) for p in paths):
+        risks.append("索引中出现敏感配置/密钥类文件名，请检查 policy 与 .gitignore")
+
+    return {
+        "root": idx.get("root"),
+        "generated_at": idx.get("generated_at"),
+        "entrypoints": entrypoints[:24],
+        "tests": tests[:24],
+        "configs": configs[:24],
+        "docs": docs[:24],
+        "risks": risks,
+        "suggested_commands": _suggest_project_commands(paths),
+    }
+
+
+def _suggest_project_commands(paths: set[str]) -> list[str]:
+    commands: list[str] = []
+    if "pyproject.toml" in paths or "pytest.ini" in paths or any(p.startswith("tests/") for p in paths):
+        commands.append("python -m pytest")
+    if "package.json" in paths:
+        commands.append("npm test")
+    if "Cargo.toml" in paths:
+        commands.append("cargo test")
+    if "go.mod" in paths:
+        commands.append("go test ./...")
+    if ".github/workflows/ci.yml" in paths or ".github/workflows/release.yml" in paths:
+        commands.append("ivyea gitops ci --root .")
+    return commands or ["ivyea workspace map --root ."]
 
 
 def explain(target: str | os.PathLike[str] | None = None, root: str | os.PathLike[str] | None = None) -> dict[str, Any]:
@@ -494,4 +661,63 @@ def render_explain(data: dict[str, Any]) -> str:
         lines.append("")
         lines.append("Preview:")
         lines.append(entry["preview"])
+    return "\n".join(lines)
+
+
+def render_graph(data: dict[str, Any]) -> str:
+    lines = [
+        "Workspace Graph",
+        "",
+        f"- root: {data.get('root')}",
+        f"- files: {data.get('files', 0)}",
+        f"- internal_edges: {data.get('edge_count', 0)}",
+    ]
+    external = data.get("external") or {}
+    if external:
+        lines.append("- external: " + ", ".join(f"{k}={v}" for k, v in list(external.items())[:12]))
+    hubs = data.get("hubs") or []
+    if hubs:
+        lines.append("")
+        lines.append("Hubs:")
+        lines.extend(f"- {h['path']} inbound={h['inbound']} outbound={h['outbound']}" for h in hubs[:12])
+    edges = data.get("edges") or []
+    if edges:
+        lines.append("")
+        lines.append("Edges:")
+        lines.extend(f"- {e['from']} -> {e['to']} ({e['import']})" for e in edges[:20])
+    return "\n".join(lines)
+
+
+def render_inspect(data: dict[str, Any]) -> str:
+    lines = [
+        "Workspace Inspect",
+        "",
+        f"- root: {data.get('root')}",
+        f"- generated_at: {data.get('generated_at')}",
+    ]
+    for title, key in (
+        ("Entrypoints", "entrypoints"),
+        ("Tests", "tests"),
+        ("Configs", "configs"),
+        ("Docs", "docs"),
+        ("Risks", "risks"),
+        ("Suggested commands", "suggested_commands"),
+    ):
+        rows = data.get(key) or []
+        if not rows:
+            continue
+        lines.append("")
+        lines.append(title + ":")
+        for row in rows[:24]:
+            if isinstance(row, dict):
+                detail = row.get("path", "")
+                if row.get("name"):
+                    detail += f" · {row.get('name')}"
+                if row.get("target"):
+                    detail += f" -> {row.get('target')}"
+                if row.get("kind"):
+                    detail += f" ({row.get('kind')})"
+                lines.append(f"- {detail}")
+            else:
+                lines.append(f"- {row}")
     return "\n".join(lines)

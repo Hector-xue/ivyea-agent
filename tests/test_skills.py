@@ -71,6 +71,36 @@ def test_create_user_skill_and_audit(ivyea_home):
     assert "Skill Audit" in skills.render_audit(rows)
 
 
+def test_skill_status_and_lockfile_for_user_override(ivyea_home):
+    sk = skills.create_user_skill(
+        "amazon.search_term_optimizer",
+        title="Local Search Optimizer",
+        description="Override builtin search workflow.",
+        triggers=["search term"],
+        tools=["run_patrol"],
+        knowledge_ids=["playbook.search_term_lifecycle"],
+        body="# Local Override\n\nUse account-specific rules.",
+        overwrite=True,
+    )
+    manifest = sk.path and (ivyea_home / "skills" / "amazon" / "search_term_optimizer" / "skill.json")
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    data["version"] = "0.0.1"
+    manifest.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    rows = skills.status()
+    row = next(r for r in rows if r["id"] == "amazon.search_term_optimizer")
+    assert row["active_scope"] == "user"
+    assert any(i.startswith("user_version_behind_builtin") for i in row["issues"])
+    assert "Skill Status" in skills.render_status(rows)
+
+    lock = skills.lockfile()
+    active = next(s for s in lock["skills"] if s["id"] == "amazon.search_term_optimizer")
+    assert active["scope"] == "user"
+
+    out = skills.write_lockfile(ivyea_home / "skills.lock.json")
+    assert json.loads(out.read_text(encoding="utf-8"))["version"] == 1
+
+
 def test_skill_cli(capsys):
     from ivyea_agent.cli import main
 
@@ -98,3 +128,11 @@ def test_skill_cli(capsys):
     assert main(["skill", "audit"]) == 0
     out = capsys.readouterr().out
     assert "Skill Audit" in out
+
+    assert main(["skill", "status"]) == 0
+    out = capsys.readouterr().out
+    assert "Skill Status" in out
+
+    assert main(["skill", "export-lock"]) == 0
+    out = capsys.readouterr().out
+    assert "skills.lock.json" in out

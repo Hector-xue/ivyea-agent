@@ -102,3 +102,52 @@ def test_cli_mcp_suggest(ivyea_home, monkeypatch, capsys):
     assert '"rows_path": "data.rows"' in out
     assert '"Customer Search Term": "searchTerm"' in out
     assert calls[:2] == ["initialize", "tools/call"]
+
+
+def test_mcp_stdio_client(tmp_path):
+    from ivyea_agent.mcp_client import MCPClient
+
+    server = tmp_path / "server.py"
+    server.write_text(
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    msg=json.loads(line)\n"
+        "    if 'id' not in msg:\n"
+        "        continue\n"
+        "    method=msg.get('method')\n"
+        "    if method=='initialize':\n"
+        "        result={'serverInfo': {'name': 'fake'}}\n"
+        "    elif method=='tools/list':\n"
+        "        result={'tools': [{'name': 'echo', 'description': 'Echo'}]}\n"
+        "    elif method=='tools/call':\n"
+        "        result={'structuredContent': {'ok': True, 'args': msg['params']['arguments']}}\n"
+        "    else:\n"
+        "        result={}\n"
+        "    print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':result}), flush=True)\n",
+        encoding="utf-8",
+    )
+    client = MCPClient({"transport": "stdio", "command": "python", "args": [str(server)]})
+    try:
+        assert client.initialize()["serverInfo"]["name"] == "fake"
+        assert client.list_tools()[0]["name"] == "echo"
+        assert client.call_tool("echo", {"x": 1})["structuredContent"]["args"]["x"] == 1
+    finally:
+        client.close()
+
+
+def test_mcp_doctor(ivyea_home, capsys):
+    from ivyea_agent import config, mcp_status, mcp_write
+    from ivyea_agent.cli import build_parser
+
+    config.mcp_set_server("stdio", {"transport": "stdio", "command": "python", **mcp_write.WRITE_ACTIONS_TEMPLATE})
+    config.mcp_set_server("broken", {"transport": "http"})
+
+    rows = mcp_status.status()
+    assert any(r["name"] == "stdio" and r["ok"] for r in rows)
+    assert any(r["name"] == "broken" and not r["ok"] for r in rows)
+    assert "MCP Doctor" in mcp_status.render(rows)
+
+    parser = build_parser()
+    args = parser.parse_args(["mcp", "doctor"])
+    assert args.func(args) == 1
+    assert "missing_url" in capsys.readouterr().out
