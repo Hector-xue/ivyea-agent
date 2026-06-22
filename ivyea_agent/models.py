@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Optional
@@ -38,6 +39,7 @@ PROVIDERS: list[dict[str, Any]] = [
         "api_mode": "anthropic_messages",
         "auth_type": "api_key",
         "base": "https://api.anthropic.com",
+        "models_url": "https://api.anthropic.com/v1/models",
         "key_env": "ANTHROPIC_API_KEY",
         "signup_url": "https://console.anthropic.com/settings/keys",
         "models": [
@@ -480,12 +482,21 @@ def live_models(provider: dict[str, Any], api_key: str = "", timeout: float = 6.
     """Fetch a provider model catalog when it exposes an OpenAI-compatible /models endpoint."""
     url = (provider.get("models_url") or "").strip()
     base = (provider.get("base") or "").strip()
+    api_mode = provider.get("api_mode", "")
+    if not url and api_mode == "gemini_native" and base:
+        url = base.rstrip("/") + "/models"
     if not url and base and provider.get("kind") == "openai":
         url = base.rstrip("/") + "/models"
     if not url:
         return None
+    if api_mode == "gemini_native" and api_key:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}key={api_key}"
     req = urllib.request.Request(url)
-    if api_key:
+    if api_key and api_mode == "anthropic_messages":
+        req.add_header("x-api-key", api_key)
+        req.add_header("anthropic-version", "2023-06-01")
+    elif api_key:
         req.add_header("Authorization", f"Bearer {api_key}")
     req.add_header("Accept", "application/json")
     req.add_header("User-Agent", "ivyea-agent")
@@ -495,5 +506,75 @@ def live_models(provider: dict[str, Any], api_key: str = "", timeout: float = 6.
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     items = data if isinstance(data, list) else data.get("data", [])
-    ids = [str(m["id"]) for m in items if isinstance(m, dict) and m.get("id")]
+    if not items and isinstance(data, dict):
+        items = data.get("models", [])
+    ids = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw = item.get("id") or item.get("name")
+        if not raw:
+            continue
+        model_id = str(raw)
+        if model_id.startswith("models/"):
+            model_id = model_id.split("/", 1)[1]
+        ids.append(model_id)
     return ids or None
+
+
+def _cache_file():
+    from . import config
+    return config.IVYEA_DIR / "model_catalog_cache.json"
+
+
+def _cache_key(provider: dict[str, Any]) -> str:
+    return "|".join([
+        str(provider.get("id") or ""),
+        str(provider.get("models_url") or ""),
+        str(provider.get("base") or ""),
+    ])
+
+
+def _load_model_cache() -> dict[str, Any]:
+    path = _cache_file()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_model_cache(data: dict[str, Any]) -> None:
+    from . import config
+    config.ensure_dirs()
+    _cache_file().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def provider_models(provider: dict[str, Any], api_key: str = "", *,
+                    refresh: bool = False, ttl: float = 24 * 3600) -> tuple[list[str], str]:
+    """Return provider models plus source: live/cache/builtin.
+
+    OpenAI-compatible providers often expose /models. For OAuth/private transports
+    that do not expose a stable catalog, callers get the curated builtin list.
+    """
+    builtin = list(provider.get("models") or [])
+    if provider.get("kind") != "openai" and not provider.get("models_url") and provider.get("api_mode") != "gemini_native":
+        return builtin, "builtin"
+    key = _cache_key(provider)
+    cache = _load_model_cache()
+    row = cache.get(key) if isinstance(cache.get(key), dict) else {}
+    now = time.time()
+    cached_models = [str(m) for m in row.get("models", []) if m] if row else []
+    age = now - float(row.get("ts") or 0) if row else ttl + 1
+    if cached_models and not refresh and age <= ttl:
+        return cached_models, "cache"
+    live = live_models(provider, api_key=api_key)
+    if live:
+        cache[key] = {"ts": now, "models": live}
+        _save_model_cache(cache)
+        return live, "live"
+    if cached_models:
+        return cached_models, "cache"
+    return builtin, "builtin"

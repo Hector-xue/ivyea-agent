@@ -99,6 +99,7 @@ def _model_picker() -> None:
             _print_provider_auth_required(provider)
             return
 
+    _ensure_provider_api_key(provider)
     model, base = _choose_provider_model(provider)
     entry = _provider_model_entry(provider, model)
     if provider["id"] in ("custom", "azure-foundry"):
@@ -106,12 +107,6 @@ def _model_picker() -> None:
         model = _ask("model 名", model)
     config.apply_model(entry, model=model, base_url=base)
     if provider.get("key_env") and provider.get("auth_type", "api_key") == "api_key":
-        cur = "已配置" if config.get_active_key() else "未配置"
-        nk = _ask_secret(f"{provider['label']} 的 API key（{provider['key_env']}，当前{cur}；回车跳过 / - 清空）")
-        if nk == "-":
-            config.set_env_key(provider["key_env"], "")
-        elif nk:
-            config.set_env_key(provider["key_env"], nk)
         print(f"✓ 已切换主脑：{provider['label']}（{model}），"
               f"{'已配 key' if config.get_active_key() else '未配 key'}")
     else:
@@ -172,21 +167,57 @@ def _interactive_provider_login(provider: dict) -> bool:
 
 
 def _choose_provider_model(provider: dict) -> tuple[str, str]:
-    models = list(provider.get("models") or [])
-    default = provider.get("default_model") or (models[0] if models else "")
+    from . import models as model_catalog
+    available, source = model_catalog.provider_models(provider, api_key=_provider_catalog_key(provider))
+    model_names = list(available or [])
+    default = provider.get("default_model") or (model_names[0] if model_names else "")
+    if default and model_names and default not in model_names:
+        default = model_names[0]
     base = provider.get("base", "")
-    if not models:
+    if not model_names:
         return default, base
-    print(f"\n{provider['label']} 可用模型：")
-    for i, model in enumerate(models, start=1):
+    label = {"live": "实时获取", "cache": "缓存", "builtin": "内置"}.get(source, source)
+    print(f"\n{provider['label']} 可用模型（{label}）：")
+    for i, model in enumerate(model_names, start=1):
         mark = "（默认）" if model == default else ""
         print(f"  {_C['c']}{i:>2}{_C['x']}) {model} {mark}")
     raw = _ask("选择模型编号或直接输入 model 名（回车用默认）", "")
     if not raw:
         return default, base
-    if raw.isdigit() and 1 <= int(raw) <= len(models):
-        return models[int(raw) - 1], base
+    if raw.isdigit() and 1 <= int(raw) <= len(model_names):
+        return model_names[int(raw) - 1], base
     return raw, base
+
+
+def _provider_catalog_key(provider: dict) -> str:
+    auth = (provider.get("auth_type") or "api_key").lower()
+    if auth in ("none", "aws_sdk"):
+        return ""
+    try:
+        if auth in ("oauth_external", "oauth_device_code", "copilot"):
+            from . import oauth_auth
+            return oauth_auth.resolve_provider_token(provider.get("id", ""), provider.get("key_env", ""), refresh=True)
+    except (ImportError, OSError, ValueError):
+        return ""
+    config.load_env()
+    key_env = provider.get("key_env") or ""
+    return os.environ.get(key_env, "") if key_env else ""
+
+
+def _ensure_provider_api_key(provider: dict) -> None:
+    if provider.get("auth_type", "api_key") != "api_key" or not provider.get("key_env"):
+        return
+    config.load_env()
+    key_env = provider["key_env"]
+    cur = "已配置" if os.environ.get(key_env) else "未配置"
+    if os.environ.get(key_env):
+        return
+    nk = _ask_secret(f"{provider['label']} 的 API key（{key_env}，当前{cur}；回车跳过 / - 清空）")
+    if nk == "-":
+        config.set_env_key(key_env, "")
+    elif nk:
+        config.set_env_key(key_env, nk)
+        os.environ[key_env] = nk
 
 
 def _provider_model_entry(provider: dict, model: str) -> dict:

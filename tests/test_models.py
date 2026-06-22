@@ -22,7 +22,7 @@ def test_model_aliases_and_provider_model_ids_resolve():
     assert custom["model"] == "moonshotai/kimi-k2.6"
 
 
-def test_key_status_for_api_key_oauth_and_none(monkeypatch):
+def test_key_status_for_api_key_oauth_and_none(ivyea_home, monkeypatch):
     from ivyea_agent import models
     deepseek = models.provider_by_id("deepseek")
     ollama = models.provider_by_id("ollama")
@@ -33,6 +33,71 @@ def test_key_status_for_api_key_oauth_and_none(monkeypatch):
     assert models.key_status(deepseek) == "configured"
     assert models.key_status(ollama) == "none"
     assert models.key_status(codex) == "missing:auth-token"
+
+
+def test_provider_models_uses_live_catalog_and_cache(ivyea_home, monkeypatch):
+    from ivyea_agent import models
+    provider = {"id": "demo", "kind": "openai", "base": "https://demo.test/v1", "models": ["built-in"]}
+    calls = []
+
+    def fake_live(p, api_key="", timeout=6.0):
+        calls.append(api_key)
+        return ["live-a", "live-b"]
+
+    monkeypatch.setattr(models, "live_models", fake_live)
+    rows, source = models.provider_models(provider, api_key="sk-demo", refresh=True)
+    assert rows == ["live-a", "live-b"]
+    assert source == "live"
+    assert calls == ["sk-demo"]
+
+    monkeypatch.setattr(models, "live_models", lambda *a, **k: None)
+    rows, source = models.provider_models(provider, api_key="sk-demo")
+    assert rows == ["live-a", "live-b"]
+    assert source == "cache"
+
+
+def test_provider_models_falls_back_to_builtin_without_live(ivyea_home, monkeypatch):
+    from ivyea_agent import models
+    provider = {"id": "demo", "kind": "openai", "base": "https://demo.test/v1", "models": ["built-in"]}
+    monkeypatch.setattr(models, "live_models", lambda *a, **k: None)
+    rows, source = models.provider_models(provider, refresh=True)
+    assert rows == ["built-in"]
+    assert source == "builtin"
+
+
+def test_live_models_parses_gemini_and_anthropic(monkeypatch):
+    from ivyea_agent import models
+
+    class _Resp:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            import json
+            return json.dumps(self.payload).encode("utf-8")
+
+    requests = []
+
+    def fake_urlopen(req, timeout=6.0):
+        requests.append(req)
+        url = req.full_url
+        if "generativelanguage" in url:
+            assert "key=gemini-key" in url
+            return _Resp({"models": [{"name": "models/gemini-live"}]})
+        assert req.headers["X-api-key"] == "anthropic-key"
+        return _Resp({"data": [{"id": "claude-live"}]})
+
+    monkeypatch.setattr(models.urllib.request, "urlopen", fake_urlopen)
+    gemini = {"id": "gemini", "kind": "native", "api_mode": "gemini_native", "base": "https://generativelanguage.googleapis.com/v1beta"}
+    anthropic = {"id": "anthropic", "kind": "anthropic", "api_mode": "anthropic_messages", "models_url": "https://api.anthropic.com/v1/models"}
+    assert models.live_models(gemini, api_key="gemini-key") == ["gemini-live"]
+    assert models.live_models(anthropic, api_key="anthropic-key") == ["claude-live"]
 
 
 def test_cli_model_provider_and_doctor_outputs(ivyea_home, capsys):
@@ -103,6 +168,37 @@ def test_model_picker_codex_runs_login_before_switch(ivyea_home, monkeypatch, ca
     settings = config.load_settings()
     assert settings["provider_id"] == "openai-codex"
     assert settings["model"] == "gpt-5-codex"
+
+
+def test_choose_provider_model_uses_live_catalog(ivyea_home, monkeypatch, capsys):
+    from ivyea_agent import cli, models
+    provider = dict(models.provider_by_id("ollama"))
+    monkeypatch.setattr(models, "provider_models", lambda p, api_key="", refresh=False: (["live-model"], "live"))
+    monkeypatch.setattr(cli, "_ask", lambda prompt, default="": "")
+    model, _ = cli._choose_provider_model(provider)
+    out = capsys.readouterr().out
+    assert model == "live-model"
+    assert "实时获取" in out
+
+
+def test_model_picker_collects_api_key_before_live_catalog(ivyea_home, monkeypatch, capsys):
+    from ivyea_agent import cli, models
+    seen = []
+    answers = iter(["1", ""])
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(cli, "_ask", lambda prompt, default="": next(answers, default))
+    monkeypatch.setattr(cli, "_ask_secret", lambda prompt: "sk-live")
+
+    def fake_provider_models(provider, api_key="", refresh=False):
+        seen.append(api_key)
+        return ["live-openai"], "live"
+
+    monkeypatch.setattr(models, "provider_models", fake_provider_models)
+    cli._model_picker()
+    out = capsys.readouterr().out
+    assert seen == ["sk-live"]
+    assert "live-openai" in out
+    assert "已切换主脑" in out
 
 
 def test_cli_model_auth_imports_token(ivyea_home, capsys):
