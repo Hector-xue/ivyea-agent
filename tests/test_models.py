@@ -49,16 +49,26 @@ def test_cli_model_provider_and_doctor_outputs(ivyea_home, capsys):
     assert rc == 0 and "OK 当前模型配置可进入对话" in out
 
 
-def test_cli_model_direct_oauth_requires_auth(ivyea_home, capsys):
+def test_cli_model_direct_oauth_runs_login(ivyea_home, monkeypatch, capsys):
     from argparse import Namespace
-    from ivyea_agent import cli, config
+    from ivyea_agent import cli, config, oauth_auth
+    calls = []
+
+    def fake_login(notify=None):
+        calls.append("login")
+        oauth_auth.set_auth_token("openai-codex", "codex-token")
+        if notify:
+            notify("打开 https://auth.openai.com/codex/device 并输入代码：TEST-CODE")
+
+    monkeypatch.setattr(oauth_auth, "codex_device_code_login", fake_login)
     rc = cli._cmd_model(Namespace(spec="openai-codex:gpt-5-codex", extra=None, token=None,
                                   refresh_token=None, expires_at=0))
     out = capsys.readouterr().out
-    assert rc == 1
-    assert "暂不切换主脑" in out
-    assert "ivyea model auth openai-codex --device-code" in out
-    assert config.load_settings().get("provider_id") != "openai-codex"
+    assert rc == 0
+    assert calls == ["login"]
+    assert "TEST-CODE" in out
+    assert "已切换主脑" in out
+    assert config.load_settings().get("provider_id") == "openai-codex"
 
 
 def test_model_picker_lists_providers_first(ivyea_home, monkeypatch, capsys):
@@ -70,6 +80,29 @@ def test_model_picker_lists_providers_first(ivyea_home, monkeypatch, capsys):
     assert "OpenAI API" in out
     assert "OpenAI API · gpt-4o" not in out
     assert "gpt-5-codex" not in out
+
+
+def test_model_picker_codex_runs_login_before_switch(ivyea_home, monkeypatch, capsys):
+    from ivyea_agent import cli, oauth_auth, config
+    calls = []
+    answers = iter(["16", "3"])
+    monkeypatch.setattr(cli, "_ask", lambda prompt, default="": next(answers, default))
+
+    def fake_login(notify=None):
+        calls.append("login")
+        oauth_auth.set_auth_token("openai-codex", "codex-token")
+        if notify:
+            notify("打开 https://auth.openai.com/codex/device 并输入代码：TEST-CODE")
+
+    monkeypatch.setattr(oauth_auth, "codex_device_code_login", fake_login)
+    cli._model_picker()
+    out = capsys.readouterr().out
+    assert calls == ["login"]
+    assert "TEST-CODE" in out
+    assert "认证完成" in out
+    settings = config.load_settings()
+    assert settings["provider_id"] == "openai-codex"
+    assert settings["model"] == "gpt-5-codex"
 
 
 def test_cli_model_auth_imports_token(ivyea_home, capsys):

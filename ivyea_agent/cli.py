@@ -85,7 +85,7 @@ def _model_picker() -> None:
         for provider in items:
             status = models.key_status(provider)
             auth = provider.get("auth_type", "api_key")
-            tag = f"{_C['d']} · {auth} · {status}{_C['x']}"
+            tag = f" · {auth} · {status}"
             print(f"  {_C['c']}{n:>2}{_C['x']}) {provider['label']}{tag}")
             idx[str(n)] = provider
             n += 1
@@ -95,8 +95,9 @@ def _model_picker() -> None:
         print("已取消。"); return
 
     if not _provider_auth_ready(provider):
-        _print_provider_auth_required(provider)
-        return
+        if not _interactive_provider_login(provider):
+            _print_provider_auth_required(provider)
+            return
 
     model, base = _choose_provider_model(provider)
     entry = _provider_model_entry(provider, model)
@@ -146,6 +147,28 @@ def _print_provider_auth_required(provider: dict) -> None:
         print("  ivyea model auth qwen-oauth --probe")
     else:
         print(f"  ivyea model auth {pid}")
+
+
+def _interactive_provider_login(provider: dict) -> bool:
+    pid = provider.get("id", "")
+    try:
+        from . import oauth_auth
+        print(ui.message("info", f"{provider.get('label', pid)} 需要先登录，开始认证流程。"))
+        if pid == "openai-codex":
+            oauth_auth.codex_device_code_login(notify=print)
+        elif pid == "google-gemini-cli":
+            oauth_auth.google_oauth_login(open_browser=True, notify=print)
+        elif pid == "qwen-oauth":
+            oauth_auth.qwen_cli_login()
+        elif pid == "copilot":
+            oauth_auth.resolve_copilot_api_token(strict=True)
+        else:
+            return False
+    except oauth_auth.OAuthAuthError as exc:
+        print(ui.message("error", f"认证失败：{exc}"))
+        return False
+    print(ui.message("success", "认证完成，继续选择模型。"))
+    return _provider_auth_ready(provider)
 
 
 def _choose_provider_model(provider: dict) -> tuple[str, str]:
@@ -1558,8 +1581,9 @@ def _cmd_model(args: argparse.Namespace) -> int:
             return 2
         provider = models.provider_by_id(m.get("provider_id", ""))
         if provider and not _provider_auth_ready(provider):
-            _print_provider_auth_required(provider)
-            return 1
+            if not _interactive_provider_login(provider):
+                _print_provider_auth_required(provider)
+                return 1
         cfg.apply_model(m)
         print(f"已切换主脑: {m['label']}"
               f"（{_model_key_label(cfg.load_settings())}）")
