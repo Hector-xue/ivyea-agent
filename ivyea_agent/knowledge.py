@@ -97,11 +97,7 @@ def list_cards() -> list[dict[str, Any]]:
     text = _base().joinpath("index.json").read_text(encoding="utf-8")
     cards = json.loads(text)
     for card in cards:
-        card.setdefault("retrieved_at", card.get("version", ""))
-        card.setdefault("confidence", _confidence(card.get("source_type", "")))
-        card.setdefault("freshness", _freshness(card))
-        card.setdefault("source_quality", _source_quality(card))
-        card.setdefault("scope", "builtin")
+        _enrich_builtin_card(card)
     cards.extend(list_user_cards())
     return cards
 
@@ -110,18 +106,23 @@ def list_builtin_cards() -> list[dict[str, Any]]:
     text = _base().joinpath("index.json").read_text(encoding="utf-8")
     rows = json.loads(text)
     for card in rows:
-        card.setdefault("retrieved_at", card.get("version", ""))
-        card.setdefault("confidence", _confidence(card.get("source_type", "")))
-        card.setdefault("freshness", _freshness(card))
-        card.setdefault("source_quality", _source_quality(card))
-        card.setdefault("license", "amazon_public_docs_summary")
-        card.setdefault("scope", "builtin")
-        try:
-            body = _base().joinpath(card["path"]).read_text(encoding="utf-8")
-            card.setdefault("body_hash", _hash(body))
-        except Exception:
-            card.setdefault("body_hash", "")
+        _enrich_builtin_card(card)
     return rows
+
+
+def _enrich_builtin_card(card: dict[str, Any]) -> dict[str, Any]:
+    card.setdefault("retrieved_at", card.get("version", ""))
+    card.setdefault("confidence", _confidence(card.get("source_type", "")))
+    card.setdefault("freshness", _freshness(card))
+    card.setdefault("source_quality", _source_quality(card))
+    card.setdefault("license", "amazon_public_docs_summary")
+    card.setdefault("scope", "builtin")
+    try:
+        body = _base().joinpath(card["path"]).read_text(encoding="utf-8")
+        card.setdefault("body_hash", _hash(body))
+    except (KeyError, OSError, UnicodeDecodeError):
+        card.setdefault("body_hash", "")
+    return card
 
 
 def list_user_cards() -> list[dict[str, Any]]:

@@ -69,9 +69,13 @@ def test_new_playbooks_chinese_queries():
 def test_knowledge_source_governance_card_and_audit():
     hits = knowledge.search("来源 置信 时效 evidence", limit=5)
     assert any(h["id"] == "governance.source_quality" for h in hits)
+    card = knowledge.get_card("amazon_ads.sponsored_products_targeting")
+    assert card["license"] == "amazon_public_docs_summary"
+    assert card["body_hash"]
     audit = knowledge.render_audit()
     assert "governance.source_quality" in audit
     assert "quality=synthesized_with_official_anchor" in audit
+    assert "license=amazon_public_docs_summary" in audit
 
 
 def test_user_knowledge_import_search_audit_rebuild(ivyea_home, tmp_path):
