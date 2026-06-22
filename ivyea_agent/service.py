@@ -36,6 +36,44 @@ def health() -> dict[str, Any]:
     }
 
 
+def manifest() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "name": "ivyea-agent",
+        "version": __version__,
+        "api_version": "v1",
+        "default_base_url": f"http://{DEFAULT_HOST}:{DEFAULT_PORT}",
+        "security": {
+            "default_bind": DEFAULT_HOST,
+            "remote_bind_requires": "--allow-remote",
+            "secrets_in_responses": False,
+        },
+        "capabilities": {
+            "health": True,
+            "knowledge_search": True,
+            "local_retrieval": retrieval.capabilities(),
+            "task_state": True,
+            "chat": False,
+            "write_execution": False,
+        },
+        "endpoints": [
+            {"method": "GET", "path": "/health", "description": "health, version, model status, knowledge and retrieval summary"},
+            {"method": "GET", "path": "/v1/manifest", "description": "IvyeaOps integration manifest"},
+            {"method": "GET", "path": "/v1/capabilities", "description": "retrieval capabilities"},
+            {"method": "GET", "path": "/v1/model", "description": "current model status without secrets"},
+            {"method": "GET", "path": "/v1/knowledge/search", "description": "query bundled and user knowledge"},
+            {"method": "POST", "path": "/v1/retrieval/search", "description": "unified local retrieval over knowledge and memory"},
+            {"method": "GET", "path": "/v1/tasks", "description": "list tasks"},
+            {"method": "POST", "path": "/v1/tasks", "description": "create task"},
+            {"method": "GET", "path": "/v1/tasks/{id}", "description": "load task detail"},
+            {"method": "POST", "path": "/v1/tasks/{id}/start", "description": "start next task step"},
+            {"method": "POST", "path": "/v1/tasks/{id}/step", "description": "update a task step"},
+            {"method": "POST", "path": "/v1/tasks/{id}/status", "description": "update task status"},
+            {"method": "POST", "path": "/v1/tasks/{id}/log", "description": "append task log"},
+        ],
+    }
+
+
 def task_list(limit: int = 20, status: str = "") -> dict[str, Any]:
     return {"ok": True, "tasks": task_runner.list_tasks(limit=limit, status=status or "")}
 
@@ -87,7 +125,7 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     server = make_server(host, port)
     actual_host, actual_port = server.server_address
     print(f"Ivyea Agent API listening on http://{actual_host}:{actual_port}")
-    print("Endpoints: /health, /v1/capabilities, /v1/knowledge/search, /v1/retrieval/search, /v1/tasks")
+    print("Endpoints: /health, /v1/manifest, /v1/capabilities, /v1/knowledge/search, /v1/retrieval/search, /v1/tasks")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -107,6 +145,9 @@ class _Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         if parsed.path in ("/health", "/v1/health"):
             self._json(200, health())
+            return
+        if parsed.path == "/v1/manifest":
+            self._json(200, manifest())
             return
         if parsed.path == "/v1/capabilities":
             self._json(200, {"ok": True, "retrieval": retrieval.capabilities()})

@@ -56,6 +56,7 @@ ivyea serve --host 127.0.0.1 --port 8765
 当前本地 API 提供：
 
 - `GET /health`：健康检查、版本、模型状态、知识库数量、检索能力。
+- `GET /v1/manifest`：IvyeaOps 集成发现清单，包含 API 版本、端点、能力和安全边界。
 - `GET /v1/capabilities`：本地检索能力说明。
 - `GET /v1/knowledge/search?q=否词&limit=5`：亚马逊知识库检索。
 - `POST /v1/retrieval/search`：统一检索知识库 + 记忆，后续本地向量检索也会挂在这个接口下。

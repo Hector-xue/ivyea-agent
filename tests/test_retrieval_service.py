@@ -52,6 +52,12 @@ def test_service_health_shape_without_socket(ivyea_home):
     assert data["retrieval"]["local"] is True
     assert "key_status" in data["model"]
 
+    manifest = service.manifest()
+    assert manifest["api_version"] == "v1"
+    assert manifest["security"]["secrets_in_responses"] is False
+    assert any(e["path"] == "/v1/retrieval/search" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/tasks" for e in manifest["endpoints"])
+
 
 def test_service_task_api_helpers(ivyea_home):
     from ivyea_agent import service
