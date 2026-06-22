@@ -85,7 +85,7 @@ def test_model_picker_lists_providers_first(ivyea_home, monkeypatch, capsys):
 def test_model_picker_codex_runs_login_before_switch(ivyea_home, monkeypatch, capsys):
     from ivyea_agent import cli, oauth_auth, config
     calls = []
-    answers = iter(["16", "3"])
+    answers = iter(["16", "4"])
     monkeypatch.setattr(cli, "_ask", lambda prompt, default="": next(answers, default))
 
     def fake_login(notify=None):
@@ -290,8 +290,9 @@ def test_cli_model_auth_codex_probe(ivyea_home, monkeypatch, capsys):
     from ivyea_agent import cli, oauth_auth
     oauth_auth.set_auth_token("openai-codex", "secret-token")
 
-    def fake_probe(token, model="gpt-5.3-codex", base_url="", timeout=30.0):
+    def fake_probe(token, model="gpt-5.5", base_url="", timeout=30.0):
         assert token == "secret-token"
+        assert model == "gpt-5.5"
         return {"ok": True, "model": model, "content": "OK", "usage": {"total": 1}}
 
     from ivyea_agent.providers import codex_provider

@@ -443,7 +443,7 @@ def _cmd_model_auth(args: argparse.Namespace, action: str) -> int:
                                                   timeout=getattr(args, "timeout", 30.0) or 30.0)
             elif provider_id == "openai-codex":
                 from .providers.codex_provider import probe_codex
-                result = probe_codex(token, model=provider.get("default_model", "gpt-5.3-codex"),
+                result = probe_codex(token, model=provider.get("default_model", "gpt-5.5"),
                                      base_url=provider.get("base", "https://chatgpt.com/backend-api/codex"),
                                      timeout=getattr(args, "timeout", 30.0) or 30.0)
             elif provider_id == "qwen-oauth":

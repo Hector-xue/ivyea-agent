@@ -16,13 +16,18 @@ class _Resp:
         }
 
 
+class _UnsupportedResp:
+    status_code = 400
+    text = '{"detail":"The model is not supported when using Codex with a ChatGPT account."}'
+
+
 def test_from_settings_builds_codex_provider(ivyea_home):
     from ivyea_agent.providers import from_settings
     p = from_settings({"kind": "oauth", "api_mode": "codex_responses",
-                       "model": "gpt-5.3-codex",
+                       "model": "gpt-5.5",
                        "base_url": "https://chatgpt.com/backend-api/codex"}, "tok")
     assert p.name == "openai-codex"
-    assert p.model == "gpt-5.3-codex"
+    assert p.model == "gpt-5.5"
 
 
 def test_codex_provider_payload_and_response(monkeypatch):
@@ -37,7 +42,7 @@ def test_codex_provider_payload_and_response(monkeypatch):
 
     from ivyea_agent.providers import codex_provider
     monkeypatch.setattr(codex_provider.httpx, "post", fake_post)
-    p = CodexProvider("codex-token", "gpt-5.3-codex", "https://chatgpt.com/backend-api/codex")
+    p = CodexProvider("codex-token", "gpt-5.5", "https://chatgpt.com/backend-api/codex")
     out = p.chat(
         [
             {"role": "system", "content": "sys"},
@@ -113,7 +118,7 @@ def test_codex_provider_stream_chat(monkeypatch):
 
     from ivyea_agent.providers import codex_provider
     monkeypatch.setattr(codex_provider.httpx, "stream", fake_stream)
-    p = CodexProvider("codex-token", "gpt-5.3-codex", "https://chatgpt.com/backend-api/codex")
+    p = CodexProvider("codex-token", "gpt-5.5", "https://chatgpt.com/backend-api/codex")
     events = list(p.stream_chat([{"role": "user", "content": "hi"}]))
     assert captured["method"] == "POST"
     assert captured["url"] == "https://chatgpt.com/backend-api/codex/responses"
@@ -127,8 +132,27 @@ def test_codex_provider_stream_chat(monkeypatch):
 def test_probe_codex(monkeypatch):
     from ivyea_agent.providers import codex_provider
     monkeypatch.setattr(codex_provider.httpx, "post", lambda *a, **k: _Resp())
-    result = codex_provider.probe_codex("codex-token", model="gpt-5.3-codex",
+    result = codex_provider.probe_codex("codex-token", model="gpt-5.5",
                                         base_url="https://chatgpt.com/backend-api/codex")
     assert result["ok"] is True
-    assert result["model"] == "gpt-5.3-codex"
+    assert result["model"] == "gpt-5.5"
     assert result["content"] == "hello"
+
+
+def test_codex_provider_falls_back_from_unsupported_model(monkeypatch):
+    from ivyea_agent.providers.codex_provider import CodexProvider
+    seen = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen.append(json["model"])
+        if json["model"] == "gpt-5.3-codex":
+            return _UnsupportedResp()
+        return _Resp()
+
+    from ivyea_agent.providers import codex_provider
+    monkeypatch.setattr(codex_provider.httpx, "post", fake_post)
+    p = CodexProvider("codex-token", "gpt-5.3-codex", "https://chatgpt.com/backend-api/codex")
+    out = p.chat([{"role": "user", "content": "hi"}])
+    assert seen[:2] == ["gpt-5.3-codex", "gpt-5.5"]
+    assert p.model == "gpt-5.5"
+    assert out["content"] == "hello"

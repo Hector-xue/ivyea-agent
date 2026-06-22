@@ -9,6 +9,8 @@ import httpx
 
 from .base import LLMError, LLMProvider
 
+CODEX_MODEL_FALLBACKS = ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5-codex")
+
 
 def _json_args(raw: Any) -> dict:
     if isinstance(raw, dict):
@@ -49,6 +51,19 @@ def _content_text(content: Any) -> str:
                     parts.append(text)
         return "\n".join(parts)
     return ""
+
+
+def _unsupported_model_error(exc: LLMError) -> bool:
+    text = str(exc).lower()
+    return "model is not supported" in text or "unsupported model" in text
+
+
+def _model_candidates(model: str) -> list[str]:
+    out: list[str] = []
+    for item in [model, *CODEX_MODEL_FALLBACKS]:
+        if item and item not in out:
+            out.append(item)
+    return out
 
 
 def parse_responses_sse(lines: Iterable[str]) -> Iterator[dict]:
@@ -287,41 +302,60 @@ class CodexProvider(LLMProvider):
     def chat(self, messages: list, tools: list | None = None,
              temperature: float = 0.3, timeout: float = 120.0) -> dict:
         instructions, input_items = self._input(messages)
-        payload: dict[str, Any] = {"model": self.model, "input": input_items, "stream": False}
-        if instructions:
-            payload["instructions"] = instructions
         converted_tools = self._tools(tools)
-        if converted_tools:
-            payload["tools"] = converted_tools
-            payload["tool_choice"] = "auto"
-        data = self._post(payload, timeout)
-        return self._normalize(data)
+        last_error: LLMError | None = None
+        for model in _model_candidates(self.model):
+            payload: dict[str, Any] = {"model": model, "input": input_items, "stream": False}
+            if instructions:
+                payload["instructions"] = instructions
+            if converted_tools:
+                payload["tools"] = converted_tools
+                payload["tool_choice"] = "auto"
+            try:
+                data = self._post(payload, timeout)
+            except LLMError as exc:
+                if _unsupported_model_error(exc):
+                    last_error = exc
+                    continue
+                raise
+            self.model = model
+            return self._normalize(data)
+        raise last_error or LLMError("Codex Responses 没有可用模型")
 
     def stream_chat(self, messages: list, tools: list | None = None,
                     temperature: float = 0.3, timeout: float = 120.0):
         if not self.api_key:
             raise LLMError("OpenAI Codex OAuth token 未配置")
         instructions, input_items = self._input(messages)
-        payload: dict[str, Any] = {"model": self.model, "input": input_items, "stream": True}
-        if instructions:
-            payload["instructions"] = instructions
         converted_tools = self._tools(tools)
-        if converted_tools:
-            payload["tools"] = converted_tools
-            payload["tool_choice"] = "auto"
-        try:
-            with httpx.stream("POST", f"{self.base_url}/responses",
-                              headers=self._headers(), json=payload, timeout=timeout) as resp:
-                if resp.status_code >= 400:
-                    body = resp.read().decode("utf-8", "replace")
-                    raise LLMError(f"Codex Responses stream HTTP {resp.status_code}: {body[:200]}")
-                for ev in parse_responses_sse(resp.iter_lines()):
-                    yield ev
-        except httpx.HTTPError as exc:
-            raise LLMError(f"Codex Responses 流式连接失败：{exc}") from exc
+        last_error: LLMError | None = None
+        for model in _model_candidates(self.model):
+            payload: dict[str, Any] = {"model": model, "input": input_items, "stream": True}
+            if instructions:
+                payload["instructions"] = instructions
+            if converted_tools:
+                payload["tools"] = converted_tools
+                payload["tool_choice"] = "auto"
+            try:
+                with httpx.stream("POST", f"{self.base_url}/responses",
+                                  headers=self._headers(), json=payload, timeout=timeout) as resp:
+                    if resp.status_code >= 400:
+                        body = resp.read().decode("utf-8", "replace")
+                        err = LLMError(f"Codex Responses stream HTTP {resp.status_code}: {body[:200]}")
+                        if _unsupported_model_error(err):
+                            last_error = err
+                            continue
+                        raise err
+                    self.model = model
+                    for ev in parse_responses_sse(resp.iter_lines()):
+                        yield ev
+                    return
+            except httpx.HTTPError as exc:
+                raise LLMError(f"Codex Responses 流式连接失败：{exc}") from exc
+        raise last_error or LLMError("Codex Responses 没有可用模型")
 
 
-def probe_codex(api_key: str, *, model: str = "gpt-5.3-codex",
+def probe_codex(api_key: str, *, model: str = "gpt-5.5",
                 base_url: str = "https://chatgpt.com/backend-api/codex",
                 timeout: float = 30.0) -> dict[str, Any]:
     provider = CodexProvider(api_key, model, base_url)
