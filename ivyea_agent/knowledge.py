@@ -12,6 +12,7 @@ import sqlite3
 from importlib import resources
 from pathlib import Path
 import time
+from datetime import datetime
 from typing import Any
 
 from . import config, security
@@ -48,6 +49,9 @@ ALIASES = {
     "高点击": ["clicks", "high clicks"],
     "零单": ["no orders", "0 orders", "no sales"],
     "无订单": ["no orders", "0 orders"],
+    "来源": ["source", "source quality", "confidence", "freshness"],
+    "置信": ["confidence", "source quality"],
+    "时效": ["freshness", "retrieved_at", "version"],
 }
 
 METHODOLOGY = """\
@@ -95,7 +99,8 @@ def list_cards() -> list[dict[str, Any]]:
     for card in cards:
         card.setdefault("retrieved_at", card.get("version", ""))
         card.setdefault("confidence", _confidence(card.get("source_type", "")))
-        card.setdefault("freshness", "reviewed")
+        card.setdefault("freshness", _freshness(card))
+        card.setdefault("source_quality", _source_quality(card))
         card.setdefault("scope", "builtin")
     cards.extend(list_user_cards())
     return cards
@@ -107,7 +112,8 @@ def list_builtin_cards() -> list[dict[str, Any]]:
     for card in rows:
         card.setdefault("retrieved_at", card.get("version", ""))
         card.setdefault("confidence", _confidence(card.get("source_type", "")))
-        card.setdefault("freshness", "reviewed")
+        card.setdefault("freshness", _freshness(card))
+        card.setdefault("source_quality", _source_quality(card))
         card.setdefault("license", "amazon_public_docs_summary")
         card.setdefault("scope", "builtin")
         try:
@@ -133,6 +139,8 @@ def list_user_cards() -> list[dict[str, Any]]:
         card.setdefault("source_type", "user")
         card.setdefault("confidence", _confidence(card.get("source_type", "")))
         card.setdefault("retrieved_at", "")
+        card.setdefault("freshness", _freshness(card))
+        card.setdefault("source_quality", _source_quality(card))
         card.setdefault("license", "user_supplied")
         if not card.get("body_hash"):
             try:
@@ -154,6 +162,42 @@ def _confidence(source_type: str) -> str:
     if source_type == "user":
         return "user_supplied"
     return "unknown"
+
+
+def _source_quality(card: dict[str, Any]) -> str:
+    source_type = str(card.get("source_type") or "")
+    scope = str(card.get("scope") or "")
+    if source_type == "official":
+        return "authoritative"
+    if source_type.startswith("official_plus"):
+        return "synthesized_with_official_anchor"
+    if source_type.startswith("community"):
+        return "directional_requires_account_validation"
+    if scope == "user" or source_type == "user":
+        return "account_local_overrides_generic_knowledge"
+    return "unknown_requires_review"
+
+
+def _freshness(card: dict[str, Any]) -> str:
+    stamp = str(card.get("retrieved_at") or card.get("version") or "").strip()
+    if not stamp:
+        return "undated"
+    parsed = None
+    for fmt in ("%Y-%m-%d", "%Y.%m", "%Y-%m", "%Y"):
+        try:
+            parsed = datetime.strptime(stamp, fmt)
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        return "reviewed"
+    now = datetime.fromtimestamp(time.time())
+    months = (now.year - parsed.year) * 12 + (now.month - parsed.month)
+    if months <= 6:
+        return "current"
+    if months <= 12:
+        return "aging_review_soon"
+    return "stale_needs_review"
 
 
 def get_card(card_id: str) -> dict[str, Any] | None:
@@ -226,7 +270,10 @@ def render_search(query: str, limit: int = 5) -> str:
     lines = []
     for h in hits:
         source = f" · {h['source_url']}" if h.get("source_url") else ""
-        meta = f"{h['source_type']} confidence={h.get('confidence', 'unknown')} retrieved={h.get('retrieved_at', '-')}"
+        meta = (
+            f"{h['source_type']} confidence={h.get('confidence', 'unknown')} "
+            f"freshness={h.get('freshness', '-')} quality={h.get('source_quality', '-')}"
+        )
         lines.append(f"- {h['id']} · {h['title']} [{meta}]{source}\n  {h['snippet']}")
     return "\n".join(lines)
 
@@ -238,6 +285,7 @@ def render_audit() -> str:
         source = card.get("source_url") or "-"
         lines.append(
             f"- {card['id']} | {card.get('scope', 'builtin')} | {card['source_type']} | confidence={card.get('confidence')} | "
+            f"freshness={card.get('freshness')} | quality={card.get('source_quality')} | "
             f"retrieved={card.get('retrieved_at')} | license={card.get('license', '-')} | hash={str(card.get('body_hash', ''))[:12]} | source={source}"
         )
     return "\n".join(lines)
@@ -252,7 +300,11 @@ def context_for_query(query: str, limit: int = 3, max_chars: int = 1200) -> tupl
     ids = []
     for h in hits:
         ids.append(h["id"])
-        lines.append(f"[{h['id']}] {h['title']}: {h['snippet']}")
+        lines.append(
+            f"[{h['id']}] {h['title']} "
+            f"(confidence={h.get('confidence', 'unknown')}, freshness={h.get('freshness', '-')}, "
+            f"quality={h.get('source_quality', '-')})：{h['snippet']}"
+        )
     text = "\n".join(lines)
     if len(text) > max_chars:
         text = text[:max_chars].rstrip() + "\n..."

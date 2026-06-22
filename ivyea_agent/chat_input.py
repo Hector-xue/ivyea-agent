@@ -66,12 +66,12 @@ class ChatInput:
             "frame.border": "ansicyan",
             "hint": "ansibrightblack",
             "prompt": "ansicyan bold",
-            "completion-menu": "bg:#f8fafc #111827",
-            "completion-menu.completion": "bg:#f8fafc #111827",
-            "completion-menu.completion.current": "bg:#d1fae5 #064e3b bold",
-            "completion-menu.meta.completion": "bg:#f8fafc #64748b",
-            "scrollbar.background": "bg:#f8fafc",
-            "scrollbar.button": "bg:#94a3b8",
+            "completion-menu": "#d1d5db",
+            "completion-menu.completion": "#d1d5db",
+            "completion-menu.completion.current": "ansicyan bold",
+            "completion-menu.meta.completion": "ansibrightblack",
+            "scrollbar.background": "ansibrightblack",
+            "scrollbar.button": "ansicyan",
         }
 
     def _read_boxed(self) -> object:

@@ -144,6 +144,20 @@ def append_log(task_id: str, text: str, kind: str = "log") -> dict[str, Any]:
     return _save(task)
 
 
+def record_interruption(task_id: str, reason: str, note: str = "") -> dict[str, Any]:
+    task = load(task_id)
+    text = f"{reason}: {note}".strip(": ")
+    active = next_step(task)
+    if active and active.get("status") in {"pending", "in_progress"}:
+        active["status"] = "blocked"
+        if note:
+            active["notes"] = security.redact_text(note)
+    if task.get("status") not in {"completed", "cancelled"}:
+        task["status"] = "blocked"
+    add_event(task, "interrupted", text)
+    return _save(task)
+
+
 def progress(task: dict[str, Any]) -> dict[str, int]:
     steps = task.get("steps") or []
     total = len(steps)

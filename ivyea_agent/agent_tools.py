@@ -28,6 +28,7 @@ class ToolContext:
     perm: permission.PermissionState = field(default_factory=permission.PermissionState)
     session_id: str = ""                                   # 用于运行时间线
     turn_id: str = ""                                      # 当前用户轮次
+    task_id: str = ""                                      # 绑定长任务，用于自动记录续跑/阻塞点
 
 
 # OpenAI function-calling schema

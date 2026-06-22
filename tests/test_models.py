@@ -275,6 +275,31 @@ def test_cli_model_auth_copilot_probe(ivyea_home, monkeypatch, capsys):
     assert "secret-token" not in out
 
 
+def test_cli_model_auth_qwen_probe(ivyea_home, monkeypatch, capsys):
+    from argparse import Namespace
+    from ivyea_agent import cli, oauth_auth
+    oauth_auth.set_auth_token("qwen-oauth", "secret-token")
+
+    def fake_probe(token, model="qwen3.7-max", base_url="", timeout=30.0):
+        assert token == "secret-token"
+        assert "qwen" in model
+        assert "portal.qwen.ai" in base_url
+        return {"ok": True, "model": model, "content": "OK", "usage": {"total_tokens": 1}}
+
+    from ivyea_agent.providers import openai_compat
+    monkeypatch.setattr(openai_compat, "probe_openai_compat", fake_probe)
+    rc = cli._cmd_model(Namespace(spec="auth", extra="qwen-oauth", token=None,
+                                  refresh_token=None, expires_at=0, project=None,
+                                  probe=True, timeout=5.0,
+                                  refresh=False, login=False, no_browser=False,
+                                  device_code=False, exchange=False,
+                                  import_qwen_cli=False))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "qwen-oauth probe 成功" in out
+    assert "secret-token" not in out
+
+
 def test_cli_model_auth_login_qwen(ivyea_home, monkeypatch, capsys):
     from argparse import Namespace
     from ivyea_agent import cli, oauth_auth

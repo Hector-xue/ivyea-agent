@@ -82,6 +82,7 @@ EOF
   if ! command -v ivyea >/dev/null 2>&1; then
     say "提示：重开终端，或先执行  export PATH=\"$bin_dir:\$PATH\""
   fi
+  "$launcher" self doctor || true
   say "下一步：  ivyea config   （配置主脑模型/密钥），然后  ivyea chat"
 }
 
@@ -168,5 +169,7 @@ pipx install --force "${PIPX_ARGS[@]}" "$SPEC"
 say "✓ 安装完成。"
 if ! command -v ivyea >/dev/null 2>&1; then
   say "提示：重开终端，或先执行  export PATH=\"\$HOME/.local/bin:\$PATH\""
+else
+  ivyea self doctor || true
 fi
 say "下一步：  ivyea config   （配置主脑模型/密钥），然后  ivyea chat"

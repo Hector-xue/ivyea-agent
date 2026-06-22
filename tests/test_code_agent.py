@@ -133,8 +133,30 @@ FAILED tests/test_calc.py::test_add - AssertionError: expected sum
     assert repair["failure_count"] == 1
     assert "tests/test_calc.py" in repair["likely_files"]
     assert "pkg/calc.py" in repair["likely_files"]
+    assert repair["failure_summary"][0]["kind"] == "assertion"
+    assert repair["failure_summary"][0]["rerun"] == "python -m pytest tests/test_calc.py::test_add"
+    assert repair["focused_tests"] == ["python -m pytest tests/test_calc.py::test_add"]
+    assert repair["repair_loop"]
     assert "Code Repair Plan" in code_agent.render_repair(repair)
     assert "exception: AssertionError" in code_agent.render_repair(repair)
+    assert "Failure Summary" in code_agent.render_repair(repair)
+    assert "Focused Tests" in code_agent.render_repair(repair)
+
+
+def test_repair_plan_classifies_import_and_syntax_failures(tmp_path, monkeypatch):
+    root = _make_project(tmp_path, monkeypatch)
+    output = """
+________________________ ERROR collecting tests/test_calc.py ________________________
+E   ModuleNotFoundError: No module named 'pkg.missing'
+=========================== short test summary info ============================
+ERROR tests/test_calc.py - ModuleNotFoundError: No module named 'pkg.missing'
+FAILED tests/test_calc.py::test_syntax - SyntaxError: invalid syntax
+"""
+    repair = code_agent.repair_plan(output, root=root)
+    kinds = {item["nodeid"]: item["kind"] for item in repair["failure_summary"]}
+    assert kinds["tests/test_calc.py"] == "import"
+    assert kinds["tests/test_calc.py::test_syntax"] == "syntax"
+    assert "python -m pytest tests/test_calc.py::test_syntax" in repair["focused_tests"]
 
 
 def test_code_impact_maps_symbol_to_callers_and_tests(tmp_path, monkeypatch):

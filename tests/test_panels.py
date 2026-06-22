@@ -104,8 +104,9 @@ def test_ui_tool_call_step_and_stage_no_color():
     assert "Code" in stage and "计划" in stage
 
 
-def test_chat_input_style_uses_light_completion_menu():
+def test_chat_input_style_avoids_block_backgrounds():
     from ivyea_agent.chat_input import ChatInput
     styles = ChatInput._style_dict()
-    assert styles["completion-menu.completion"].startswith("bg:#f8fafc")
-    assert "bg:#1f2937" not in " ".join(styles.values())
+    combined = " ".join(styles.values())
+    assert "bg:" not in combined
+    assert styles["completion-menu.completion.current"] == "ansicyan bold"

@@ -36,6 +36,15 @@
     "tags": ["community", "forum", "operator-experience", "intake"]
   },
   {
+    "id": "governance.source_quality",
+    "title": "Knowledge source quality and freshness governance",
+    "category": "governance",
+    "source_type": "official_plus_operator_consensus",
+    "version": "2026.06",
+    "path": "governance/source_quality.md",
+    "tags": ["source-quality", "confidence", "freshness", "evidence", "governance"]
+  },
+  {
     "id": "playbook.search_term_lifecycle",
     "title": "Search term lifecycle: discover, validate, harvest, scale, suppress",
     "category": "playbook",

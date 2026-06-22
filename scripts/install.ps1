@@ -38,6 +38,7 @@ function Install-FromWheelhouse($wheel, $wheelhouse) {
 
   Info "✓ 离线安装完成。"
   Info "如果 ivyea 不能直接执行，把这个目录加入 PATH：$binDir"
+  & $launcher self doctor
   Info "下一步：ivyea config，然后 ivyea chat"
 }
 
@@ -111,4 +112,9 @@ $pipxArgs += $spec
 & $py -m pipx @pipxArgs
 
 Info "✓ 安装完成。重开 PowerShell 后："
+try {
+  & $py -m ivyea_agent.cli self doctor
+} catch {
+  Info "安装后诊断未运行：$($_.Exception.Message)"
+}
 Info "  ivyea config   然后  ivyea chat"

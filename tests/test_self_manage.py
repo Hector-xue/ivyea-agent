@@ -10,6 +10,12 @@ def test_self_status_and_plans():
     assert info["version"]
     assert "Ivyea Self Status" in self_manage.render_status(info)
 
+    doctor = self_manage.install_doctor(info)
+    assert "checks" in doctor and doctor["next_steps"]
+    rendered_doctor = self_manage.render_doctor(doctor)
+    assert "Ivyea Install Doctor" in rendered_doctor
+    assert "python" in rendered_doctor
+
     upgrade = self_manage.upgrade_plan(version="v1.2.3", method="pipx")
     assert upgrade["action"] == "upgrade"
     assert "v1.2.3" in upgrade["commands"][0]
@@ -39,6 +45,9 @@ def test_self_cli_dry_run_and_backup(ivyea_home, capsys):
 
     assert main(["self", "status"]) == 0
     assert "Ivyea Self Status" in capsys.readouterr().out
+
+    assert main(["self", "doctor"]) == 0
+    assert "Ivyea Install Doctor" in capsys.readouterr().out
 
     assert main(["self", "upgrade", "--method", "pipx", "--version", "v1.2.3"]) == 0
     out = capsys.readouterr().out

@@ -37,6 +37,79 @@ def install_info() -> dict[str, Any]:
     }
 
 
+def install_doctor(info: dict[str, Any] | None = None) -> dict[str, Any]:
+    info = info or install_info()
+    checks: list[dict[str, Any]] = []
+
+    version_ok = sys.version_info >= (3, 9)
+    checks.append({
+        "name": "python",
+        "status": "ok" if version_ok else "fail",
+        "detail": f"{sys.version.split()[0]} at {info.get('python')}",
+        "fix": "安装 Python 3.9+；Windows 安装时勾选 Add Python to PATH。" if not version_ok else "",
+    })
+
+    ivyea_bin = info.get("ivyea_bin") or ""
+    checks.append({
+        "name": "ivyea command",
+        "status": "ok" if ivyea_bin else "warn",
+        "detail": ivyea_bin or "当前 shell 找不到 ivyea",
+        "fix": _path_fix(info) if not ivyea_bin else "",
+    })
+
+    ivyea_dir = Path(str(info.get("ivyea_dir") or config.IVYEA_DIR)).expanduser()
+    try:
+        ivyea_dir.mkdir(parents=True, exist_ok=True)
+        probe = ivyea_dir / ".write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        data_status, data_detail, data_fix = "ok", str(ivyea_dir), ""
+    except OSError as exc:
+        data_status, data_detail, data_fix = "fail", f"{ivyea_dir}: {exc}", "检查目录权限，或设置 IVYEA_HOME 到可写目录。"
+    checks.append({"name": "data dir", "status": data_status, "detail": data_detail, "fix": data_fix})
+
+    checks.append({
+        "name": "install method",
+        "status": "ok" if info.get("method") != "unknown" else "warn",
+        "detail": str(info.get("method") or "unknown"),
+        "fix": "建议使用一键安装脚本或 pipx，便于升级和卸载。" if info.get("method") == "unknown" else "",
+    })
+
+    optional = []
+    for module, label, fix in [
+        ("pandas", "pandas reports", "需要表格分析时安装：python -m pip install pandas openpyxl"),
+        ("PIL", "image audit", "需要图片尺寸/格式分析时安装：python -m pip install pillow"),
+    ]:
+        try:
+            __import__(module)
+            optional.append({"name": label, "status": "ok", "detail": module, "fix": ""})
+        except ImportError:
+            optional.append({"name": label, "status": "warn", "detail": f"{module} not installed", "fix": fix})
+    checks.extend(optional)
+
+    ok = all(c["status"] != "fail" for c in checks)
+    return {"ok": ok, "info": info, "checks": checks, "next_steps": _doctor_next_steps(checks)}
+
+
+def _path_fix(info: dict[str, Any]) -> str:
+    if sys.platform.startswith("win"):
+        candidate = str(Path.home() / ".ivyea" / "bin")
+        return f"重开 PowerShell；仍不可用时把 {candidate} 加入用户 PATH。"
+    candidate = str(Path.home() / ".local" / "bin")
+    return f"重开终端，或先执行：export PATH=\"{candidate}:$PATH\""
+
+
+def _doctor_next_steps(checks: list[dict[str, Any]]) -> list[str]:
+    steps = []
+    if any(c["status"] == "fail" for c in checks):
+        steps.append("先处理 fail 项，再重新运行 `ivyea self doctor`。")
+    if any(c["name"] == "ivyea command" and c["status"] != "ok" for c in checks):
+        steps.append("修复 PATH 后重开终端，确认 `ivyea --help` 能执行。")
+    steps.append("首次使用运行 `ivyea config` 选择模型并配置密钥。")
+    steps.append("配置完成后运行 `ivyea doctor` 或 `ivyea chat` 验证。")
+    return steps
+
+
 def upgrade_plan(version: str = "latest", ref: str = "", method: str = "") -> dict[str, Any]:
     info = install_info()
     chosen = method or info["method"]
@@ -131,6 +204,25 @@ def render_status(info: dict[str, Any] | None = None) -> str:
         f"- ivyea_dir: {info.get('ivyea_dir')}",
         f"- pipx: {info.get('pipx') or '-'}",
     ])
+
+
+def render_doctor(data: dict[str, Any]) -> str:
+    lines = [
+        "Ivyea Install Doctor",
+        "",
+        f"- ok: {data.get('ok')}",
+        f"- platform: {(data.get('info') or {}).get('platform')}",
+        f"- method: {(data.get('info') or {}).get('method')}",
+    ]
+    lines.extend(["", "Checks"])
+    for check in data.get("checks") or []:
+        fix = f" | fix: {check.get('fix')}" if check.get("fix") else ""
+        lines.append(f"- {check.get('status')} {check.get('name')}: {check.get('detail')}{fix}")
+    steps = data.get("next_steps") or []
+    if steps:
+        lines.extend(["", "Next Steps"])
+        lines.extend(f"{i}. {step}" for i, step in enumerate(steps, start=1))
+    return "\n".join(lines)
 
 
 def render_plan(plan: dict[str, Any]) -> str:

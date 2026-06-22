@@ -151,3 +151,27 @@ def test_mcp_doctor(ivyea_home, capsys):
     args = parser.parse_args(["mcp", "doctor"])
     assert args.func(args) == 1
     assert "missing_url" in capsys.readouterr().out
+
+
+def test_mcp_doctor_security_hints():
+    from ivyea_agent import mcp_status, mcp_write
+
+    row = mcp_status.check_server("plain", {
+        "transport": "http",
+        "url": "http://mcp.example",
+        "headers": {"Authorization": "Bearer abcdefghijklmnopqrstuvwxyz"},
+    })
+    assert not row["ok"]
+    assert "auth_over_plain_http" in row["security"]
+    assert any("https" in tip for tip in row["suggestions"])
+
+    missing = mcp_status.check_server("local", {"transport": "stdio", "command": "definitely-missing-mcp-bin"})
+    assert not missing["ok"]
+    assert "stdio_command_not_found" in missing["security"]
+
+    writer = mcp_status.check_server("writer", {"transport": "http", "url": "https://mcp.example", **mcp_write.WRITE_ACTIONS_TEMPLATE})
+    assert writer["ok"]
+    assert any("--execute" in tip for tip in writer["suggestions"])
+    rendered = mcp_status.render([row, writer])
+    assert "security=auth_over_plain_http" in rendered
+    assert "writeActions 已配置" in rendered

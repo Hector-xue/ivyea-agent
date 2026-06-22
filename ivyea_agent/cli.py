@@ -337,8 +337,8 @@ def _cmd_model_auth(args: argparse.Namespace, action: str) -> int:
         if not getattr(args, "probe", False):
             return 0
     if getattr(args, "probe", False):
-        if provider_id not in ("google-gemini-cli", "openai-codex", "copilot"):
-            print("--probe 目前支持 google-gemini-cli / openai-codex / copilot", file=sys.stderr)
+        if provider_id not in ("google-gemini-cli", "openai-codex", "copilot", "qwen-oauth"):
+            print("--probe 目前支持 google-gemini-cli / openai-codex / copilot / qwen-oauth", file=sys.stderr)
             return 2
         token = oauth_auth.resolve_provider_token(provider_id, provider.get("key_env", ""), refresh=True)
         if not token:
@@ -355,6 +355,11 @@ def _cmd_model_auth(args: argparse.Namespace, action: str) -> int:
                 result = probe_codex(token, model=provider.get("default_model", "gpt-5.3-codex"),
                                      base_url=provider.get("base", "https://chatgpt.com/backend-api/codex"),
                                      timeout=getattr(args, "timeout", 30.0) or 30.0)
+            elif provider_id == "qwen-oauth":
+                from .providers.openai_compat import probe_openai_compat
+                result = probe_openai_compat(token, model=provider.get("default_model", "qwen3.7-max"),
+                                             base_url=provider.get("base", "https://portal.qwen.ai/v1"),
+                                             timeout=getattr(args, "timeout", 30.0) or 30.0)
             else:
                 from .providers.copilot_provider import probe_copilot
                 result = probe_copilot(token, model=provider.get("default_model", "gpt-4o"),
@@ -368,6 +373,8 @@ def _cmd_model_auth(args: argparse.Namespace, action: str) -> int:
                     print(f"排查：{hint}", file=sys.stderr)
             elif provider_id == "openai-codex":
                 print("排查：确认 Codex device-code 登录未失效、账号具备 Codex 访问权限，并尝试 `ivyea model auth openai-codex --refresh`。", file=sys.stderr)
+            elif provider_id == "qwen-oauth":
+                print("排查：确认 Qwen CLI/Portal token 未失效，或尝试 `ivyea model auth qwen-oauth --refresh` / `--import-qwen-cli`。", file=sys.stderr)
             else:
                 print("排查：确认 GH_TOKEN/GITHUB_TOKEN 可用于 Copilot，classic PAT(ghp_*) 不支持；可先运行 `ivyea model auth copilot --exchange`。", file=sys.stderr)
             return 1
@@ -399,6 +406,8 @@ def _cmd_model_auth(args: argparse.Namespace, action: str) -> int:
         print("  ivyea model auth qwen-oauth --import-qwen-cli")
         print("已有 refresh token 时可手动刷新：")
         print("  ivyea model auth qwen-oauth --refresh")
+        print("验证 Qwen Portal chat/completions 是否真实可用：")
+        print("  ivyea model auth qwen-oauth --probe")
         print("也可以设置环境变量 QWEN_API_KEY，优先级高于 auth.json。")
         return 0
     if provider_id == "openai-codex":
@@ -1166,7 +1175,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
     ctx = agent_tools.ToolContext(
         from_mcp=args.from_mcp, execute=args.execute, workspace=os.getcwd(),
-        protected=[w for w in (args.protected or "").split(",") if w.strip()])
+        protected=[w for w in (args.protected or "").split(",") if w.strip()],
+        task_id=getattr(args, "task_id", "") or "")
     if getattr(args, "asin", None):
         ctx.asin = args.asin
     meter = pricing.UsageMeter()
@@ -1653,6 +1663,9 @@ def _cmd_self(args: argparse.Namespace) -> int:
 
     if args.action == "status":
         print(self_manage.render_status())
+        return 0
+    if args.action == "doctor":
+        print(self_manage.render_doctor(self_manage.install_doctor()))
         return 0
     if args.action == "backup":
         path = self_manage.backup(args.output)
@@ -2585,8 +2598,8 @@ def build_parser() -> argparse.ArgumentParser:
     pdoc = sub.add_parser("doctor", help="环境体检：配置、依赖、知识库、磁盘、领星/MCP")
     pdoc.set_defaults(func=_cmd_doctor)
 
-    pself = sub.add_parser("self", help="安装生命周期：status/backup/upgrade/uninstall")
-    pself.add_argument("action", choices=["status", "backup", "upgrade", "uninstall"])
+    pself = sub.add_parser("self", help="安装生命周期：status/doctor/backup/upgrade/uninstall")
+    pself.add_argument("action", choices=["status", "doctor", "backup", "upgrade", "uninstall"])
     pself.add_argument("--output", help="backup 输出路径")
     pself.add_argument("--version", help="upgrade 固定版本，如 v0.5.5")
     pself.add_argument("--ref", help="upgrade 指定 git ref")
@@ -2871,12 +2884,12 @@ def build_parser() -> argparse.ArgumentParser:
     pmo.add_argument("--refresh-token", help="为 OAuth provider 保存 refresh token（可选）")
     pmo.add_argument("--expires-at", type=float, default=0, help="access token 过期时间戳（可选）")
     pmo.add_argument("--project", help="为 google-gemini-cli 保存 Google Cloud project id")
-    pmo.add_argument("--probe", action="store_true", help="真实探测 provider 是否可用（目前支持 google-gemini-cli）")
+    pmo.add_argument("--probe", action="store_true", help="真实探测 provider 是否可用（支持 Gemini/Codex/Copilot/Qwen）")
     pmo.add_argument("--timeout", type=float, default=30.0, help="auth probe 超时时间（秒）")
-    pmo.add_argument("--refresh", action="store_true", help="刷新 OAuth access token（支持 qwen-oauth/openai-codex）")
-    pmo.add_argument("--login", action="store_true", help="运行浏览器 OAuth 登录（目前支持 google-gemini-cli）")
+    pmo.add_argument("--refresh", action="store_true", help="刷新 OAuth access token（支持 qwen-oauth/openai-codex/google-gemini-cli）")
+    pmo.add_argument("--login", action="store_true", help="运行浏览器/外部 OAuth 登录（支持 google-gemini-cli/qwen-oauth）")
     pmo.add_argument("--no-browser", action="store_true", help="OAuth 登录时不自动打开浏览器，改为手动粘贴 callback URL/code")
-    pmo.add_argument("--device-code", action="store_true", help="运行 OAuth device-code 登录（目前支持 openai-codex）")
+    pmo.add_argument("--device-code", action="store_true", help="运行 OAuth device-code 登录（支持 openai-codex/qwen-oauth）")
     pmo.add_argument("--exchange", action="store_true", help="验证并换取短期 API token（目前支持 copilot）")
     pmo.add_argument("--import-qwen-cli", action="store_true", help="从 ~/.qwen/oauth_creds.json 导入 qwen-oauth 凭证")
     pmo.set_defaults(func=_cmd_model)
@@ -2919,6 +2932,7 @@ def build_parser() -> argparse.ArgumentParser:
     pch.add_argument("--execute", action="store_true", help="允许真实写（默认 dry-run）")
     pch.add_argument("--asin", help="本轮对话使用的 ASIN 画像")
     pch.add_argument("--protected", help="保护词清单，逗号分隔")
+    pch.add_argument("--task-id", help="绑定已有 `ivyea task` 长任务；工具上限/中断会自动写入任务日志")
     pch.add_argument("--resume", nargs="?", const=True, help="续接会话：留空=最近一个，或指定会话ID")
     pch.add_argument("--continue", dest="cont", action="store_true", help="续接最近一个会话")
     pch.add_argument("--raw", action="store_true", help="原始流式输出（默认 Markdown 渲染）")

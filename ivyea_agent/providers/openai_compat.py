@@ -172,3 +172,26 @@ class OpenAICompatProvider(LLMProvider):
                 time.sleep(_backoff(attempt))
                 continue
             raise LLMError(last)
+
+
+def probe_openai_compat(token: str, *, model: str, base_url: str, timeout: float = 30.0) -> dict[str, Any]:
+    """Run a minimal live chat/completions request for OpenAI-compatible providers."""
+    if not token:
+        raise LLMError("token 未配置")
+    provider = OpenAICompatProvider(token, model=model, base_url=base_url)
+    data = provider._post({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "Reply with OK only."},
+            {"role": "user", "content": "ping"},
+        ],
+        "temperature": 0,
+        "stream": False,
+    }, timeout)
+    msg = (data.get("choices") or [{}])[0].get("message", {}) or {}
+    return {
+        "ok": True,
+        "model": model,
+        "content": (msg.get("content") or "").strip(),
+        "usage": data.get("usage") or {},
+    }

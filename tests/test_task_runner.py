@@ -54,3 +54,14 @@ def test_set_status_and_errors(tmp_path, monkeypatch):
         assert "未知任务状态" in str(e)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_record_interruption_blocks_active_step(tmp_path, monkeypatch):
+    monkeypatch.setattr(task_runner, "TASK_DIR", tmp_path / "tasks")
+    task = task_runner.create("Long run", steps=["inspect", "patch"])
+    task = task_runner.start_next(task["id"])
+    task = task_runner.record_interruption(task["id"], "tool_step_limit", "继续时不要重复")
+    assert task["status"] == "blocked"
+    assert task["steps"][0]["status"] == "blocked"
+    assert "不要重复" in task["steps"][0]["notes"]
+    assert task["events"][-1]["kind"] == "interrupted"

@@ -9,9 +9,10 @@ from __future__ import annotations
 import re
 
 _B, _DIM, _IT, _UND, _X = "\033[1m", "\033[2m", "\033[3m", "\033[4m", "\033[0m"
-_CY, _GR, _YE, _MG = "\033[36m", "\033[32m", "\033[33m", "\033[35m"
+_CY, _GR, _YE, _MG, _FG = "\033[36m", "\033[32m", "\033[33m", "\033[35m", "\033[37m"
 
-_CODE_BG = "\033[48;5;236m\033[37m"  # 灰底浅字
+_CODE = f"{_FG}{_DIM}"
+_CODE_BAR = f"{_DIM}│{_X}"
 
 
 def _inline(s: str) -> str:
@@ -19,7 +20,7 @@ def _inline(s: str) -> str:
     holds: list[str] = []
 
     def _stash(m):
-        holds.append(f"{_CODE_BG} {m.group(1)} {_X}")
+        holds.append(f"{_CODE}{m.group(1)}{_X}")
         return f"\x00{len(holds)-1}\x00"
 
     s = re.sub(r"`([^`]+)`", _stash, s)
@@ -98,7 +99,7 @@ def _render(md: str) -> str:
             in_code = not in_code
             continue
         if in_code:
-            out.append(f"{_CODE_BG}  {ln:<60}{_X}")
+            out.append(f"{_CODE_BAR} {_CODE}{ln}{_X}")
             continue
         if "|" in ln and ln.strip().startswith("|"):
             table_buf.append(ln)

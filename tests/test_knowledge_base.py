@@ -12,8 +12,11 @@ def test_list_and_get_cards():
     assert "playbook.launch_maturity_strategy" in ids
     assert "playbook.report_driven_optimization" in ids
     assert "playbook.content_conversion_assets" in ids
+    assert "governance.source_quality" in ids
     card = knowledge.get_card("amazon_ads.sponsored_products_targeting")
     assert card and "Negative targeting" in card["body"]
+    assert card["freshness"] in {"current", "reviewed"}
+    assert card["source_quality"] == "authoritative"
 
 
 def test_search_knowledge():
@@ -40,6 +43,7 @@ def test_context_for_query_compact():
     assert text and ids
     assert len(text) <= 404
     assert any("negative" in i or "playbook" in i for i in ids)
+    assert "confidence=" in text and "freshness=" in text
 
 
 def test_agent_knowledge_tool_registered():
@@ -59,6 +63,15 @@ def test_new_playbooks_chinese_queries():
     rendered = knowledge.render_search("素材 A+ 转化 listing", limit=5)
     assert "playbook.content_conversion_assets" in rendered
     assert "https://sell.amazon.com/tools/a-content" in rendered
+    assert "freshness=" in rendered and "quality=" in rendered
+
+
+def test_knowledge_source_governance_card_and_audit():
+    hits = knowledge.search("来源 置信 时效 evidence", limit=5)
+    assert any(h["id"] == "governance.source_quality" for h in hits)
+    audit = knowledge.render_audit()
+    assert "governance.source_quality" in audit
+    assert "quality=synthesized_with_official_anchor" in audit
 
 
 def test_user_knowledge_import_search_audit_rebuild(ivyea_home, tmp_path):

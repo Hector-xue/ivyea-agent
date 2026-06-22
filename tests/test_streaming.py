@@ -115,7 +115,56 @@ def test_run_turn_stream_uses_configured_tool_step_limit(ivyea_home):
     config.set_setting("chat_max_tool_steps", 2)
     ctx = agent_tools.ToolContext()
     msgs = [{"role": "system", "content": "x"}, {"role": "user", "content": "一直查"}]
+    notes = []
     out = agent_loop.run_turn_stream(_AlwaysToolProvider(), ctx, msgs,
-                                     render=lambda s: None, narrate=lambda s: None)
+                                     render=lambda s: None, narrate=notes.append)
     assert "工具调用步数上限 2" in out["text"]
+    assert "不要重复已经成功的工具调用" in out["text"]
     assert out["usage"]["prompt_tokens"] == 2
+    assert msgs[-1]["role"] == "assistant"
+    assert "最后一个未完成的小步骤" in msgs[-1]["content"]
+    assert any("工具预算剩余" in n for n in notes)
+
+
+def test_run_turn_stream_records_limit_trace(ivyea_home):
+    from ivyea_agent import agent_loop, agent_tools, traces
+    ctx = agent_tools.ToolContext(session_id="sid-1")
+    ctx.turn_id = "turn-1"
+    msgs = [{"role": "system", "content": "x"}, {"role": "user", "content": "一直查"}]
+    out = agent_loop.run_turn_stream(_AlwaysToolProvider(), ctx, msgs,
+                                     max_steps=1, render=lambda s: None, narrate=lambda s: None)
+    assert "工具调用步数上限 1" in out["text"]
+    recent = traces.recent(limit=5, session_id="sid-1")
+    assert any(r["event"] == "turn_limit" and r["name"] == "tool_steps" for r in recent)
+
+
+class _AlwaysToolChatProvider:
+    def chat(self, messages, tools=None, temperature=0.3, timeout=120.0):
+        return {"content": "", "tool_calls": [{"id": f"c{len(messages)}", "name": "recall", "arguments": {"query": "x"}}]}
+
+
+def test_run_turn_non_stream_limit_adds_resume_context(ivyea_home):
+    from ivyea_agent import agent_loop, agent_tools
+    ctx = agent_tools.ToolContext()
+    msgs = [{"role": "system", "content": "x"}, {"role": "user", "content": "一直查"}]
+    notes = []
+    out = agent_loop.run_turn(_AlwaysToolChatProvider(), ctx, msgs, max_steps=1, narrate=notes.append)
+    assert "工具调用步数上限 1" in out
+    assert msgs[-1]["role"] == "assistant"
+    assert "不要重复已经成功的工具调用" in msgs[-1]["content"]
+    assert any("工具预算剩余" in n for n in notes)
+
+
+def test_run_turn_stream_limit_updates_bound_task(ivyea_home, tmp_path, monkeypatch):
+    from ivyea_agent import agent_loop, agent_tools, task_runner
+    monkeypatch.setattr(task_runner, "TASK_DIR", tmp_path / "tasks")
+    task = task_runner.create("Long agent task", steps=["inspect", "finish"])
+    task_runner.start_next(task["id"])
+    ctx = agent_tools.ToolContext(task_id=task["id"])
+    msgs = [{"role": "system", "content": "x"}, {"role": "user", "content": "一直查"}]
+    agent_loop.run_turn_stream(_AlwaysToolProvider(), ctx, msgs,
+                               max_steps=1, render=lambda s: None, narrate=lambda s: None)
+    saved = task_runner.load(task["id"])
+    assert saved["status"] == "blocked"
+    assert saved["steps"][0]["status"] == "blocked"
+    assert any(ev["kind"] == "interrupted" for ev in saved["events"])

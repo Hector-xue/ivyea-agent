@@ -23,12 +23,14 @@ def test_inline_code_and_list():
     assert "•" in out                                   # 列表项变圆点
     assert "`" not in out
     assert "ivyea patrol" in _plain(out)
+    assert "48;5" not in out and "bg:" not in out
 
 
 def test_code_block():
     out = markdown.render("```bash\nivyea lingxing probe\n```")
     assert "ivyea lingxing probe" in _plain(out)
     assert "```" not in out
+    assert "48;5" not in out
 
 
 def test_table():

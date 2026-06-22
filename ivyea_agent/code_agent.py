@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -426,7 +427,7 @@ def parse_pytest_output(text: str) -> dict[str, Any]:
     failures: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     for line in (text or "").splitlines():
-        failed = re.match(r"FAILED\s+(.+?)(?:\s+-\s+(.+))?$", line.strip())
+        failed = re.match(r"(?:FAILED|ERROR)\s+(.+?)(?:\s+-\s+(.+))?$", line.strip())
         if failed:
             nodeid = failed.group(1)
             current = _ensure_failure(failures, nodeid)
@@ -458,6 +459,7 @@ def parse_pytest_output(text: str) -> dict[str, Any]:
 
 
 def _ensure_failure(failures: list[dict[str, Any]], nodeid: str) -> dict[str, Any]:
+    nodeid = re.sub(r"^ERROR\s+collecting\s+", "", nodeid).strip()
     for failure in failures:
         if failure.get("nodeid") == nodeid:
             return failure
@@ -492,6 +494,86 @@ def _set_exception(failure: dict[str, Any], line: str) -> None:
     failure["exception"] = match.group(2) or text
 
 
+def _failure_kind(failure: dict[str, Any]) -> str:
+    text = " ".join([
+        failure.get("exception_type", ""),
+        failure.get("exception", ""),
+        failure.get("reason", ""),
+        failure.get("source", ""),
+        " ".join(failure.get("errors", [])[:5]),
+    ]).lower()
+    exc = (failure.get("exception_type") or "").lower()
+    if "syntaxerror" in exc or "indentationerror" in exc:
+        return "syntax"
+    if "modulenotfounderror" in exc or "importerror" in exc or "cannot import name" in text:
+        return "import"
+    if "assertionerror" in exc or "assert " in text or "assertionerror" in text:
+        return "assertion"
+    if "typeerror" in exc:
+        return "type"
+    if "keyerror" in exc or "indexerror" in exc:
+        return "data-shape"
+    if "filenotfounderror" in exc:
+        return "missing-file"
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "permissionerror" in exc:
+        return "permission"
+    return "unknown"
+
+
+def _kind_action(kind: str) -> str:
+    actions = {
+        "assertion": "对照失败断言和业务期望，优先修生产代码；只有期望已变化时才调整测试。",
+        "import": "检查模块路径、导出符号和可选依赖，不要用宽泛 except 掩盖真实导入失败。",
+        "syntax": "先修复语法/缩进，让测试能够收集，再进入行为修复。",
+        "type": "沿调用链核对入参、返回值和 None 分支，补最小防御或接口兼容。",
+        "data-shape": "核对字典/列表结构和边界输入，补缺省值或上游数据校验。",
+        "missing-file": "确认 fixture、路径基准和生成文件流程，避免写死本机绝对路径。",
+        "timeout": "定位阻塞 IO、死循环或过宽测试范围，先做最小复现再扩大回归。",
+        "permission": "检查写入目录和命令权限，优先改到项目可写路径或显式配置。",
+        "unknown": "先保留完整失败输出，按 nodeid、frame、source 三条线索定位最小修改点。",
+    }
+    return actions.get(kind, actions["unknown"])
+
+
+def _focused_tests(parsed: dict[str, Any], limit: int = 6) -> list[str]:
+    commands: list[str] = []
+    seen: set[str] = set()
+    for failure in parsed.get("failures") or []:
+        nodeid = str(failure.get("nodeid") or "")
+        if not nodeid or not nodeid.endswith(".py") and ".py::" not in nodeid:
+            continue
+        command = "python -m pytest " + shlex.quote(nodeid)
+        if command not in seen:
+            seen.add(command)
+            commands.append(command)
+        if len(commands) >= limit:
+            break
+    return commands
+
+
+def _failure_summary(parsed: dict[str, Any], likely_files: list[str]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for failure in parsed.get("failures") or []:
+        kind = _failure_kind(failure)
+        rerun = _focused_tests({"failures": [failure]}, limit=1)
+        frame_files = [
+            frame.get("path", "")
+            for frame in failure.get("frames", []) or []
+            if frame.get("path")
+        ]
+        summaries.append({
+            "nodeid": failure.get("nodeid", ""),
+            "kind": kind,
+            "exception_type": failure.get("exception_type", ""),
+            "likely_files": _merge_paths([failure.get("path", "")], frame_files, likely_files)[:6],
+            "rerun": rerun[0] if rerun else "",
+            "action": _kind_action(kind),
+        })
+    return summaries
+
+
 def repair_plan(output: str, root: str | Path = ".") -> dict[str, Any]:
     parsed = parse_pytest_output(output)
     test_files = [f.get("path", "") for f in parsed["failures"] if f.get("path")]
@@ -515,11 +597,23 @@ def repair_plan(output: str, root: str | Path = ".") -> dict[str, Any]:
             path = row.get("path", "")
             if path and path not in related:
                 related.append(path)
+    likely_files = _merge_paths(test_files, frame_files, related)[:18]
+    focused = _focused_tests(parsed)
+    summaries = _failure_summary(parsed, likely_files)
     return {
         "root": str(workspace.resolve_root(root)),
         "failure_count": parsed["failure_count"],
         "failures": parsed["failures"],
-        "likely_files": _merge_paths(test_files, frame_files, related)[:18],
+        "failure_summary": summaries,
+        "likely_files": likely_files,
+        "focused_tests": focused,
+        "repair_loop": [
+            "读取 failure_summary 中每个 kind 的 action，先处理能让测试继续收集的 syntax/import 问题。",
+            "打开 likely_files 前 3-6 个文件，按失败 frame 定位最小修改点。",
+            "生成或手写最小 patch 后先运行 focused_tests；不要直接全量回归掩盖定位成本。",
+            "focused_tests 通过后运行 suggested_tests 或项目默认测试，失败则把新输出再次交给 ivyea code repair。",
+            "最终运行 ivyea code review，输出修改范围、测试命令和剩余风险。",
+        ],
         "next_steps": [
             "先打开失败测试，确认断言期望和输入边界。",
             "根据 failure 里的符号名搜索生产代码，定位最小修改点。",
@@ -932,9 +1026,28 @@ def render_repair(plan: dict[str, Any]) -> str:
             lines.append(f"  frame: {first.get('path')}:{first.get('line')} in {first.get('function')}")
         if failure.get("errors"):
             lines.append("  error: " + " | ".join(failure["errors"][:3]))
+    if plan.get("failure_summary"):
+        lines.extend(["", "Failure Summary"])
+        for item in plan["failure_summary"]:
+            lines.append(f"- {item.get('nodeid') or 'unknown'}")
+            lines.append(f"  kind: {item.get('kind')}")
+            if item.get("exception_type"):
+                lines.append(f"  exception: {item.get('exception_type')}")
+            if item.get("rerun"):
+                lines.append(f"  rerun: `{item.get('rerun')}`")
+            if item.get("likely_files"):
+                lines.append("  files: " + ", ".join(item["likely_files"][:5]))
+            if item.get("action"):
+                lines.append(f"  action: {item.get('action')}")
     if plan.get("likely_files"):
         lines.extend(["", "Likely Files"])
         lines.extend(f"- {p}" for p in plan["likely_files"])
+    if plan.get("focused_tests"):
+        lines.extend(["", "Focused Tests"])
+        lines.extend(f"- `{cmd}`" for cmd in plan["focused_tests"])
+    if plan.get("repair_loop"):
+        lines.extend(["", "Repair Loop"])
+        lines.extend(f"{i}. {step}" for i, step in enumerate(plan["repair_loop"], start=1))
     lines.extend(["", "Next Steps"])
     lines.extend(f"{i}. {step}" for i, step in enumerate(plan.get("next_steps") or [], start=1))
     return "\n".join(lines)
