@@ -60,6 +60,13 @@ def test_sessions_save_load_latest(ivyea_home):
     assert lst and lst[0]["id"] == sid and "看广告" in lst[0]["preview"]
 
 
+def test_sessions_new_id_is_unique(ivyea_home):
+    from ivyea_agent import sessions
+
+    ids = {sessions.new_id() for _ in range(20)}
+    assert len(ids) == 20
+
+
 def test_sessions_load_missing(ivyea_home):
     from ivyea_agent import sessions
     assert sessions.load("nope-does-not-exist") is None

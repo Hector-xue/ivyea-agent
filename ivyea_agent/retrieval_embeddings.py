@@ -73,6 +73,9 @@ def status() -> dict[str, Any]:
         "package_available": package_available,
         "fallback_reason": fallback_reason,
         "external_dependency": semantic_ready,
+        "offline_safe": not semantic_ready,
+        "probe_required_for_dense": semantic_ready,
+        "cache_hint": "pre-download the sentence-transformers model into retrieval_embedding_model_path for offline use",
         "install_hint": "python -m pip install 'ivyea-agent[semantic]'"
         if semantic_requested and not package_available else "",
     }
@@ -104,6 +107,39 @@ def encode_query(text: str) -> dict[str, Any]:
     return _encode(_expand_query(text))
 
 
+def probe(text: str = "ivyea retrieval embedding probe") -> dict[str, Any]:
+    """Try the active embedding backend and report whether dense vectors really work."""
+    st = status()
+    if not st["semantic_enabled"]:
+        return {
+            "ok": True,
+            "ready": True,
+            "active_backend": HASH_BACKEND,
+            "vector_kind": "sparse",
+            "fallback_reason": st.get("fallback_reason", ""),
+            "status": st,
+        }
+    try:
+        values = _sentence_vector(text, st)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "ready": False,
+            "active_backend": HASH_BACKEND,
+            "vector_kind": "sparse",
+            "fallback_reason": f"{type(exc).__name__}: {exc}",
+            "status": st,
+        }
+    return {
+        "ok": True,
+        "ready": True,
+        "active_backend": SENTENCE_BACKEND,
+        "vector_kind": "dense",
+        "dimensions": len(values),
+        "status": st,
+    }
+
+
 def decode(raw: str) -> dict[str, Any]:
     try:
         data = json.loads(raw or "{}")
@@ -131,9 +167,12 @@ def cosine(left: dict[str, Any], right: dict[str, Any]) -> float:
 def _encode(text: str) -> dict[str, Any]:
     st = status()
     if st["semantic_enabled"]:
-        values = _sentence_vector(text, st)
-        return {"kind": "dense", "backend": SENTENCE_BACKEND, "model": st["model"], "values": values}
-    return {"kind": "sparse", "backend": HASH_BACKEND, "values": _hash_vector(text)}
+        try:
+            values = _sentence_vector(text, st)
+            return {"kind": "dense", "backend": SENTENCE_BACKEND, "model": st["model"], "values": values}
+        except Exception as exc:
+            return _hash_payload(text, f"{type(exc).__name__}: {exc}")
+    return _hash_payload(text)
 
 
 def _sentence_vector(text: str, st: dict[str, Any]) -> list[float]:
@@ -182,6 +221,13 @@ def _hash_vector(text: str) -> dict[str, float]:
     counts = Counter(_tokens(text))
     total = sum(counts.values()) or 1
     return {k: round(v / total, 8) for k, v in counts.items()}
+
+
+def _hash_payload(text: str, fallback_error: str = "") -> dict[str, Any]:
+    data: dict[str, Any] = {"kind": "sparse", "backend": HASH_BACKEND, "values": _hash_vector(text)}
+    if fallback_error:
+        data["fallback_error"] = fallback_error
+    return data
 
 
 def _sparse_values(value: Any) -> dict[str, float]:

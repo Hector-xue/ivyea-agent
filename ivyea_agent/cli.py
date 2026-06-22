@@ -2652,12 +2652,17 @@ def _cmd_vision(args: argparse.Namespace) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
-    from . import service
+    from . import config as cfg, service
     host = args.host or "127.0.0.1"
     if host not in ("127.0.0.1", "localhost", "::1") and not args.allow_remote:
         print("为安全起见，ivyea serve 默认只允许 localhost。若确认要对外监听，请加 --allow-remote。", file=sys.stderr)
         return 2
-    service.run(host=args.host, port=args.port)
+    cfg.load_env()
+    api_token = args.api_token or os.environ.get("IVYEA_API_TOKEN", "")
+    if host not in ("127.0.0.1", "localhost", "::1") and not api_token:
+        print("远程监听必须配置 API token：使用 --api-token 或 IVYEA_API_TOKEN。", file=sys.stderr)
+        return 2
+    service.run(host=args.host, port=args.port, api_token=api_token)
     return 0
 
 
@@ -2728,6 +2733,8 @@ def _cmd_retrieval(args: argparse.Namespace) -> int:
             }
         else:
             data = {"ok": True, "embeddings": retrieval.embeddings_status()}
+        if args.probe:
+            data["probe"] = retrieval.probe_embeddings()
         if args.json:
             print(json.dumps(data, ensure_ascii=False, indent=2))
         else:
@@ -2746,6 +2753,12 @@ def _cmd_retrieval(args: argparse.Namespace) -> int:
                 print(f"- fallback_reason: {emb.get('fallback_reason')}")
             if emb.get("install_hint"):
                 print(f"- install_hint: {emb.get('install_hint')}")
+            if args.probe:
+                probe = data.get("probe") or {}
+                print(f"- probe_ready: {probe.get('ready')}")
+                print(f"- probe_backend: {probe.get('active_backend')}")
+                if probe.get("fallback_reason"):
+                    print(f"- probe_fallback: {probe.get('fallback_reason')}")
             print("")
             print("配置后运行 `ivyea retrieval index` 重建索引。")
         return 0
@@ -2835,6 +2848,7 @@ def build_parser() -> argparse.ArgumentParser:
     psrv.add_argument("--host", default="127.0.0.1")
     psrv.add_argument("--port", type=int, default=8765)
     psrv.add_argument("--allow-remote", action="store_true", help="允许监听非 localhost 地址；默认拒绝，避免无认证 API 暴露")
+    psrv.add_argument("--api-token", help="HTTP Bearer token；远程监听时必填，也可用 IVYEA_API_TOKEN")
     psrv.set_defaults(func=_cmd_serve)
 
     pself = sub.add_parser("self", help="安装生命周期：status/doctor/backup/upgrade/uninstall")
@@ -3148,6 +3162,7 @@ def build_parser() -> argparse.ArgumentParser:
     pret.add_argument("--model-path", help="配置本地模型目录；为空字符串可清除")
     pret.add_argument("--allow-download", action="store_true", help="允许 sentence-transformers 在重建索引时下载模型")
     pret.add_argument("--no-download", action="store_true", help="禁止自动下载模型，仅使用本地 model-path")
+    pret.add_argument("--probe", action="store_true", help="真实加载/编码一次，检查 dense embedding 是否可用")
     pret.add_argument("--json", action="store_true", help="输出 JSON，便于 IvyeaOps/脚本消费")
     pret.set_defaults(func=_cmd_retrieval)
 

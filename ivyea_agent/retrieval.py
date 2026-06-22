@@ -91,6 +91,11 @@ def embeddings_status() -> dict[str, Any]:
     return retrieval_embeddings.status()
 
 
+def probe_embeddings(text: str = "") -> dict[str, Any]:
+    """Probe whether the configured embedding backend can encode locally."""
+    return retrieval_embeddings.probe(text or "ivyea retrieval embedding probe")
+
+
 def configure_embeddings(
     *,
     backend: str = "",

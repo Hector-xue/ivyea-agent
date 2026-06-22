@@ -76,6 +76,10 @@ def test_knowledge_source_governance_card_and_audit():
     assert "governance.source_quality" in audit
     assert "quality=synthesized_with_official_anchor" in audit
     assert "license=amazon_public_docs_summary" in audit
+    data = knowledge.audit()
+    assert data["summary"]["cards"] >= 1
+    assert data["summary"]["builtin_cards"] >= 1
+    assert any(row["id"] == "governance.source_quality" for row in data["cards"])
 
 
 def test_user_knowledge_import_search_audit_rebuild(ivyea_home, tmp_path):
@@ -101,6 +105,9 @@ def test_user_knowledge_import_search_audit_rebuild(ivyea_home, tmp_path):
     audit = knowledge.render_audit()
     assert "user.prime_day_playbook | user | user" in audit
     assert "license=user_supplied" in audit
+    structured = knowledge.audit()
+    assert structured["summary"]["user_cards"] == 1
+    assert any(row["id"] == "user.prime_day_playbook" for row in structured["cards"])
 
     idx = knowledge.rebuild_index()
     assert idx["cards"] >= 1

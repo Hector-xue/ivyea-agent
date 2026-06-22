@@ -282,7 +282,7 @@ def render_search(query: str, limit: int = 5) -> str:
 def render_audit() -> str:
     """Show source quality metadata for bundled and user knowledge cards."""
     lines = ["Ivyea 知识库审计："]
-    for card in list_cards():
+    for card in audit()["cards"]:
         source = card.get("source_url") or "-"
         lines.append(
             f"- {card['id']} | {card.get('scope', 'builtin')} | {card['source_type']} | confidence={card.get('confidence')} | "
@@ -290,6 +290,39 @@ def render_audit() -> str:
             f"retrieved={card.get('retrieved_at')} | license={card.get('license', '-')} | hash={str(card.get('body_hash', ''))[:12]} | source={source}"
         )
     return "\n".join(lines)
+
+
+def audit() -> dict[str, Any]:
+    """Return structured source quality metadata for product integrations."""
+    cards = []
+    for card in list_cards():
+        cards.append({
+            "id": card.get("id", ""),
+            "title": card.get("title", ""),
+            "category": card.get("category", ""),
+            "scope": card.get("scope", "builtin"),
+            "source_type": card.get("source_type", ""),
+            "confidence": card.get("confidence", ""),
+            "freshness": card.get("freshness", ""),
+            "source_quality": card.get("source_quality", ""),
+            "retrieved_at": card.get("retrieved_at", ""),
+            "license": card.get("license", ""),
+            "source_url": card.get("source_url", ""),
+            "tags": list(card.get("tags") or []),
+            "body_hash": card.get("body_hash", ""),
+        })
+    conflict_rows = conflicts()
+    summary = {
+        "cards": len(cards),
+        "builtin_cards": len([c for c in cards if c.get("scope") != "user"]),
+        "user_cards": len([c for c in cards if c.get("scope") == "user"]),
+        "official_cards": len([c for c in cards if str(c.get("source_type") or "") == "official"]),
+        "stale_cards": len([c for c in cards if c.get("freshness") == "stale_needs_review"]),
+        "conflicts": len(conflict_rows),
+        "sources": str(_sources_file()),
+        "index": str(_index_file()),
+    }
+    return {"summary": summary, "cards": cards, "conflicts": conflict_rows}
 
 
 def context_for_query(query: str, limit: int = 3, max_chars: int = 1200) -> tuple[str, list[str]]:

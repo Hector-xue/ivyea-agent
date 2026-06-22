@@ -9,7 +9,7 @@
 - 门户网站：`https://agent.ivyea.com`（静态站点源码在 `site/`）
 - 完整部署指南：[docs/部署指南.md](docs/部署指南.md)
 - 操作文档：[docs/使用与操作文档.md](docs/使用与操作文档.md)
-- 最新 Release：`v0.5.12`（main 分支可能包含尚未打包的新改动）
+- 最新 Release：`v0.5.13`（main 分支可能包含尚未打包的新改动）
 
 ## 三分钟安装
 
@@ -32,11 +32,11 @@ ivyea chat
 固定版本安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v0.5.12 bash
+curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v0.5.13 bash
 ```
 
 ```powershell
-$env:IVYEA_VERSION="v0.5.12"
+$env:IVYEA_VERSION="v0.5.13"
 iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
@@ -51,21 +51,35 @@ IvyeaAgent 可以独立作为 CLI 使用，也可以作为 IvyeaOps 的本地智
 ivyea serve --host 127.0.0.1 --port 8765
 ```
 
-`serve` 默认只允许监听 localhost；如果要绑定 `0.0.0.0`，必须显式加 `--allow-remote`，避免无认证本地 API 被误暴露。
+`serve` 默认只允许监听 localhost；如果要绑定 `0.0.0.0`，必须显式加 `--allow-remote` 且提供 `--api-token` 或 `IVYEA_API_TOKEN`，避免本地 API 被误暴露。
 
 当前本地 API 提供：
 
 - `GET /health`：健康检查、版本、模型状态、知识库数量、检索能力。
 - `GET /v1/manifest`：IvyeaOps 集成发现清单，包含 API 版本、端点、能力和安全边界。
+- `GET /v1/openapi.json`：OpenAPI 3.1 接口发现文档，供 IvyeaOps 或其它客户端自动生成调用层。
 - `GET /v1/capabilities`：本地检索能力说明。
+- `GET /v1/system/status`、`GET /v1/system/doctor`：安装状态和诊断检查，供 IvyeaOps 安装页/设置页展示。
 - `POST /v1/chat`：运行一轮 IvyeaOps 嵌入式 Agent 对话；默认只读计划模式，返回回答、工具事件和脱敏消息。
+- `POST /v1/chat/stream`：同样的只读 Agent 对话，但用 Server-Sent Events 实时返回 token、工具事件和 final。
+- `GET/POST /v1/chat/sessions`：列出/创建本地持久会话。
+- `GET /v1/chat/sessions/{id}`：读取会话详情，供 IvyeaOps 续接对话。
+- `GET /v1/skills`、`GET /v1/skills/search?q=否词`、`GET /v1/skills/{id}`：浏览和搜索内置/用户 Skills。
+- `GET /v1/knowledge/cards`、`GET /v1/knowledge/cards/{id}`：浏览知识卡及详情。
+- `POST /v1/knowledge/cards`：创建用户知识卡。IvyeaOps 上传文件时应在前端/后端读取正文后传 `body`，服务端不直接读取任意本机路径。
+- `GET /v1/knowledge/audit`、`GET /v1/knowledge/conflicts`：知识来源、时效、许可、冲突风险审计。
+- `POST /v1/knowledge/rebuild`：校验用户知识元数据，并重建知识索引和统一检索索引。
 - `GET /v1/knowledge/search?q=否词&limit=5`：亚马逊知识库检索。
 - `GET /v1/retrieval/embeddings`：本地检索向量后端状态，区分默认 hash 和真实 dense embedding 是否可用。
 - `GET /v1/retrieval/status`：持久化本地检索索引状态，包含 backend、chunks、更新时间和索引库位置。
 - `POST /v1/retrieval/search`：统一检索知识库 + 记忆 + 本地持久索引。
 - `POST /v1/retrieval/embeddings`：配置本地检索向量后端。
+- `POST /v1/retrieval/embeddings/probe`：真实加载/编码一次，确认 dense embedding 是否可用；失败会报告原因并继续降级到本地 hash 索引。
 - `POST /v1/retrieval/index`：重建持久化本地检索索引，给 IvyeaOps 安装后初始化或知识库更新后调用。
 - `GET/POST /v1/tasks`：长任务列表、创建、状态推进和日志追加，供 IvyeaOps 展示 Agent 执行过程。
+- `GET /v1/traces`、`GET /v1/traces/stats`：运行时间线和工具调用统计，供 IvyeaOps 展示执行过程。
+- `POST /v1/workspace/index/search/inspect/symbols/impact`：只读项目理解能力，供 IvyeaOps 做代码库扫描、符号搜索和影响面分析。
+- `POST /v1/code/plan/context/quality/review/repair`：只读代码 Agent 工作流，输出任务计划、紧凑上下文、质量风险、diff 审查和测试失败修复计划。
 
 独立 CLI 也可以直接调用统一检索：
 
@@ -86,10 +100,11 @@ ivyea retrieval search "预算 品牌词" --json
 ```bash
 python -m pip install "ivyea-agent[semantic]"
 ivyea retrieval embeddings --backend sentence-transformers --model BAAI/bge-small-zh-v1.5 --allow-download
+ivyea retrieval embeddings --probe
 ivyea retrieval index
 ```
 
-生产离线环境建议在发版机上预置依赖和模型缓存；没有语义依赖或模型时会自动降级到 hash 索引，并在 `retrieval embeddings/status` 中显示原因。
+生产离线环境建议在发版机上预置依赖和模型缓存；没有语义依赖、模型目录不可用或真实加载失败时都会自动降级到 hash 索引，并在 `retrieval embeddings/status` 或 `retrieval embeddings --probe` 中显示原因。
 
 ## 一键部署包（给用户提前准备好）
 
@@ -193,7 +208,7 @@ ivyea chat --task-id <task-id>
 ivyea task resume <task-id>
 ```
 
-工程类对话会显示 `Code 计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查` 阶段提示；工具调用会带 `1/48.1` 这样的进度编号，方便判断当前卡在读文件、跑测试还是生成补丁。终端输入框和斜杠补全菜单改为浅色样式，不再使用大块黑色背景；不想要颜色可设置 `NO_COLOR=1`。
+工程类对话会显示 `Code 计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查` 阶段提示；工具调用会带 `1/48.1` 这样的进度编号，方便判断当前卡在读文件、跑测试还是生成补丁。终端默认使用轻量输入行，避免大块黑色输入/补全背景；喜欢框式输入可设置 `IVYEA_BOXED_INPUT=1`，不想要颜色可设置 `NO_COLOR=1`。
 
 ## 安装与部署
 

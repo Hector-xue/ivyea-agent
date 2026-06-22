@@ -1,11 +1,13 @@
 """Claude Code 风格的输入框（prompt_toolkit）。
 
-带边框的输入区（Frame）+ ❯ 提示 + 斜杠下拉补全 + ↑↓历史 + 粘贴(bracketed paste)。
-三级降级：带框 Application → 普通 PromptSession → 内置 input()，保证任何环境可用。
+默认使用轻量 PromptSession + ❯ 提示 + 斜杠补全 + ↑↓历史 + 粘贴(bracketed paste)。
+设置 IVYEA_BOXED_INPUT=1 才启用带边框输入区（Frame）。
+三级降级：PromptSession/可选带框 Application → 内置 input()，保证任何环境可用。
 """
 from __future__ import annotations
 
 import sys
+import os
 from typing import Callable
 
 from . import config
@@ -42,25 +44,29 @@ class ChatInput:
             from prompt_toolkit.history import FileHistory
             config.ensure_dirs()
             self._history = FileHistory(str(config.IVYEA_DIR / "chat_history"))
-            # 探测带框组件是否可用
-            from prompt_toolkit.widgets import Frame, TextArea  # noqa: F401
-            from prompt_toolkit.application import Application   # noqa: F401
-            self._mode = "boxed"
+            if self._boxed_enabled():
+                from prompt_toolkit.widgets import Frame, TextArea  # noqa: F401
+                from prompt_toolkit.application import Application   # noqa: F401
+                self._mode = "boxed"
+                return
+            self._setup_session()
         except Exception:
-            try:
-                from prompt_toolkit import PromptSession
-                from prompt_toolkit.history import FileHistory
-                from prompt_toolkit.styles import Style
-                from prompt_toolkit.shortcuts.prompt import CompleteStyle
-                config.ensure_dirs()
-                self._session = PromptSession(
-                    history=FileHistory(str(config.IVYEA_DIR / "chat_history")),
-                    completer=self._completer(), complete_while_typing=True,
-                    complete_style=CompleteStyle.READLINE_LIKE,
-                    style=Style.from_dict(self._style_dict()))
-                self._mode = "session"
-            except Exception:
-                self._mode = "plain"
+            self._mode = "plain"
+
+    @staticmethod
+    def _boxed_enabled() -> bool:
+        return os.environ.get("IVYEA_BOXED_INPUT", "").strip() == "1"
+
+    def _setup_session(self) -> None:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.styles import Style
+        from prompt_toolkit.shortcuts.prompt import CompleteStyle
+        self._session = PromptSession(
+            history=self._history,
+            completer=self._completer(), complete_while_typing=True,
+            complete_style=CompleteStyle.READLINE_LIKE,
+            style=Style.from_dict(self._style_dict()))
+        self._mode = "session"
 
     @staticmethod
     def _style_dict() -> dict[str, str]:

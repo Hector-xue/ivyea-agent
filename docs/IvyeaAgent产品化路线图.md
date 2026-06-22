@@ -76,6 +76,7 @@ IvyeaAgent 后续同时承担两个角色：
 ### 阶段 5：部署和运维
 
 - 提供 `/v1/manifest` 集成发现端点，IvyeaOps 可读取 API 版本、端点、能力和安全边界。
+- 远程监听必须配置 Bearer token；localhost 默认免 token，保证开发/嵌入简单。
 - Windows/macOS/Linux 一键安装和离线包。
 - `ivyea self doctor/clean-cache/repair` 覆盖常见环境问题。
 - IvyeaOps 启动时自动检测本地 agent 服务，不存在则引导安装或启动。

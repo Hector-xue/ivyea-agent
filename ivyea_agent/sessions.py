@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -22,7 +23,10 @@ def _dir() -> Path:
 
 
 def new_id() -> str:
-    return time.strftime("%Y%m%d-%H%M%S")
+    now = time.time()
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+    millis = int((now % 1) * 1000)
+    return f"{stamp}-{millis:03d}-{secrets.token_hex(2)}"
 
 
 def path_for(sid: str) -> Path:

@@ -110,3 +110,11 @@ def test_chat_input_style_avoids_block_backgrounds():
     combined = " ".join(styles.values())
     assert "bg:" not in combined
     assert styles["completion-menu.completion.current"] == "ansicyan bold"
+
+
+def test_chat_input_boxed_mode_is_opt_in(monkeypatch):
+    from ivyea_agent.chat_input import ChatInput
+    monkeypatch.delenv("IVYEA_BOXED_INPUT", raising=False)
+    assert ChatInput._boxed_enabled() is False
+    monkeypatch.setenv("IVYEA_BOXED_INPUT", "1")
+    assert ChatInput._boxed_enabled() is True
