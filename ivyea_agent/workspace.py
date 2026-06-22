@@ -540,7 +540,6 @@ def dependency_graph(root: str | os.PathLike[str] | None = None, limit: int = 40
     outbound: Counter[str] = Counter()
     for f in files:
         src_path = f.get("path", "")
-        src_mod = _module_for_path(src_path)
         for raw in f.get("imports", []) or []:
             dep = raw.lstrip(".")
             if not dep:
