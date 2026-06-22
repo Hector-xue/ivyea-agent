@@ -9,7 +9,7 @@
 - 门户网站：`https://agent.ivyea.com`（静态站点源码在 `site/`）
 - 完整部署指南：[docs/部署指南.md](docs/部署指南.md)
 - 操作文档：[docs/使用与操作文档.md](docs/使用与操作文档.md)
-- 最新版本：`v0.5.5`
+- 最新 Release：`v0.5.12`（main 分支可能包含尚未打包的新改动）
 
 ## 三分钟安装
 
@@ -32,16 +32,40 @@ ivyea chat
 固定版本安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v0.5.5 bash
+curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v0.5.12 bash
 ```
 
 ```powershell
-$env:IVYEA_VERSION="v0.5.5"
+$env:IVYEA_VERSION="v0.5.12"
 iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
 一键脚本默认安装 GitHub 最新 Release wheel；Release 不可用时自动回退到 git 源码安装。私有仓库读取 Release 可设置 `GITHUB_TOKEN`。安装完成后脚本会尽量运行 `ivyea self doctor`，检查 Python、PATH、数据目录和可选依赖。
 如果用户机器缺少基础环境，脚本会尽量自动补齐：Linux 用 `apt/dnf/yum/apk`，macOS 用 Homebrew，Windows 用 winget；无法自动安装时会给出明确提示。团队内网或离线环境建议使用下文的离线 bundle。
+
+## IvyeaOps 嵌入模式
+
+IvyeaAgent 可以独立作为 CLI 使用，也可以作为 IvyeaOps 的本地智能底座启动：
+
+```bash
+ivyea serve --host 127.0.0.1 --port 8765
+```
+
+`serve` 默认只允许监听 localhost；如果要绑定 `0.0.0.0`，必须显式加 `--allow-remote`，避免无认证本地 API 被误暴露。
+
+当前本地 API 提供：
+
+- `GET /health`：健康检查、版本、模型状态、知识库数量、检索能力。
+- `GET /v1/capabilities`：本地检索能力说明。
+- `GET /v1/knowledge/search?q=否词&limit=5`：亚马逊知识库检索。
+- `POST /v1/retrieval/search`：统一检索知识库 + 记忆，后续本地向量检索也会挂在这个接口下。
+
+独立 CLI 也可以直接调用统一检索：
+
+```bash
+ivyea retrieval search "高点击 零单 是否否词"
+ivyea retrieval search "预算 品牌词" --json
+```
 
 ## 一键部署包（给用户提前准备好）
 

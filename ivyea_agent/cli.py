@@ -2651,6 +2651,42 @@ def _cmd_vision(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    from . import service
+    host = args.host or "127.0.0.1"
+    if host not in ("127.0.0.1", "localhost", "::1") and not args.allow_remote:
+        print("为安全起见，ivyea serve 默认只允许 localhost。若确认要对外监听，请加 --allow-remote。", file=sys.stderr)
+        return 2
+    service.run(host=args.host, port=args.port)
+    return 0
+
+
+def _cmd_retrieval(args: argparse.Namespace) -> int:
+    from . import retrieval
+    import json
+    if args.action == "capabilities":
+        data = {"ok": True, "retrieval": retrieval.capabilities()}
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            r = data["retrieval"]
+            print("Ivyea 本地检索能力")
+            print("")
+            print(f"- mode: {r.get('mode')}")
+            print(f"- sources: {', '.join(r.get('sources') or [])}")
+            print(f"- knowledge_cards: {r.get('knowledge_cards')}")
+            print(f"- user_knowledge_cards: {r.get('user_knowledge_cards')}")
+            print(f"- memory_fts: {r.get('memory_fts')}")
+            print(f"- semantic_vectors: {r.get('semantic_vectors', {}).get('enabled')}")
+        return 0
+    if not args.query:
+        print("用法: ivyea retrieval search <query>", file=sys.stderr)
+        return 2
+    data = retrieval.search(args.query, limit=args.limit, sources=args.source)
+    print(json.dumps(data, ensure_ascii=False, indent=2) if args.json else retrieval.render_search(data))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ivyea", description="Ivyea Agent — 亚马逊运营 CLI Agent")
     p.add_argument("--version", action="version", version=f"ivyea-agent {__version__}")
@@ -2724,6 +2760,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     pdoc = sub.add_parser("doctor", help="环境体检：配置、依赖、知识库、磁盘、领星/MCP")
     pdoc.set_defaults(func=_cmd_doctor)
+
+    psrv = sub.add_parser("serve", help="本地嵌入 API 服务（给 IvyeaOps 调用）")
+    psrv.add_argument("--host", default="127.0.0.1")
+    psrv.add_argument("--port", type=int, default=8765)
+    psrv.add_argument("--allow-remote", action="store_true", help="允许监听非 localhost 地址；默认拒绝，避免无认证 API 暴露")
+    psrv.set_defaults(func=_cmd_serve)
 
     pself = sub.add_parser("self", help="安装生命周期：status/doctor/backup/upgrade/uninstall")
     pself.add_argument("action", choices=["status", "doctor", "backup", "upgrade", "uninstall"])
@@ -3025,6 +3067,14 @@ def build_parser() -> argparse.ArgumentParser:
     pmem.add_argument("action", nargs="?", choices=["status", "search", "note"], default="status")
     pmem.add_argument("query", nargs="?")
     pmem.set_defaults(func=_cmd_memory)
+
+    pret = sub.add_parser("retrieval", help="本地统一检索：knowledge + memory，后续接语义向量")
+    pret.add_argument("action", choices=["search", "capabilities"])
+    pret.add_argument("query", nargs="?")
+    pret.add_argument("--limit", type=int, default=8)
+    pret.add_argument("--source", action="append", choices=["knowledge", "memory"], help="限定来源，可重复")
+    pret.add_argument("--json", action="store_true", help="输出 JSON，便于 IvyeaOps/脚本消费")
+    pret.set_defaults(func=_cmd_retrieval)
 
     pk = sub.add_parser("knowledge", help="亚马逊知识库：list/search/show/audit/import/url/rebuild/index/conflicts")
     pk.add_argument("action", choices=["list", "search", "show", "audit", "import", "url", "rebuild", "index", "conflicts"])
