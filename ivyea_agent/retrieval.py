@@ -11,7 +11,7 @@ import re
 from collections import Counter
 from typing import Any
 
-from . import knowledge, memory
+from . import knowledge, memory, retrieval_index
 
 
 DEFAULT_SOURCES = ("knowledge", "memory")
@@ -35,9 +35,10 @@ def capabilities() -> dict[str, Any]:
             "backend": "local_sparse_vector",
             "external_dependency": False,
         },
+        "index": retrieval_index.status(),
         "semantic_vectors": {
             "enabled": False,
-            "reason": "embedding/vector backend not configured yet; local FTS/LIKE retrieval is active",
+            "reason": "neural embedding backend not configured yet; local FTS, sparse vectors and persisted hash index are active",
         },
     }
 
@@ -53,6 +54,7 @@ def search(query: str, *, limit: int = 8, sources: list[str] | tuple[str, ...] |
 
     if "knowledge" in wanted:
         hits.extend(_knowledge_hits(q, lim))
+        hits.extend(retrieval_index.search(q, max(3, min(lim, 8))))
         hits.extend(_knowledge_vector_hits(q, lim))
     if "memory" in wanted:
         hits.extend(_memory_hits(q, lim))
@@ -65,6 +67,16 @@ def search(query: str, *, limit: int = 8, sources: list[str] | tuple[str, ...] |
         "hits": hits[:lim],
         "capabilities": capabilities(),
     }
+
+
+def index_status() -> dict[str, Any]:
+    """Return persisted local retrieval index status."""
+    return retrieval_index.status()
+
+
+def rebuild_index() -> dict[str, Any]:
+    """Rebuild the persisted local retrieval index."""
+    return retrieval_index.rebuild()
 
 
 def _knowledge_hits(query: str, limit: int) -> list[dict[str, Any]]:

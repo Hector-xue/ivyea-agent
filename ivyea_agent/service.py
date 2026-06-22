@@ -62,7 +62,9 @@ def manifest() -> dict[str, Any]:
             {"method": "GET", "path": "/v1/capabilities", "description": "retrieval capabilities"},
             {"method": "GET", "path": "/v1/model", "description": "current model status without secrets"},
             {"method": "GET", "path": "/v1/knowledge/search", "description": "query bundled and user knowledge"},
+            {"method": "GET", "path": "/v1/retrieval/status", "description": "persistent local retrieval index status"},
             {"method": "POST", "path": "/v1/retrieval/search", "description": "unified local retrieval over knowledge and memory"},
+            {"method": "POST", "path": "/v1/retrieval/index", "description": "rebuild persistent local retrieval index"},
             {"method": "GET", "path": "/v1/tasks", "description": "list tasks"},
             {"method": "POST", "path": "/v1/tasks", "description": "create task"},
             {"method": "GET", "path": "/v1/tasks/{id}", "description": "load task detail"},
@@ -160,6 +162,9 @@ class _Handler(BaseHTTPRequestHandler):
             limit = _int(_first(qs, "limit"), 5)
             self._json(200, {"ok": True, "results": knowledge.search(query, limit=limit)})
             return
+        if parsed.path == "/v1/retrieval/status":
+            self._json(200, {"ok": True, "index": retrieval.index_status()})
+            return
         if parsed.path == "/v1/tasks":
             self._json(200, task_list(limit=_int(_first(qs, "limit"), 20), status=_first(qs, "status")))
             return
@@ -182,6 +187,9 @@ class _Handler(BaseHTTPRequestHandler):
                 sources=body.get("sources") if isinstance(body.get("sources"), list) else None,
             )
             self._json(200, {"ok": True, **result})
+            return
+        if parsed.path == "/v1/retrieval/index":
+            self._json(200, retrieval.rebuild_index())
             return
         if parsed.path == "/v1/tasks":
             try:

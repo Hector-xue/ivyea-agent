@@ -2677,7 +2677,36 @@ def _cmd_retrieval(args: argparse.Namespace) -> int:
             print(f"- knowledge_cards: {r.get('knowledge_cards')}")
             print(f"- user_knowledge_cards: {r.get('user_knowledge_cards')}")
             print(f"- memory_fts: {r.get('memory_fts')}")
+            idx = r.get("index") or {}
+            print(f"- index: {idx.get('backend')} · chunks={idx.get('chunks')} · enabled={idx.get('enabled')}")
             print(f"- semantic_vectors: {r.get('semantic_vectors', {}).get('enabled')}")
+        return 0
+    if args.action == "status":
+        data = {"ok": True, "index": retrieval.index_status()}
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            idx = data["index"]
+            print("Ivyea 本地检索索引")
+            print("")
+            print(f"- backend: {idx.get('backend')}")
+            print(f"- enabled: {idx.get('enabled')}")
+            print(f"- chunks: {idx.get('chunks')}")
+            print(f"- knowledge_cards: {idx.get('knowledge_cards')}")
+            print(f"- updated_at: {idx.get('updated_at') or '-'}")
+            print(f"- db: {idx.get('db')}")
+        return 0
+    if args.action == "index":
+        data = retrieval.rebuild_index()
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            print("Ivyea 本地检索索引已重建")
+            print("")
+            print(f"- backend: {data.get('backend')}")
+            print(f"- chunks: {data.get('chunks')}")
+            print(f"- knowledge_cards: {data.get('knowledge_cards')}")
+            print(f"- db: {data.get('db')}")
         return 0
     if not args.query:
         print("用法: ivyea retrieval search <query>", file=sys.stderr)
@@ -3068,8 +3097,8 @@ def build_parser() -> argparse.ArgumentParser:
     pmem.add_argument("query", nargs="?")
     pmem.set_defaults(func=_cmd_memory)
 
-    pret = sub.add_parser("retrieval", help="本地统一检索：knowledge + memory，后续接语义向量")
-    pret.add_argument("action", choices=["search", "capabilities"])
+    pret = sub.add_parser("retrieval", help="本地统一检索：knowledge + memory + 本地索引")
+    pret.add_argument("action", choices=["search", "capabilities", "index", "status"])
     pret.add_argument("query", nargs="?")
     pret.add_argument("--limit", type=int, default=8)
     pret.add_argument("--source", action="append", choices=["knowledge", "memory"], help="限定来源，可重复")

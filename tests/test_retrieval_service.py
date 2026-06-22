@@ -19,11 +19,40 @@ def test_retrieval_combines_knowledge_and_memory(ivyea_home):
     caps = result["capabilities"]
     assert caps["local"] is True
     assert caps["local_vectors"]["enabled"] is True
+    assert caps["index"]["backend"] == "local_hash_embedding_v1"
     assert caps["semantic_vectors"]["enabled"] is False
+
+
+def test_retrieval_index_rebuild_and_status(ivyea_home):
+    from ivyea_agent import retrieval, retrieval_index
+
+    rebuilt = retrieval.rebuild_index()
+    assert rebuilt["ok"] is True
+    assert rebuilt["chunks"] > 0
+    assert rebuilt["knowledge_cards"] >= 1
+
+    status = retrieval_index.status()
+    assert status["enabled"] is True
+    assert status["backend"] == "local_hash_embedding_v1"
+    assert status["chunks"] == rebuilt["chunks"]
+
+    hits = retrieval_index.search("主图 转化", limit=3)
+    assert hits
+    assert hits[0]["source"] == "knowledge_index"
+    assert hits[0]["match"] == "local_hash_embedding_v1"
 
 
 def test_retrieval_cli_outputs_json(ivyea_home, capsys):
     from ivyea_agent.cli import main
+
+    assert main(["retrieval", "index", "--json"]) == 0
+    indexed = json.loads(capsys.readouterr().out)
+    assert indexed["ok"] is True
+    assert indexed["chunks"] > 0
+
+    assert main(["retrieval", "status", "--json"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["index"]["backend"] == "local_hash_embedding_v1"
 
     assert main(["retrieval", "search", "否词", "--limit", "3", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
@@ -55,7 +84,9 @@ def test_service_health_shape_without_socket(ivyea_home):
     manifest = service.manifest()
     assert manifest["api_version"] == "v1"
     assert manifest["security"]["secrets_in_responses"] is False
+    assert any(e["path"] == "/v1/retrieval/status" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/retrieval/search" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/retrieval/index" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/tasks" for e in manifest["endpoints"])
 
 
@@ -110,6 +141,22 @@ def test_local_service_health_and_retrieval(ivyea_home):
             result = json.loads(resp.read().decode("utf-8"))
         assert result["ok"] is True
         assert result["hits"]
+
+        req = urllib.request.Request(
+            f"http://{host}:{port}/v1/retrieval/index",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            indexed = json.loads(resp.read().decode("utf-8"))
+        assert indexed["ok"] is True
+        assert indexed["chunks"] > 0
+
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/retrieval/status", timeout=5) as resp:
+            status = json.loads(resp.read().decode("utf-8"))
+        assert status["ok"] is True
+        assert status["index"]["enabled"] is True
     finally:
         server.shutdown()
         server.server_close()

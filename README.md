@@ -59,15 +59,21 @@ ivyea serve --host 127.0.0.1 --port 8765
 - `GET /v1/manifest`：IvyeaOps 集成发现清单，包含 API 版本、端点、能力和安全边界。
 - `GET /v1/capabilities`：本地检索能力说明。
 - `GET /v1/knowledge/search?q=否词&limit=5`：亚马逊知识库检索。
-- `POST /v1/retrieval/search`：统一检索知识库 + 记忆，后续本地向量检索也会挂在这个接口下。
+- `GET /v1/retrieval/status`：持久化本地检索索引状态，包含 backend、chunks、更新时间和索引库位置。
+- `POST /v1/retrieval/search`：统一检索知识库 + 记忆 + 本地持久索引。
+- `POST /v1/retrieval/index`：重建持久化本地检索索引，给 IvyeaOps 安装后初始化或知识库更新后调用。
 - `GET/POST /v1/tasks`：长任务列表、创建、状态推进和日志追加，供 IvyeaOps 展示 Agent 执行过程。
 
 独立 CLI 也可以直接调用统一检索：
 
 ```bash
+ivyea retrieval index
+ivyea retrieval status --json
 ivyea retrieval search "高点击 零单 是否否词"
 ivyea retrieval search "预算 品牌词" --json
 ```
+
+当前索引后端是 `local_hash_embedding_v1`：它不依赖 Ollama/GBrain/外部向量库，适合作为默认可用的本地召回底座；真正的 neural embedding 模型会在后续作为可下载、可缓存、可离线预置的增强后端接入。
 
 ## 一键部署包（给用户提前准备好）
 
