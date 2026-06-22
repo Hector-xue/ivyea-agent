@@ -59,6 +59,7 @@ ivyea serve --host 127.0.0.1 --port 8765
 - `GET /v1/capabilities`：本地检索能力说明。
 - `GET /v1/knowledge/search?q=否词&limit=5`：亚马逊知识库检索。
 - `POST /v1/retrieval/search`：统一检索知识库 + 记忆，后续本地向量检索也会挂在这个接口下。
+- `GET/POST /v1/tasks`：长任务列表、创建、状态推进和日志追加，供 IvyeaOps 展示 Agent 执行过程。
 
 独立 CLI 也可以直接调用统一检索：
 

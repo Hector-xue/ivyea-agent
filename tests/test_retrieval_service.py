@@ -53,6 +53,29 @@ def test_service_health_shape_without_socket(ivyea_home):
     assert "key_status" in data["model"]
 
 
+def test_service_task_api_helpers(ivyea_home):
+    from ivyea_agent import service
+
+    created = service.task_create({"title": "Embed task", "steps": ["inspect", "patch"], "notes": "local"})
+    task_id = created["task"]["id"]
+    assert created["task"]["status"] == "pending"
+
+    listed = service.task_list(limit=5)
+    assert any(t["id"] == task_id for t in listed["tasks"])
+
+    started = service.task_update(task_id, "start", {"notes": "begin"})
+    assert started["task"]["status"] == "in_progress"
+
+    stepped = service.task_update(task_id, "step", {"index": 1, "status": "completed", "notes": "done"})
+    assert stepped["task"]["steps"][0]["status"] == "completed"
+
+    logged = service.task_update(task_id, "log", {"text": "visible in IvyeaOps"})
+    assert logged["task"]["events"][-1]["text"] == "visible in IvyeaOps"
+
+    detail = service.task_detail(task_id)
+    assert detail["task"]["id"] == task_id
+
+
 def test_local_service_health_and_retrieval(ivyea_home):
     from ivyea_agent import service
 

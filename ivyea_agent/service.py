@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__, config, knowledge, models, retrieval
+from . import __version__, config, knowledge, models, retrieval, task_runner
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -36,6 +36,49 @@ def health() -> dict[str, Any]:
     }
 
 
+def task_list(limit: int = 20, status: str = "") -> dict[str, Any]:
+    return {"ok": True, "tasks": task_runner.list_tasks(limit=limit, status=status or "")}
+
+
+def task_detail(task_id: str) -> dict[str, Any]:
+    return {"ok": True, "task": task_runner.load(task_id)}
+
+
+def task_create(payload: dict[str, Any]) -> dict[str, Any]:
+    steps = payload.get("steps")
+    if isinstance(steps, str):
+        steps = [s.strip() for s in steps.split("|") if s.strip()]
+    if not isinstance(steps, list):
+        steps = []
+    task = task_runner.create(
+        str(payload.get("title") or ""),
+        steps=[str(s) for s in steps],
+        notes=str(payload.get("notes") or ""),
+        workspace=str(payload.get("workspace") or ""),
+    )
+    return {"ok": True, "task": task}
+
+
+def task_update(task_id: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+    note = str(payload.get("notes") or payload.get("note") or "")
+    if action == "start":
+        task = task_runner.start_next(task_id, note=note)
+    elif action == "step":
+        task = task_runner.update_step(
+            task_id,
+            _int(payload.get("index"), 1),
+            str(payload.get("status") or ""),
+            note=note,
+        )
+    elif action == "status":
+        task = task_runner.set_status(task_id, str(payload.get("status") or ""), note=note)
+    elif action == "log":
+        task = task_runner.append_log(task_id, str(payload.get("text") or note), kind=str(payload.get("kind") or "log"))
+    else:
+        raise ValueError(f"unknown task action: {action}")
+    return {"ok": True, "task": task}
+
+
 def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
     return ThreadingHTTPServer((host, int(port)), _Handler)
 
@@ -44,7 +87,7 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     server = make_server(host, port)
     actual_host, actual_port = server.server_address
     print(f"Ivyea Agent API listening on http://{actual_host}:{actual_port}")
-    print("Endpoints: /health, /v1/capabilities, /v1/knowledge/search, /v1/retrieval/search")
+    print("Endpoints: /health, /v1/capabilities, /v1/knowledge/search, /v1/retrieval/search, /v1/tasks")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -76,6 +119,16 @@ class _Handler(BaseHTTPRequestHandler):
             limit = _int(_first(qs, "limit"), 5)
             self._json(200, {"ok": True, "results": knowledge.search(query, limit=limit)})
             return
+        if parsed.path == "/v1/tasks":
+            self._json(200, task_list(limit=_int(_first(qs, "limit"), 20), status=_first(qs, "status")))
+            return
+        if parsed.path.startswith("/v1/tasks/"):
+            task_id = parsed.path.split("/", 3)[-1]
+            try:
+                self._json(200, task_detail(task_id))
+            except FileNotFoundError as exc:
+                self._json(404, {"ok": False, "error": str(exc)})
+            return
         self._json(404, {"ok": False, "error": "not_found", "path": parsed.path})
 
     def do_POST(self) -> None:
@@ -89,6 +142,23 @@ class _Handler(BaseHTTPRequestHandler):
             )
             self._json(200, {"ok": True, **result})
             return
+        if parsed.path == "/v1/tasks":
+            try:
+                self._json(200, task_create(body))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path.startswith("/v1/tasks/"):
+            parts = parsed.path.split("/")
+            if len(parts) >= 5:
+                task_id, action = parts[3], parts[4]
+                try:
+                    self._json(200, task_update(task_id, action, body))
+                except FileNotFoundError as exc:
+                    self._json(404, {"ok": False, "error": str(exc)})
+                except (ValueError, IndexError) as exc:
+                    self._json(400, {"ok": False, "error": str(exc)})
+                return
         self._json(404, {"ok": False, "error": "not_found", "path": parsed.path})
 
     def _read_json(self) -> dict[str, Any]:
