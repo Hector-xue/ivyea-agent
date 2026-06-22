@@ -13,11 +13,12 @@ def test_retrieval_combines_knowledge_and_memory(ivyea_home):
     memory.remember("Prime Day 预算要保护品牌词，不要误否核心词。", asin="B0LOCAL")
     result = retrieval.search("预算 品牌词", limit=8)
 
-    assert result["mode"] == "local_hybrid_lexical"
+    assert result["mode"] == "local_hybrid_lexical_vector"
     assert any(h["source"] == "knowledge" for h in result["hits"])
     assert any(h["source"] == "memory" for h in result["hits"])
     caps = result["capabilities"]
     assert caps["local"] is True
+    assert caps["local_vectors"]["enabled"] is True
     assert caps["semantic_vectors"]["enabled"] is False
 
 

@@ -58,6 +58,7 @@ IvyeaAgent 后续同时承担两个角色：
 
 ### 阶段 3：本地语义检索
 
+- 先提供不依赖外部模型的 `local_sparse_vector` 补充召回，作为无 Ollama/无 embedding 模型时的降级能力。
 - 引入本地 embedding 模型管理：自动下载、缓存、离线包预置。
 - SQLite FTS + 向量索引混合召回。
 - 支持增量索引、索引健康检查、重建、版本迁移。
