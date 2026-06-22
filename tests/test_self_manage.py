@@ -15,6 +15,7 @@ def test_self_status_and_plans():
     rendered_doctor = self_manage.render_doctor(doctor)
     assert "Ivyea Install Doctor" in rendered_doctor
     assert "python" in rendered_doctor
+    assert "retrieval embeddings" in rendered_doctor
 
     upgrade = self_manage.upgrade_plan(version="v1.2.3", method="pipx")
     assert upgrade["action"] == "upgrade"

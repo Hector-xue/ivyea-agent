@@ -11,7 +11,7 @@ import re
 from collections import Counter
 from typing import Any
 
-from . import knowledge, memory, retrieval_index
+from . import knowledge, memory, retrieval_embeddings, retrieval_index
 
 
 DEFAULT_SOURCES = ("knowledge", "memory")
@@ -22,6 +22,7 @@ def capabilities() -> dict[str, Any]:
     """Describe retrieval features without requiring external services."""
     mem = memory.stats()
     cards = knowledge.list_cards()
+    embeddings = retrieval_embeddings.status()
     return {
         "local": True,
         "mode": RETRIEVAL_MODE,
@@ -37,8 +38,14 @@ def capabilities() -> dict[str, Any]:
         },
         "index": retrieval_index.status(),
         "semantic_vectors": {
-            "enabled": False,
-            "reason": "neural embedding backend not configured yet; local FTS, sparse vectors and persisted hash index are active",
+            "enabled": bool(embeddings.get("semantic_enabled")),
+            "backend": embeddings.get("active_backend"),
+            "configured_backend": embeddings.get("configured_backend"),
+            "model": embeddings.get("model"),
+            "model_path": embeddings.get("model_path"),
+            "fallback_reason": embeddings.get("fallback_reason"),
+            "reason": "dense local embeddings active" if embeddings.get("semantic_enabled")
+            else "neural embedding backend not active; local FTS, sparse vectors and persisted hash index are active",
         },
     }
 
@@ -77,6 +84,27 @@ def index_status() -> dict[str, Any]:
 def rebuild_index() -> dict[str, Any]:
     """Rebuild the persisted local retrieval index."""
     return retrieval_index.rebuild()
+
+
+def embeddings_status() -> dict[str, Any]:
+    """Return local retrieval embedding backend status."""
+    return retrieval_embeddings.status()
+
+
+def configure_embeddings(
+    *,
+    backend: str = "",
+    model: str = "",
+    model_path: str | None = None,
+    allow_download: bool | None = None,
+) -> dict[str, Any]:
+    """Configure the optional local semantic embedding backend."""
+    return retrieval_embeddings.configure(
+        backend=backend,
+        model=model,
+        model_path=model_path,
+        allow_download=allow_download,
+    )
 
 
 def _knowledge_hits(query: str, limit: int) -> list[dict[str, Any]]:

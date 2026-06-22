@@ -2708,6 +2708,47 @@ def _cmd_retrieval(args: argparse.Namespace) -> int:
             print(f"- knowledge_cards: {data.get('knowledge_cards')}")
             print(f"- db: {data.get('db')}")
         return 0
+    if args.action == "embeddings":
+        should_configure = any([
+            bool(args.backend),
+            bool(args.model),
+            args.model_path is not None,
+            bool(args.allow_download),
+            bool(args.no_download),
+        ])
+        if should_configure:
+            data = {
+                "ok": True,
+                "embeddings": retrieval.configure_embeddings(
+                    backend=args.backend or "",
+                    model=args.model or "",
+                    model_path=args.model_path,
+                    allow_download=True if args.allow_download else (False if args.no_download else None),
+                ),
+            }
+        else:
+            data = {"ok": True, "embeddings": retrieval.embeddings_status()}
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            emb = data["embeddings"]
+            print("Ivyea 本地语义检索后端")
+            print("")
+            print(f"- configured_backend: {emb.get('configured_backend')}")
+            print(f"- active_backend: {emb.get('active_backend')}")
+            print(f"- semantic_enabled: {emb.get('semantic_enabled')}")
+            print(f"- vector_kind: {emb.get('vector_kind')}")
+            print(f"- model: {emb.get('model')}")
+            print(f"- model_path: {emb.get('model_path') or '-'}")
+            print(f"- allow_download: {emb.get('allow_download')}")
+            print(f"- package_available: {emb.get('package_available')}")
+            if emb.get("fallback_reason"):
+                print(f"- fallback_reason: {emb.get('fallback_reason')}")
+            if emb.get("install_hint"):
+                print(f"- install_hint: {emb.get('install_hint')}")
+            print("")
+            print("配置后运行 `ivyea retrieval index` 重建索引。")
+        return 0
     if not args.query:
         print("用法: ivyea retrieval search <query>", file=sys.stderr)
         return 2
@@ -3098,10 +3139,15 @@ def build_parser() -> argparse.ArgumentParser:
     pmem.set_defaults(func=_cmd_memory)
 
     pret = sub.add_parser("retrieval", help="本地统一检索：knowledge + memory + 本地索引")
-    pret.add_argument("action", choices=["search", "capabilities", "index", "status"])
+    pret.add_argument("action", choices=["search", "capabilities", "index", "status", "embeddings"])
     pret.add_argument("query", nargs="?")
     pret.add_argument("--limit", type=int, default=8)
     pret.add_argument("--source", action="append", choices=["knowledge", "memory"], help="限定来源，可重复")
+    pret.add_argument("--backend", choices=["hash", "sentence-transformers", "sentence_transformers"], help="配置检索向量后端")
+    pret.add_argument("--model", help="配置 sentence-transformers 模型名，如 BAAI/bge-small-zh-v1.5")
+    pret.add_argument("--model-path", help="配置本地模型目录；为空字符串可清除")
+    pret.add_argument("--allow-download", action="store_true", help="允许 sentence-transformers 在重建索引时下载模型")
+    pret.add_argument("--no-download", action="store_true", help="禁止自动下载模型，仅使用本地 model-path")
     pret.add_argument("--json", action="store_true", help="输出 JSON，便于 IvyeaOps/脚本消费")
     pret.set_defaults(func=_cmd_retrieval)
 

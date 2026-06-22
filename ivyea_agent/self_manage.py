@@ -87,6 +87,30 @@ def install_doctor(info: dict[str, Any] | None = None) -> dict[str, Any]:
             optional.append({"name": label, "status": "warn", "detail": f"{module} not installed", "fix": fix})
     checks.extend(optional)
 
+    from . import retrieval_embeddings
+    emb = retrieval_embeddings.status()
+    if emb["configured_backend"] == "hash":
+        checks.append({
+            "name": "retrieval embeddings",
+            "status": "ok",
+            "detail": f"default {emb['active_backend']} ({emb['vector_kind']})",
+            "fix": "",
+        })
+    elif emb["semantic_enabled"]:
+        checks.append({
+            "name": "retrieval embeddings",
+            "status": "ok",
+            "detail": f"{emb['active_backend']} {emb['model']} ({emb['vector_kind']})",
+            "fix": "",
+        })
+    else:
+        checks.append({
+            "name": "retrieval embeddings",
+            "status": "warn",
+            "detail": f"fallback to {emb['active_backend']}: {emb.get('fallback_reason') or 'not ready'}",
+            "fix": emb.get("install_hint") or "运行 `ivyea retrieval embeddings --backend hash` 使用默认本地索引。",
+        })
+
     ok = all(c["status"] != "fail" for c in checks)
     return {"ok": ok, "info": info, "checks": checks, "next_steps": _doctor_next_steps(checks)}
 

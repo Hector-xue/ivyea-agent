@@ -8,38 +8,16 @@ by a downloaded embedding model later without changing the service contract.
 from __future__ import annotations
 
 import json
-import math
 import re
 import sqlite3
 import time
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from . import config, knowledge
+from . import config, knowledge, retrieval_embeddings
 
 
 BACKEND = "local_hash_embedding_v1"
-QUERY_ALIASES = {
-    "主图": "main image hero image",
-    "图片": "image creative content",
-    "转化": "conversion convert cvr",
-    "否词": "negative keyword negative targeting",
-    "预算": "budget",
-    "竞价": "bid bidding",
-    "出价": "bid bidding",
-    "点击": "click ctr",
-    "订单": "order orders",
-    "广告": "advertising sponsored products",
-    "搜索词": "search term query",
-    "关键词": "keyword targeting",
-    "竞品": "competitor conquesting",
-    "评论": "review reviews",
-    "库存": "inventory stock",
-    "利润": "profit margin",
-    "价格": "price offer",
-    "放量": "scaling scale budget bid",
-}
 
 
 def db_path() -> Path:
@@ -82,21 +60,31 @@ def status() -> dict[str, Any]:
     chunks = 0
     cards = 0
     updated_at = ""
+    emb_status = retrieval_embeddings.status()
+    vector_backend = emb_status["active_backend"]
+    vector_kind = emb_status["vector_kind"]
     if exists:
         conn = _conn()
         chunks = int(conn.execute("SELECT COUNT(*) c FROM chunks").fetchone()["c"])
         cards = int(conn.execute("SELECT COUNT(DISTINCT source_id) c FROM chunks WHERE source='knowledge'").fetchone()["c"])
         row = conn.execute("SELECT value FROM meta WHERE key='updated_at'").fetchone()
         updated_at = row["value"] if row else ""
+        row = conn.execute("SELECT value FROM meta WHERE key='vector_backend'").fetchone()
+        vector_backend = row["value"] if row else vector_backend
+        row = conn.execute("SELECT value FROM meta WHERE key='vector_kind'").fetchone()
+        vector_kind = row["value"] if row else vector_kind
         conn.close()
     return {
         "enabled": exists and chunks > 0,
-        "backend": BACKEND,
-        "external_dependency": False,
+        "backend": vector_backend,
+        "index_backend": BACKEND,
+        "vector_kind": vector_kind,
+        "external_dependency": bool(emb_status.get("external_dependency")),
         "db": str(path),
         "chunks": chunks,
         "knowledge_cards": cards,
         "updated_at": updated_at,
+        "embeddings": emb_status,
     }
 
 
@@ -120,7 +108,7 @@ def rebuild() -> dict[str, Any]:
                 " ".join(card.get("tags") or []),
                 text,
             ])
-            vector = _vector(vector_text)
+            vector = retrieval_embeddings.encode_document(vector_text)
             conn.execute(
                 "INSERT OR REPLACE INTO chunks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
@@ -133,11 +121,23 @@ def rebuild() -> dict[str, Any]:
                 ),
             )
             chunk_count += 1
+    emb = retrieval_embeddings.status()
     _set_meta(conn, "backend", BACKEND)
+    _set_meta(conn, "vector_backend", emb["active_backend"])
+    _set_meta(conn, "vector_kind", emb["vector_kind"])
     _set_meta(conn, "updated_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)))
     conn.commit()
     conn.close()
-    return {"ok": True, "backend": BACKEND, "knowledge_cards": card_count, "chunks": chunk_count, "db": str(db_path())}
+    return {
+        "ok": True,
+        "backend": emb["active_backend"],
+        "index_backend": BACKEND,
+        "vector_kind": emb["vector_kind"],
+        "knowledge_cards": card_count,
+        "chunks": chunk_count,
+        "db": str(db_path()),
+        "embeddings": emb,
+    }
 
 
 def search(query: str, limit: int = 8) -> list[dict[str, Any]]:
@@ -146,7 +146,7 @@ def search(query: str, limit: int = 8) -> list[dict[str, Any]]:
         return []
     if not db_path().exists() or status()["chunks"] == 0:
         rebuild()
-    qvec = _vector(_expand_query(q))
+    qvec = retrieval_embeddings.encode_query(q)
     if not qvec:
         return []
     conn = _conn()
@@ -155,8 +155,8 @@ def search(query: str, limit: int = 8) -> list[dict[str, Any]]:
     hits = []
     terms = _query_terms(q)
     for row in rows:
-        vec = _load_vector(row["vector_json"])
-        sim = _cosine(qvec, vec)
+        vec = retrieval_embeddings.decode(row["vector_json"])
+        sim = retrieval_embeddings.cosine(qvec, vec)
         if sim <= 0:
             continue
         text = row["text"] or ""
@@ -203,49 +203,6 @@ def _chunk_text(text: str, size: int = 1200, overlap: int = 160) -> list[str]:
 
 def _query_terms(text: str) -> list[str]:
     return re.findall(r"[\w\u4e00-\u9fff+.-]+", text)
-
-
-def _expand_query(text: str) -> str:
-    extras = [alias for term, alias in QUERY_ALIASES.items() if term.lower() in text.lower()]
-    return " ".join([text, *extras])
-
-
-def _tokens(text: str) -> list[str]:
-    tokens: list[str] = []
-    for raw in re.findall(r"[A-Za-z0-9+.-]+|[\u4e00-\u9fff]+", text.lower()):
-        if re.fullmatch(r"[\u4e00-\u9fff]+", raw):
-            if len(raw) <= 2:
-                tokens.append(raw)
-            else:
-                tokens.extend(raw[i:i + 2] for i in range(len(raw) - 1))
-        else:
-            tokens.append(raw)
-    return tokens
-
-
-def _vector(text: str) -> dict[str, float]:
-    counts = Counter(_tokens(text))
-    total = sum(counts.values()) or 1
-    return {k: round(v / total, 8) for k, v in counts.items()}
-
-
-def _load_vector(raw: str) -> dict[str, float]:
-    try:
-        data = json.loads(raw or "{}")
-    except json.JSONDecodeError:
-        return {}
-    return {str(k): float(v) for k, v in data.items()} if isinstance(data, dict) else {}
-
-
-def _cosine(left: dict[str, float], right: dict[str, float]) -> float:
-    if not left or not right:
-        return 0.0
-    dot = sum(value * right.get(key, 0.0) for key, value in left.items())
-    if dot <= 0:
-        return 0.0
-    ln = math.sqrt(sum(v * v for v in left.values()))
-    rn = math.sqrt(sum(v * v for v in right.values()))
-    return dot / (ln * rn) if ln and rn else 0.0
 
 
 def _snippet(body: str, terms: list[str], width: int = 240) -> str:

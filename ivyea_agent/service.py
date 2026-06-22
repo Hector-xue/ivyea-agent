@@ -62,8 +62,10 @@ def manifest() -> dict[str, Any]:
             {"method": "GET", "path": "/v1/capabilities", "description": "retrieval capabilities"},
             {"method": "GET", "path": "/v1/model", "description": "current model status without secrets"},
             {"method": "GET", "path": "/v1/knowledge/search", "description": "query bundled and user knowledge"},
+            {"method": "GET", "path": "/v1/retrieval/embeddings", "description": "local embedding backend status"},
             {"method": "GET", "path": "/v1/retrieval/status", "description": "persistent local retrieval index status"},
             {"method": "POST", "path": "/v1/retrieval/search", "description": "unified local retrieval over knowledge and memory"},
+            {"method": "POST", "path": "/v1/retrieval/embeddings", "description": "configure local embedding backend"},
             {"method": "POST", "path": "/v1/retrieval/index", "description": "rebuild persistent local retrieval index"},
             {"method": "GET", "path": "/v1/tasks", "description": "list tasks"},
             {"method": "POST", "path": "/v1/tasks", "description": "create task"},
@@ -165,6 +167,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/retrieval/status":
             self._json(200, {"ok": True, "index": retrieval.index_status()})
             return
+        if parsed.path == "/v1/retrieval/embeddings":
+            self._json(200, {"ok": True, "embeddings": retrieval.embeddings_status()})
+            return
         if parsed.path == "/v1/tasks":
             self._json(200, task_list(limit=_int(_first(qs, "limit"), 20), status=_first(qs, "status")))
             return
@@ -190,6 +195,20 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/retrieval/index":
             self._json(200, retrieval.rebuild_index())
+            return
+        if parsed.path == "/v1/retrieval/embeddings":
+            model_path = body.get("model_path") if "model_path" in body else None
+            self._json(200, {
+                "ok": True,
+                "embeddings": retrieval.configure_embeddings(
+                    backend=str(body.get("backend") or ""),
+                    model=str(body.get("model") or ""),
+                    model_path="" if model_path is None and "model_path" in body else (
+                        str(model_path) if model_path is not None else None
+                    ),
+                    allow_download=body.get("allow_download") if isinstance(body.get("allow_download"), bool) else None,
+                ),
+            })
             return
         if parsed.path == "/v1/tasks":
             try:

@@ -8,6 +8,7 @@
 #   $env:IVYEA_AUTO_INSTALL = "1"，缺 Python/pipx 时尽量自动安装；默认 1
 #   $env:GITHUB_TOKEN  = 私有仓库读取 release 时可用
 #   $env:PIP_INDEX_URL = pip 镜像
+#   $env:IVYEA_WITH_SEMANTIC = "1"，同时安装本地语义检索依赖 sentence-transformers
 $ErrorActionPreference = "Stop"
 
 $ownerRepo = if ($env:IVYEA_GITHUB_REPO) { $env:IVYEA_GITHUB_REPO } else { "Hector-xue/ivyea-agent" }
@@ -32,6 +33,11 @@ function Install-FromWheelhouse($wheel, $wheelhouse) {
   Info "安装到本地运行环境：$installDir"
   & $py -m venv --clear $installDir
   & $venvPip install --no-index --find-links $wheelhouse $wheel.FullName
+  $semanticMarker = Join-Path $wheelhouse ".ivyea-semantic"
+  if (($env:IVYEA_WITH_SEMANTIC -eq "1") -or (Test-Path $semanticMarker)) {
+    Info "安装本地语义检索依赖（sentence-transformers）…"
+    & $venvPip install --no-index --find-links $wheelhouse "sentence-transformers>=3.0"
+  }
 
   New-Item -ItemType Directory -Force -Path $binDir | Out-Null
   "@echo off`r`n`"$venvPython`" -m ivyea_agent.cli %*`r`n" | Set-Content -Encoding ASCII $launcher
@@ -110,6 +116,10 @@ if ($env:IVYEA_LOCAL) {
 Info "安装 ivyea-agent（来源：$spec）…"
 $pipxArgs += $spec
 & $py -m pipx @pipxArgs
+if ($env:IVYEA_WITH_SEMANTIC -eq "1") {
+  Info "安装本地语义检索依赖（sentence-transformers）…"
+  & $py -m pipx inject ivyea-agent "sentence-transformers>=3.0"
+}
 
 Info "✓ 安装完成。重开 PowerShell 后："
 try {

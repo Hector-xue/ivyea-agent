@@ -42,8 +42,41 @@ def test_retrieval_index_rebuild_and_status(ivyea_home):
     assert hits[0]["match"] == "local_hash_embedding_v1"
 
 
+def test_retrieval_embeddings_status_and_config(ivyea_home):
+    from ivyea_agent import retrieval
+
+    default = retrieval.embeddings_status()
+    assert default["configured_backend"] == "hash"
+    assert default["active_backend"] == "local_hash_embedding_v1"
+    assert default["semantic_enabled"] is False
+
+    semantic = retrieval.configure_embeddings(
+        backend="sentence-transformers",
+        model="BAAI/bge-small-zh-v1.5",
+        model_path="",
+        allow_download=False,
+    )
+    assert semantic["configured_backend"] == "sentence-transformers"
+    assert semantic["semantic_enabled"] is False
+    assert semantic["active_backend"] == "local_hash_embedding_v1"
+    assert semantic["fallback_reason"]
+
+    rebuilt = retrieval.rebuild_index()
+    assert rebuilt["backend"] == "local_hash_embedding_v1"
+    assert rebuilt["embeddings"]["configured_backend"] == "sentence-transformers"
+
+
 def test_retrieval_cli_outputs_json(ivyea_home, capsys):
     from ivyea_agent.cli import main
+
+    assert main(["retrieval", "embeddings", "--json"]) == 0
+    emb = json.loads(capsys.readouterr().out)
+    assert emb["embeddings"]["active_backend"] == "local_hash_embedding_v1"
+
+    assert main(["retrieval", "embeddings", "--backend", "sentence-transformers", "--no-download", "--json"]) == 0
+    emb = json.loads(capsys.readouterr().out)
+    assert emb["embeddings"]["configured_backend"] == "sentence-transformers"
+    assert emb["embeddings"]["active_backend"] == "local_hash_embedding_v1"
 
     assert main(["retrieval", "index", "--json"]) == 0
     indexed = json.loads(capsys.readouterr().out)
@@ -84,6 +117,7 @@ def test_service_health_shape_without_socket(ivyea_home):
     manifest = service.manifest()
     assert manifest["api_version"] == "v1"
     assert manifest["security"]["secrets_in_responses"] is False
+    assert any(e["path"] == "/v1/retrieval/embeddings" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/retrieval/status" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/retrieval/search" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/retrieval/index" for e in manifest["endpoints"])
@@ -152,6 +186,22 @@ def test_local_service_health_and_retrieval(ivyea_home):
             indexed = json.loads(resp.read().decode("utf-8"))
         assert indexed["ok"] is True
         assert indexed["chunks"] > 0
+
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/retrieval/embeddings", timeout=5) as resp:
+            embeddings = json.loads(resp.read().decode("utf-8"))
+        assert embeddings["ok"] is True
+        assert embeddings["embeddings"]["active_backend"]
+
+        req = urllib.request.Request(
+            f"http://{host}:{port}/v1/retrieval/embeddings",
+            data=json.dumps({"backend": "hash"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            configured = json.loads(resp.read().decode("utf-8"))
+        assert configured["ok"] is True
+        assert configured["embeddings"]["configured_backend"] == "hash"
 
         with urllib.request.urlopen(f"http://{host}:{port}/v1/retrieval/status", timeout=5) as resp:
             status = json.loads(resp.read().decode("utf-8"))

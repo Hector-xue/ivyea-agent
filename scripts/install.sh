@@ -9,6 +9,7 @@
 #   IVYEA_AUTO_INSTALL=1      # 缺 Python/pipx 时尽量自动安装；默认 1
 #   GITHUB_TOKEN=...          # 私有仓库读取 release 时可用
 #   PIP_INDEX_URL=...         # pip 镜像（国内可用清华源加速）
+#   IVYEA_WITH_SEMANTIC=1     # 同时安装本地语义检索依赖 sentence-transformers
 set -euo pipefail
 
 OWNER_REPO="${IVYEA_GITHUB_REPO:-Hector-xue/ivyea-agent}"
@@ -70,6 +71,10 @@ install_from_wheelhouse() {
   say "安装到本地运行环境：$install_dir"
   "$PY" -m venv --clear "$install_dir" || die "创建 venv 失败。Linux 如缺 venv，请安装 python3-venv。"
   "$venv_pip" install --no-index --find-links "$WHEELHOUSE" "$wheel"
+  if [ "${IVYEA_WITH_SEMANTIC:-0}" = "1" ] || [ -f "$WHEELHOUSE/.ivyea-semantic" ]; then
+    say "安装本地语义检索依赖（sentence-transformers）…"
+    "$venv_pip" install --no-index --find-links "$WHEELHOUSE" "sentence-transformers>=3.0"
+  fi
 
   mkdir -p "$bin_dir"
   cat > "$launcher" <<EOF
@@ -165,6 +170,10 @@ else
 fi
 say "安装 ivyea-agent（来源：$SPEC）…"
 pipx install --force "${PIPX_ARGS[@]}" "$SPEC"
+if [ "${IVYEA_WITH_SEMANTIC:-0}" = "1" ]; then
+  say "安装本地语义检索依赖（sentence-transformers）…"
+  pipx inject ivyea-agent "sentence-transformers>=3.0"
+fi
 
 say "✓ 安装完成。"
 if ! command -v ivyea >/dev/null 2>&1; then

@@ -55,6 +55,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default="dist/offline", help="Output directory")
     parser.add_argument("--python", default=sys.executable, help="Python executable used for build/download")
+    parser.add_argument("--with-semantic", action="store_true", help="Include optional sentence-transformers wheels")
     parser.add_argument("--no-archive", action="store_true", help="Only create directory, skip zip/tar.gz")
     args = parser.parse_args()
 
@@ -78,6 +79,9 @@ def main() -> int:
     project_wheel = wheels[-1]
 
     run([args.python, "-m", "pip", "download", str(project_wheel), "-d", str(wheelhouse)])
+    if args.with_semantic:
+        run([args.python, "-m", "pip", "download", "sentence-transformers>=3.0", "-d", str(wheelhouse)])
+        (wheelhouse / ".ivyea-semantic").write_text("sentence-transformers\n", encoding="utf-8")
 
     shutil.copy2(ROOT / "scripts" / "install.sh", bundle_dir / "install.sh")
     shutil.copy2(ROOT / "scripts" / "install.ps1", bundle_dir / "install.ps1")
@@ -93,6 +97,7 @@ def main() -> int:
                 "  powershell -ExecutionPolicy Bypass -File .\\install.ps1",
                 "",
                 "The installer uses ./wheelhouse and does not download Python packages.",
+                "If this bundle was built with --with-semantic, it also installs the local semantic retrieval dependency.",
                 "If Python 3.9+ is not installed, install Python first or allow the online installer to bootstrap it.",
                 "",
             ]

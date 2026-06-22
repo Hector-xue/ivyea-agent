@@ -59,7 +59,7 @@ IvyeaAgent 后续同时承担两个角色：
 ### 阶段 3：本地语义检索
 
 - 先提供不依赖外部模型的 `local_sparse_vector` 和持久化 `local_hash_embedding_v1` 索引，作为无 Ollama/无 embedding 模型时的降级能力。
-- 引入本地 embedding 模型管理：自动下载、缓存、离线包预置。
+- 引入本地 embedding 模型管理：`retrieval embeddings` 可配置 `sentence-transformers`，支持自动下载开关、model path、离线包预置依赖。
 - SQLite FTS + 向量索引混合召回。
 - 支持索引健康检查、重建、版本迁移；增量索引后续接在当前 SQLite chunk 表之上。
 - 无 embedding 模型时自动降级到 FTS/LIKE，并明确告知。
@@ -86,6 +86,7 @@ IvyeaAgent 后续同时承担两个角色：
 
 - `ivyea_agent.retrieval`：统一本地检索入口。
 - `ivyea_agent.retrieval_index`：持久化本地 chunk 索引，默认不依赖外部模型。
+- `ivyea_agent.retrieval_embeddings`：检索向量后端选择，默认 hash，可选本地 dense embedding。
 - `ivyea serve`：本地 HTTP JSON API。
 - API 测试和检索测试。
 
