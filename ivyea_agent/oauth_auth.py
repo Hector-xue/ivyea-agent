@@ -886,7 +886,9 @@ def auth_path() -> Path:
 
 
 def qwen_cli_auth_path() -> Path:
-    return Path.home() / ".qwen" / "oauth_creds.json"
+    home = os.environ.get("HOME")
+    root = Path(home).expanduser() if home else Path.home()
+    return root / ".qwen" / "oauth_creds.json"
 
 
 def import_qwen_cli_tokens(path: Path | None = None) -> Path:

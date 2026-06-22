@@ -65,6 +65,12 @@ def test_import_qwen_cli_tokens(ivyea_home, tmp_path):
     assert item["source"].startswith("qwen-cli:")
 
 
+def test_qwen_cli_auth_path_respects_home_env(ivyea_home, tmp_path, monkeypatch):
+    from ivyea_agent import oauth_auth
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert oauth_auth.qwen_cli_auth_path() == tmp_path / ".qwen" / "oauth_creds.json"
+
+
 def test_qwen_cli_login_runs_command_and_imports(ivyea_home, tmp_path, monkeypatch):
     from ivyea_agent import oauth_auth
     qwen_dir = tmp_path / ".qwen"
