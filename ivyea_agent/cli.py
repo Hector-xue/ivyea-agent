@@ -73,46 +73,114 @@ def _model_key_label(settings: dict | None = None) -> str:
 
 
 def _model_picker() -> None:
-    """像 Hermes：按 provider profile 列出模型、认证状态和可用性。"""
+    """Provider-first model picker: choose vendor, then choose/configure model."""
     from . import models
     config.ensure_dirs()
     s = config.load_settings()
     print(f"\n当前主脑: {_C['c']}{s.get('label', s.get('provider'))}{_C['x']} "
           f"（{s.get('model')}，{_model_key_label(s)}）\n")
     idx, n = {}, 1
-    for group, items in models.grouped():
+    for group, items in models.grouped_providers():
         print(f"{_C['b']}{group}{_C['x']}")
-        for m in items:
-            status = m.get("status", "usable")
-            auth = m.get("auth_type", "api_key")
-            tag = "" if status == "usable" else f"{_C['d']} ({auth}·待接){_C['x']}"
-            print(f"  {_C['c']}{n:>2}{_C['x']}) {m['label']}{tag}")
-            idx[str(n)] = m; n += 1
+        for provider in items:
+            status = models.key_status(provider)
+            auth = provider.get("auth_type", "api_key")
+            tag = f"{_C['d']} · {auth} · {status}{_C['x']}"
+            print(f"  {_C['c']}{n:>2}{_C['x']}) {provider['label']}{tag}")
+            idx[str(n)] = provider
+            n += 1
     choice = _ask("\n选择编号（回车取消）")
-    m = idx.get(choice)
-    if not m:
+    provider = idx.get(choice)
+    if not provider:
         print("已取消。"); return
-    model, base = m.get("model", ""), m.get("base", "")
-    if m.get("provider_id") in ("custom", "azure-foundry") or m["id"] == "custom":
+
+    if not _provider_auth_ready(provider):
+        _print_provider_auth_required(provider)
+        return
+
+    model, base = _choose_provider_model(provider)
+    entry = _provider_model_entry(provider, model)
+    if provider["id"] in ("custom", "azure-foundry"):
         base = _ask("base_url（OpenAI 兼容，如 https://xxx/v1）", base)
         model = _ask("model 名", model)
-    elif m["kind"] == "openai":
-        model = _ask("model 名（回车用默认）", model)
-    config.apply_model(m, model=model, base_url=base)
-    if m.get("key_env") and m.get("auth_type", "api_key") == "api_key":
+    config.apply_model(entry, model=model, base_url=base)
+    if provider.get("key_env") and provider.get("auth_type", "api_key") == "api_key":
         cur = "已配置" if config.get_active_key() else "未配置"
-        nk = _ask_secret(f"{m['label']} 的 API key（{m['key_env']}，当前{cur}；回车跳过 / - 清空）")
+        nk = _ask_secret(f"{provider['label']} 的 API key（{provider['key_env']}，当前{cur}；回车跳过 / - 清空）")
         if nk == "-":
-            config.set_env_key(m["key_env"], "")
+            config.set_env_key(provider["key_env"], "")
         elif nk:
-            config.set_env_key(m["key_env"], nk)
-        print(f"✓ 已切换主脑：{m['label']}（{model or m.get('model')}），"
+            config.set_env_key(provider["key_env"], nk)
+        print(f"✓ 已切换主脑：{provider['label']}（{model}），"
               f"{'已配 key' if config.get_active_key() else '未配 key'}")
     else:
-        if m.get("status") == "usable":
-            print(f"✓ 已切换主脑：{m['label']}（{model or m.get('model')}），{m.get('auth_type', 'api_key')}")
+        if provider.get("status") == "usable":
+            print(f"✓ 已切换主脑：{provider['label']}（{model}），{provider.get('auth_type', 'api_key')}")
         else:
-            print(f"已选 {m['label']}，但{m.get('note', '该 provider 需要后续 transport/认证适配')}。")
+            print(f"已选 {provider['label']}，但{provider.get('note', '该 provider 需要后续 transport/认证适配')}。")
+
+
+def _provider_auth_ready(provider: dict) -> bool:
+    from . import models
+    auth = (provider.get("auth_type") or "api_key").lower()
+    if auth not in ("oauth_external", "oauth_device_code", "copilot"):
+        return True
+    return not models.key_status(provider).startswith("missing:")
+
+
+def _print_provider_auth_required(provider: dict) -> None:
+    pid = provider.get("id", "")
+    print(ui.message("warn", f"{provider.get('label', pid)} 还没有完成认证，暂不切换主脑。"))
+    print("先执行：")
+    if pid == "openai-codex":
+        print("  ivyea model auth openai-codex --device-code")
+        print("  ivyea model auth openai-codex --probe")
+    elif pid == "google-gemini-cli":
+        print("  ivyea model auth google-gemini-cli --login")
+        print("  ivyea model auth google-gemini-cli --probe")
+    elif pid == "copilot":
+        print("  ivyea model auth copilot --exchange")
+        print("  ivyea model auth copilot --probe")
+    elif pid == "qwen-oauth":
+        print("  ivyea model auth qwen-oauth --login")
+        print("  ivyea model auth qwen-oauth --probe")
+    else:
+        print(f"  ivyea model auth {pid}")
+
+
+def _choose_provider_model(provider: dict) -> tuple[str, str]:
+    models = list(provider.get("models") or [])
+    default = provider.get("default_model") or (models[0] if models else "")
+    base = provider.get("base", "")
+    if not models:
+        return default, base
+    print(f"\n{provider['label']} 可用模型：")
+    for i, model in enumerate(models, start=1):
+        mark = "（默认）" if model == default else ""
+        print(f"  {_C['c']}{i:>2}{_C['x']}) {model} {mark}")
+    raw = _ask("选择模型编号或直接输入 model 名（回车用默认）", "")
+    if not raw:
+        return default, base
+    if raw.isdigit() and 1 <= int(raw) <= len(models):
+        return models[int(raw) - 1], base
+    return raw, base
+
+
+def _provider_model_entry(provider: dict, model: str) -> dict:
+    return {
+        "id": f"{provider['id']}:{model}" if model else provider["id"],
+        "provider_id": provider["id"],
+        "label": provider["label"],
+        "kind": provider.get("kind", "openai"),
+        "api_mode": provider.get("api_mode", "chat_completions"),
+        "model": model,
+        "base": provider.get("base", ""),
+        "key_env": provider.get("key_env", ""),
+        "group": provider.get("group", ""),
+        "auth_type": provider.get("auth_type", "api_key"),
+        "status": provider.get("status", "usable"),
+        "note": provider.get("note", ""),
+    }
 
 
 def _render_model_providers() -> str:
@@ -1488,6 +1556,10 @@ def _cmd_model(args: argparse.Namespace) -> int:
             print(f"未知模型 id：{args.spec}。`ivyea model list` 看清单，或 `ivyea model` 交互选。",
                   file=sys.stderr)
             return 2
+        provider = models.provider_by_id(m.get("provider_id", ""))
+        if provider and not _provider_auth_ready(provider):
+            _print_provider_auth_required(provider)
+            return 1
         cfg.apply_model(m)
         print(f"已切换主脑: {m['label']}"
               f"（{_model_key_label(cfg.load_settings())}）")

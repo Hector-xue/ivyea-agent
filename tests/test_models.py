@@ -49,6 +49,29 @@ def test_cli_model_provider_and_doctor_outputs(ivyea_home, capsys):
     assert rc == 0 and "OK 当前模型配置可进入对话" in out
 
 
+def test_cli_model_direct_oauth_requires_auth(ivyea_home, capsys):
+    from argparse import Namespace
+    from ivyea_agent import cli, config
+    rc = cli._cmd_model(Namespace(spec="openai-codex:gpt-5-codex", extra=None, token=None,
+                                  refresh_token=None, expires_at=0))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "暂不切换主脑" in out
+    assert "ivyea model auth openai-codex --device-code" in out
+    assert config.load_settings().get("provider_id") != "openai-codex"
+
+
+def test_model_picker_lists_providers_first(ivyea_home, monkeypatch, capsys):
+    from ivyea_agent import cli
+    answers = iter(["", ""])
+    monkeypatch.setattr(cli, "_ask", lambda prompt, default="": next(answers, default))
+    cli._model_picker()
+    out = capsys.readouterr().out
+    assert "OpenAI API" in out
+    assert "OpenAI API · gpt-4o" not in out
+    assert "gpt-5-codex" not in out
+
+
 def test_cli_model_auth_imports_token(ivyea_home, capsys):
     from argparse import Namespace
     from ivyea_agent import cli, config, models, oauth_auth

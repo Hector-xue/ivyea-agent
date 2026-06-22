@@ -51,10 +51,12 @@ class ChatInput:
                 from prompt_toolkit import PromptSession
                 from prompt_toolkit.history import FileHistory
                 from prompt_toolkit.styles import Style
+                from prompt_toolkit.shortcuts.prompt import CompleteStyle
                 config.ensure_dirs()
                 self._session = PromptSession(
                     history=FileHistory(str(config.IVYEA_DIR / "chat_history")),
                     completer=self._completer(), complete_while_typing=True,
+                    complete_style=CompleteStyle.READLINE_LIKE,
                     style=Style.from_dict(self._style_dict()))
                 self._mode = "session"
             except Exception:
@@ -77,9 +79,8 @@ class ChatInput:
     def _read_boxed(self) -> object:
         from prompt_toolkit.application import Application
         from prompt_toolkit.layout import Layout
-        from prompt_toolkit.layout.containers import HSplit, Window, FloatContainer, Float
+        from prompt_toolkit.layout.containers import HSplit, Window
         from prompt_toolkit.layout.controls import FormattedTextControl
-        from prompt_toolkit.layout.menus import CompletionsMenu
         from prompt_toolkit.widgets import Frame, TextArea
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.styles import Style
@@ -89,12 +90,7 @@ class ChatInput:
                       history=self._history)
         frame = Frame(ta)
         hint = Window(FormattedTextControl(lambda: self.status_fn()), height=1, style="class:hint")
-        # 关键：补全下拉需要一个 CompletionsMenu 浮层，否则输入 / 不弹候选
-        root = FloatContainer(
-            content=HSplit([frame, hint]),
-            floats=[Float(xcursor=True, ycursor=True,
-                          content=CompletionsMenu(max_height=10, scroll_offset=1))],
-        )
+        root = HSplit([frame, hint])
         kb = KeyBindings()
 
         @kb.add("enter")
