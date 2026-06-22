@@ -6,7 +6,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__, config, knowledge, models, retrieval, task_runner
+from . import __version__, agent_loop, config, knowledge, models, retrieval, security, task_runner
+from .agent_tools import ToolContext
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -53,7 +54,7 @@ def manifest() -> dict[str, Any]:
             "knowledge_search": True,
             "local_retrieval": retrieval.capabilities(),
             "task_state": True,
-            "chat": False,
+            "chat": True,
             "write_execution": False,
         },
         "endpoints": [
@@ -61,6 +62,7 @@ def manifest() -> dict[str, Any]:
             {"method": "GET", "path": "/v1/manifest", "description": "IvyeaOps integration manifest"},
             {"method": "GET", "path": "/v1/capabilities", "description": "retrieval capabilities"},
             {"method": "GET", "path": "/v1/model", "description": "current model status without secrets"},
+            {"method": "POST", "path": "/v1/chat", "description": "run one read-only embedded agent turn"},
             {"method": "GET", "path": "/v1/knowledge/search", "description": "query bundled and user knowledge"},
             {"method": "GET", "path": "/v1/retrieval/embeddings", "description": "local embedding backend status"},
             {"method": "GET", "path": "/v1/retrieval/status", "description": "persistent local retrieval index status"},
@@ -119,6 +121,66 @@ def task_update(task_id: str, action: str, payload: dict[str, Any]) -> dict[str,
     else:
         raise ValueError(f"unknown task action: {action}")
     return {"ok": True, "task": task}
+
+
+def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, Any]:
+    """Run one embedded agent turn for IvyeaOps.
+
+    The HTTP service defaults to read-only plan mode so write/execute tools do
+    not prompt inside a headless API request. IvyeaOps can still show suggested
+    actions, then route approved writes through explicit product UI flows.
+    """
+    from .providers import LLMError, build_chain
+
+    message = str(payload.get("message") or payload.get("input") or "").strip()
+    if not message:
+        raise ValueError("message is required")
+    model_cfg = config.get_model_config()
+    api_key = config.get_active_key()
+    if _model_requires_key(model_cfg) and not api_key and provider is None:
+        return {"ok": False, "error": "model_not_configured", "model": health()["model"]}
+
+    plan_mode = payload.get("plan_mode")
+    if plan_mode is None:
+        plan_mode = True
+    ctx = ToolContext(
+        execute=False,
+        plan_mode=bool(plan_mode),
+        workspace=str(payload.get("workspace") or ""),
+        task_id=str(payload.get("task_id") or ""),
+    )
+    ctx.session_id = str(payload.get("session_id") or "")
+    ctx.turn_id = str(payload.get("turn_id") or "")
+    if payload.get("asin"):
+        ctx.asin = str(payload.get("asin") or "")
+
+    messages = _chat_messages(message, payload, ctx)
+    events: list[dict[str, Any]] = []
+
+    def narrate(text: str) -> None:
+        events.append({"type": "event", "text": security.redact_text(str(text))})
+
+    try:
+        provider = provider or build_chain(model_cfg, api_key, narrate=narrate)
+        text = agent_loop.run_turn(provider, ctx, messages, max_steps=_int(payload.get("max_steps"), 12), narrate=narrate)
+    except LLMError as exc:
+        return {"ok": False, "error": "model_error", "detail": str(exc), "events": events}
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "text": text,
+        "events": events,
+        "messages": _public_messages(messages),
+        "model": health()["model"],
+        "read_only": bool(plan_mode),
+        "todos": list(ctx.todos or []),
+    }
+    if ctx.task_id:
+        try:
+            result["task"] = task_runner.load(ctx.task_id)
+        except (FileNotFoundError, OSError, ValueError):
+            pass
+    return result
 
 
 def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
@@ -185,6 +247,12 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         body = self._read_json()
+        if parsed.path == "/v1/chat":
+            try:
+                self._json(200, chat_run(body))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
         if parsed.path == "/v1/retrieval/search":
             result = retrieval.search(
                 str(body.get("query") or ""),
@@ -259,3 +327,51 @@ def _int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _model_requires_key(settings: dict[str, Any]) -> bool:
+    auth = (settings.get("auth_type") or "api_key").lower()
+    if auth in ("none", "aws_sdk"):
+        return False
+    return bool(settings.get("key_env") or auth in ("oauth_external", "oauth_device_code", "copilot"))
+
+
+def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext) -> list[dict[str, Any]]:
+    system = agent_loop.SYSTEM_PROMPT
+    if ctx.plan_mode:
+        system += agent_loop.PLAN_NOTE
+    system += "\n\n[IvyeaOps 嵌入模式] 当前默认只读。需要写入广告、文件或执行命令时，先输出计划和审批项，不要在本轮直接执行。"
+    if payload.get("system"):
+        system += "\n\n[调用方系统上下文]\n" + str(payload.get("system") or "")
+    messages = [{"role": "system", "content": system}]
+    history = payload.get("history") if isinstance(payload.get("history"), list) else []
+    for row in history[-20:]:
+        if not isinstance(row, dict):
+            continue
+        role = str(row.get("role") or "")
+        if role not in ("user", "assistant"):
+            continue
+        messages.append({"role": role, "content": str(row.get("content") or "")})
+    user_content = message
+    if payload.get("inject_retrieval", True):
+        retrieved = retrieval.search(message, limit=3, sources=["knowledge"])
+        snippets = []
+        for hit in retrieved.get("hits") or []:
+            snippets.append(f"- {hit.get('title') or hit.get('id')}: {hit.get('snippet')}")
+        if snippets:
+            user_content += "\n\n[Ivyea 本地知识检索]\n" + "\n".join(snippets)
+    messages.append({"role": "user", "content": user_content})
+    return messages
+
+
+def _public_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    rows = []
+    for msg in messages:
+        role = msg.get("role")
+        if role not in ("user", "assistant", "tool"):
+            continue
+        content = msg.get("content")
+        if content is None:
+            content = ""
+        rows.append({"role": str(role), "content": security.redact_text(str(content))})
+    return rows[-30:]

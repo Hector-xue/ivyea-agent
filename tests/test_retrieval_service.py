@@ -117,6 +117,9 @@ def test_service_health_shape_without_socket(ivyea_home):
     manifest = service.manifest()
     assert manifest["api_version"] == "v1"
     assert manifest["security"]["secrets_in_responses"] is False
+    assert manifest["capabilities"]["chat"] is True
+    assert manifest["capabilities"]["write_execution"] is False
+    assert any(e["path"] == "/v1/chat" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/retrieval/embeddings" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/retrieval/status" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/retrieval/search" for e in manifest["endpoints"])
@@ -147,7 +150,55 @@ def test_service_task_api_helpers(ivyea_home):
     assert detail["task"]["id"] == task_id
 
 
-def test_local_service_health_and_retrieval(ivyea_home):
+class _ServiceChatProvider:
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages, tools=None, temperature=0.3, timeout=120.0):
+        self.calls += 1
+        assert messages[-1]["role"] == "user"
+        assert "Ivyea 本地知识检索" in messages[-1]["content"]
+        return {"role": "assistant", "content": "只读分析完成", "tool_calls": []}
+
+
+class _ServiceToolProvider:
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages, tools=None, temperature=0.3, timeout=120.0):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "c1", "name": "knowledge_search", "arguments": {"query": "否词", "limit": 1}}],
+            }
+        return {"role": "assistant", "content": "已结合知识库回答", "tool_calls": []}
+
+
+def test_service_chat_run_with_fake_provider(ivyea_home):
+    from ivyea_agent import service
+
+    result = service.chat_run({"message": "主图转化怎么判断", "max_steps": 2}, provider=_ServiceChatProvider())
+
+    assert result["ok"] is True
+    assert result["read_only"] is True
+    assert result["text"] == "只读分析完成"
+    assert result["messages"][-1]["role"] == "assistant"
+
+
+def test_service_chat_run_with_tool_event(ivyea_home):
+    from ivyea_agent import service
+
+    result = service.chat_run({"message": "否词规则", "max_steps": 3}, provider=_ServiceToolProvider())
+
+    assert result["ok"] is True
+    assert result["text"] == "已结合知识库回答"
+    assert any("knowledge_search" in e["text"] for e in result["events"])
+    assert any(m["role"] == "tool" for m in result["messages"])
+
+
+def test_local_service_health_and_retrieval(ivyea_home, monkeypatch):
     from ivyea_agent import service
 
     try:
@@ -175,6 +226,18 @@ def test_local_service_health_and_retrieval(ivyea_home):
             result = json.loads(resp.read().decode("utf-8"))
         assert result["ok"] is True
         assert result["hits"]
+
+        monkeypatch.setattr(service, "chat_run", lambda body: {"ok": True, "text": body.get("message"), "events": []})
+        req = urllib.request.Request(
+            f"http://{host}:{port}/v1/chat",
+            data=json.dumps({"message": "hello"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            chat = json.loads(resp.read().decode("utf-8"))
+        assert chat["ok"] is True
+        assert chat["text"] == "hello"
 
         req = urllib.request.Request(
             f"http://{host}:{port}/v1/retrieval/index",

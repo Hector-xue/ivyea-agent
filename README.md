@@ -58,6 +58,7 @@ ivyea serve --host 127.0.0.1 --port 8765
 - `GET /health`：健康检查、版本、模型状态、知识库数量、检索能力。
 - `GET /v1/manifest`：IvyeaOps 集成发现清单，包含 API 版本、端点、能力和安全边界。
 - `GET /v1/capabilities`：本地检索能力说明。
+- `POST /v1/chat`：运行一轮 IvyeaOps 嵌入式 Agent 对话；默认只读计划模式，返回回答、工具事件和脱敏消息。
 - `GET /v1/knowledge/search?q=否词&limit=5`：亚马逊知识库检索。
 - `GET /v1/retrieval/embeddings`：本地检索向量后端状态，区分默认 hash 和真实 dense embedding 是否可用。
 - `GET /v1/retrieval/status`：持久化本地检索索引状态，包含 backend、chunks、更新时间和索引库位置。
@@ -69,6 +70,10 @@ ivyea serve --host 127.0.0.1 --port 8765
 独立 CLI 也可以直接调用统一检索：
 
 ```bash
+curl -s http://127.0.0.1:8765/v1/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"主图点击高但转化低，应该先看什么？","max_steps":6}'
+
 ivyea retrieval index
 ivyea retrieval status --json
 ivyea retrieval embeddings
