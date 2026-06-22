@@ -51,3 +51,14 @@ def test_active_key(ivyea_home):
     config.set_setting("key_env", "DEEPSEEK_API_KEY")
     config.set_env_key("DEEPSEEK_API_KEY", "sk-test")
     assert config.get_active_key() == "sk-test"
+
+
+def test_apply_model_persists_provider_profile_fields(ivyea_home):
+    from ivyea_agent import config, models
+    entry = models.by_id("openrouter:anthropic/claude-sonnet-4.6")
+    config.apply_model(entry)
+    s = config.get_model_config()
+    assert s["provider_id"] == "openrouter"
+    assert s["api_mode"] == "chat_completions"
+    assert s["auth_type"] == "api_key"
+    assert s["key_env"] == "OPENROUTER_API_KEY"

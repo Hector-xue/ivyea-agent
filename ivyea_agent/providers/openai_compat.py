@@ -78,17 +78,22 @@ class OpenAICompatProvider(LLMProvider):
         super().__init__(api_key, model)
         self.base_url = (base_url or "").rstrip("/")
 
+    def _headers(self, *, stream: bool = False) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
     def _post(self, payload: dict, timeout: float) -> dict:
-        if not self.api_key:
-            raise LLMError("API key 未配置（用 /config 或 ivyea model 配置）")
         if not self.base_url:
             raise LLMError("base_url 未配置")
+        headers = self._headers(stream=False)
         last = ""
         for attempt in range(_RETRIES):
             try:
                 resp = httpx.post(
                     f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                    headers=headers,
                     json=payload, timeout=timeout)
             except httpx.HTTPError as exc:
                 last = f"连接失败：{exc}"   # 网络错误可重试
@@ -133,8 +138,9 @@ class OpenAICompatProvider(LLMProvider):
     def stream_chat(self, messages, tools=None, temperature=0.3, timeout=120.0):
         """流式工具调用。产出 parse_sse 的事件流（text 增量 + final）。
         失败时抛 LLMError，调用方可回退到非流式 chat。"""
-        if not self.api_key:
-            raise LLMError("API key 未配置（用 /config 或 ivyea model 配置）")
+        if not self.base_url:
+            raise LLMError("base_url 未配置")
+        headers = self._headers(stream=True)
         payload: dict[str, Any] = {"model": self.model, "messages": messages,
                                    "temperature": temperature, "stream": True,
                                    "stream_options": {"include_usage": True}}
@@ -147,8 +153,7 @@ class OpenAICompatProvider(LLMProvider):
             retryable = False
             try:
                 with httpx.stream("POST", f"{self.base_url}/chat/completions",
-                                  headers={"Authorization": f"Bearer {self.api_key}",
-                                           "Content-Type": "application/json"},
+                                  headers=headers,
                                   json=payload, timeout=timeout) as resp:
                     if resp.status_code != 200:
                         last = f"HTTP {resp.status_code}: {resp.read().decode('utf-8', 'replace')[:200]}"

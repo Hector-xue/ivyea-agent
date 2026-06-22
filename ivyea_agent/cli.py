@@ -14,6 +14,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import __version__, config, ui
@@ -38,20 +39,53 @@ def _ask_secret(prompt: str) -> str:
         return ""
 
 
+def _model_needs_key(settings: dict | None = None) -> bool:
+    s = settings or config.load_settings()
+    auth = (s.get("auth_type") or "api_key").lower()
+    if auth in ("none", "aws_sdk"):
+        return False
+    if auth in ("oauth_external", "oauth_device_code", "copilot"):
+        return True
+    return bool(s.get("key_env"))
+
+
+def _model_ready(settings: dict | None = None) -> bool:
+    s = settings or config.load_settings()
+    if not _model_needs_key(s):
+        return True
+    return bool(config.get_active_key())
+
+
+def _model_key_label(settings: dict | None = None) -> str:
+    s = settings or config.load_settings()
+    auth = (s.get("auth_type") or "api_key").lower()
+    if auth == "none":
+        return "无需 key"
+    if auth == "aws_sdk":
+        return "AWS SDK 凭据"
+    if auth in ("oauth_external", "oauth_device_code", "copilot"):
+        provider_id = str(s.get("provider_id") or s.get("provider") or "")
+        if config.get_active_key():
+            return f"已认证({auth})"
+        suffix = s.get("key_env") or provider_id or "auth-token"
+        return f"未认证({suffix})"
+    return "已配 key" if config.get_active_key() else f"未配 key({s.get('key_env') or '-'})"
+
+
 def _model_picker() -> None:
-    """像 Hermes/Claude：列出国内外主流模型 + 登录制，选编号配置。"""
+    """像 Hermes：按 provider profile 列出模型、认证状态和可用性。"""
     from . import models
     config.ensure_dirs()
     s = config.load_settings()
     print(f"\n当前主脑: {_C['c']}{s.get('label', s.get('provider'))}{_C['x']} "
-          f"（{s.get('model')}，{'已配 key' if config.get_active_key() else '未配 key'}）\n")
+          f"（{s.get('model')}，{_model_key_label(s)}）\n")
     idx, n = {}, 1
     for group, items in models.grouped():
         print(f"{_C['b']}{group}{_C['x']}")
         for m in items:
-            tag = {"openai": "",
-                   "native": f"{_C['d']} (原生API·规划中){_C['x']}",
-                   "login": f"{_C['d']} (登录制·规划中){_C['x']}"}.get(m["kind"], "")
+            status = m.get("status", "usable")
+            auth = m.get("auth_type", "api_key")
+            tag = "" if status == "usable" else f"{_C['d']} ({auth}·待接){_C['x']}"
             print(f"  {_C['c']}{n:>2}{_C['x']}) {m['label']}{tag}")
             idx[str(n)] = m; n += 1
     choice = _ask("\n选择编号（回车取消）")
@@ -59,13 +93,13 @@ def _model_picker() -> None:
     if not m:
         print("已取消。"); return
     model, base = m.get("model", ""), m.get("base", "")
-    if m["id"] == "custom":
+    if m.get("provider_id") in ("custom", "azure-foundry") or m["id"] == "custom":
         base = _ask("base_url（OpenAI 兼容，如 https://xxx/v1）", base)
         model = _ask("model 名", model)
     elif m["kind"] == "openai":
         model = _ask("model 名（回车用默认）", model)
     config.apply_model(m, model=model, base_url=base)
-    if m["kind"] in ("openai", "anthropic"):
+    if m.get("key_env") and m.get("auth_type", "api_key") == "api_key":
         cur = "已配置" if config.get_active_key() else "未配置"
         nk = _ask_secret(f"{m['label']} 的 API key（{m['key_env']}，当前{cur}；回车跳过 / - 清空）")
         if nk == "-":
@@ -75,8 +109,334 @@ def _model_picker() -> None:
         print(f"✓ 已切换主脑：{m['label']}（{model or m.get('model')}），"
               f"{'已配 key' if config.get_active_key() else '未配 key'}")
     else:
-        print(f"已选 {m['label']}，但{m.get('note', '该类型规划中')}。"
-              f"当前可直接用：Claude 原生 + OpenAI 兼容类（DeepSeek/通义/Kimi/GLM/豆包/MiniMax/OpenRouter/OpenAI/自定义）。")
+        if m.get("status") == "usable":
+            print(f"✓ 已切换主脑：{m['label']}（{model or m.get('model')}），{m.get('auth_type', 'api_key')}")
+        else:
+            print(f"已选 {m['label']}，但{m.get('note', '该 provider 需要后续 transport/认证适配')}。")
+
+
+def _render_model_providers() -> str:
+    from . import models
+    config.load_env()
+    lines = ["Model Providers", ""]
+    for group, items in models.grouped_providers():
+        lines.append(group)
+        for p in items:
+            status = p.get("status", "usable")
+            state = models.key_status(p)
+            models_preview = ", ".join((p.get("models") or [])[:4]) or "(自填)"
+            lines.append(
+                f"  {p['id']:<18} {status:<8} {p.get('auth_type', '-'):<18} "
+                f"{state:<24} {models_preview}"
+            )
+        lines.append("")
+    lines.append("提示：API key / OpenAI-compatible / Claude API / Gemini API / Gemini Code Assist / Bedrock / Copilot / Codex Responses / 本地端点已可用；Qwen OAuth 支持 Qwen CLI 登录导入；Gemini Code Assist 支持 OAuth 登录和 project 保存。")
+    return "\n".join(lines).rstrip()
+
+
+def _render_model_doctor() -> str:
+    from . import models
+    s = config.load_settings()
+    provider_id = s.get("provider_id", s.get("provider", ""))
+    p = models.provider_by_id(provider_id) or {}
+    lines = ["Model Doctor", ""]
+    rows = [
+        ("provider", provider_id or "-"),
+        ("label", s.get("label", "-")),
+        ("model", s.get("model", "-")),
+        ("kind", s.get("kind", "-")),
+        ("api_mode", s.get("api_mode", "-")),
+        ("auth_type", s.get("auth_type", "-")),
+        ("base_url", s.get("base_url", "-")),
+        ("key", _model_key_label(s)),
+    ]
+    lines.append(ui.kv(rows, color=False))
+    if p.get("status") and p.get("status") != "usable":
+        lines.append("")
+        lines.append(f"! provider 尚未可用：{p.get('note') or '需要后续 transport/认证适配'}")
+    elif _model_needs_key(s) and not config.get_active_key():
+        lines.append("")
+        lines.append(f"! 缺少 API key：请设置 {s.get('key_env')}，或运行 ivyea model 重新配置。")
+    else:
+        lines.append("")
+        lines.append("OK 当前模型配置可进入对话。")
+    return "\n".join(lines)
+
+
+def _render_model_auth() -> str:
+    from . import models
+    lines = ["Model Auth", ""]
+    for p in models.providers():
+        auth = (p.get("auth_type") or "api_key").lower()
+        if auth not in ("oauth_external", "oauth_device_code", "copilot"):
+            continue
+        lines.append(
+            f"{p['id']:<20} {p.get('status', 'usable'):<8} "
+            f"{auth:<18} {models.key_status(p):<28} {p.get('label', '')}"
+        )
+    if len(lines) == 2:
+        lines.append("（暂无 OAuth/Copilot provider）")
+    lines.append("")
+    lines.append("Qwen：  ivyea model auth qwen-oauth --login")
+    lines.append("        ivyea model auth qwen-oauth --device-code")
+    lines.append("        ivyea model auth qwen-oauth --token <access_token>")
+    lines.append("        ivyea model auth qwen-oauth --import-qwen-cli")
+    lines.append("Codex： ivyea model auth openai-codex --device-code")
+    lines.append("        ivyea model auth openai-codex --probe")
+    lines.append("Gemini: ivyea model auth google-gemini-cli --login")
+    lines.append("        ivyea model auth google-gemini-cli --login --no-browser")
+    lines.append("        ivyea model auth google-gemini-cli --project <gcp-project-id>")
+    lines.append("        ivyea model auth google-gemini-cli --probe")
+    lines.append("        ivyea model auth google-gemini-cli --token <access_token> --refresh-token <refresh_token>")
+    lines.append("Copilot: ivyea model auth copilot --exchange")
+    lines.append("         ivyea model auth copilot --probe")
+    lines.append("退出：  ivyea model logout <provider>")
+    return "\n".join(lines).rstrip()
+
+
+def _format_expires_at(value: object) -> str:
+    try:
+        expires_at = int(float(value or 0))
+    except (TypeError, ValueError):
+        expires_at = 0
+    if expires_at <= 0:
+        return "-"
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires_at))
+
+
+def _render_auth_detail(provider_id: str, provider: dict) -> str:
+    from . import models, oauth_auth
+    item = oauth_auth.get_auth(provider_id)
+    rows = [
+        ("provider", provider_id),
+        ("label", provider.get("label", "-")),
+        ("auth_type", provider.get("auth_type", "-")),
+        ("status", models.key_status(provider)),
+        ("token", "present" if item.get("access_token") else "missing"),
+        ("refresh_token", "present" if item.get("refresh_token") else "missing"),
+        ("expires_at", _format_expires_at(item.get("expires_at"))),
+        ("source", item.get("source") or "-"),
+        ("auth_file", str(oauth_auth.auth_path())),
+    ]
+    if provider_id == "google-gemini-cli":
+        rows.append(("gcp_project", oauth_auth.google_project_id() or "(empty project)"))
+    return ui.kv(rows, color=False)
+
+
+def _cmd_model_auth(args: argparse.Namespace, action: str) -> int:
+    from . import models, oauth_auth
+    provider_id = args.extra
+    if not provider_id:
+        print(_render_model_auth())
+        return 0
+    provider = models.provider_by_id(provider_id)
+    if not provider:
+        print(f"未知 provider：{provider_id}。`ivyea model providers` 看清单。", file=sys.stderr)
+        return 2
+    auth = (provider.get("auth_type") or "api_key").lower()
+    if auth not in ("oauth_external", "oauth_device_code", "copilot"):
+        print(f"{provider_id} 使用 {auth}，无需 `model auth`；API key 请写入 {provider.get('key_env') or '.env'}。")
+        return 0
+    if action == "logout":
+        existed = oauth_auth.clear_auth(provider_id)
+        print(f"{provider_id}: {'已清除本地认证' if existed else '本地没有认证记录'}")
+        return 0
+    if getattr(args, "project", None) is not None:
+        if provider_id != "google-gemini-cli":
+            print("--project 目前只适用于 google-gemini-cli", file=sys.stderr)
+            return 2
+        oauth_auth.set_google_project_id(args.project)
+        project = oauth_auth.google_project_id()
+        print(f"{provider_id}: 已保存 GCP project = {project or '(空 project)'}")
+        if not any(getattr(args, flag, False) for flag in ("refresh", "login", "device_code", "exchange", "import_qwen_cli", "probe")) \
+                and not getattr(args, "token", None):
+            return 0
+    if getattr(args, "refresh", False):
+        if provider_id not in ("qwen-oauth", "openai-codex", "google-gemini-cli"):
+            print("--refresh 目前支持 qwen-oauth / openai-codex / google-gemini-cli", file=sys.stderr)
+            return 2
+        try:
+            if provider_id == "qwen-oauth":
+                oauth_auth.refresh_qwen_token()
+            elif provider_id == "openai-codex":
+                oauth_auth.refresh_codex_token()
+            else:
+                oauth_auth.refresh_google_token()
+        except oauth_auth.OAuthAuthError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(f"{provider_id}: 已刷新本地认证（token 已隐藏）")
+        return 0
+    if getattr(args, "login", False):
+        if provider_id not in ("google-gemini-cli", "qwen-oauth"):
+            print("--login 目前支持 google-gemini-cli / qwen-oauth", file=sys.stderr)
+            return 2
+        try:
+            if provider_id == "google-gemini-cli":
+                oauth_auth.google_oauth_login(open_browser=not getattr(args, "no_browser", False), notify=print)
+            else:
+                oauth_auth.qwen_cli_login()
+        except oauth_auth.OAuthAuthError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(f"{provider_id}: 已完成 OAuth 登录（token 已隐藏，文件 {oauth_auth.auth_path()}）")
+        if provider_id == "google-gemini-cli":
+            print(f"{provider_id}: GCP project = {oauth_auth.google_project_id() or '(空 project)'}")
+        return 0
+    if getattr(args, "device_code", False):
+        if provider_id not in ("openai-codex", "qwen-oauth"):
+            print("--device-code 目前支持 openai-codex / qwen-oauth", file=sys.stderr)
+            return 2
+        try:
+            if provider_id == "openai-codex":
+                oauth_auth.codex_device_code_login(notify=print)
+            else:
+                print("提示：Qwen 官方文档说明 Qwen OAuth free tier 已于 2026-04-15 停用；该流程仅用于仍可用账号/缓存兼容。")
+                oauth_auth.qwen_device_code_login(open_browser=not getattr(args, "no_browser", False), notify=print)
+        except oauth_auth.OAuthAuthError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(f"{provider_id}: 已保存本地认证（token 已隐藏，文件 {oauth_auth.auth_path()}）")
+        if provider_id == "openai-codex":
+            print("提示：Codex Responses transport 已接入；选择 openai-codex:<model> 后可作为主脑使用。")
+        return 0
+    if getattr(args, "exchange", False):
+        if provider_id != "copilot":
+            print("--exchange 目前只适用于 copilot", file=sys.stderr)
+            return 2
+        try:
+            oauth_auth.resolve_copilot_api_token(strict=True)
+        except oauth_auth.OAuthAuthError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(f"{provider_id}: GitHub token 已成功换取 Copilot API token（token 已隐藏）")
+        print("提示：Copilot chat/completions transport 已接入；选择 copilot:<model> 后可作为主脑使用。")
+        return 0
+    if getattr(args, "import_qwen_cli", False):
+        if provider_id != "qwen-oauth":
+            print("--import-qwen-cli 只适用于 qwen-oauth", file=sys.stderr)
+            return 2
+        try:
+            src = oauth_auth.import_qwen_cli_tokens()
+        except oauth_auth.OAuthAuthError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(f"{provider_id}: 已从 {src} 导入本地认证（token 已隐藏，文件 {oauth_auth.auth_path()}）")
+        return 0
+    if getattr(args, "token", None):
+        oauth_auth.set_auth_token(
+            provider_id,
+            args.token.strip(),
+            refresh_token=(getattr(args, "refresh_token", None) or "").strip(),
+            expires_at=getattr(args, "expires_at", 0) or 0,
+            source="manual",
+        )
+        print(f"{provider_id}: 已保存本地认证（token 已隐藏，文件 {oauth_auth.auth_path()}）")
+        if provider_id == "google-gemini-cli":
+            print(f"{provider_id}: GCP project = {oauth_auth.google_project_id() or '(空 project)'}")
+        if not getattr(args, "probe", False):
+            return 0
+    if getattr(args, "probe", False):
+        if provider_id not in ("google-gemini-cli", "openai-codex", "copilot"):
+            print("--probe 目前支持 google-gemini-cli / openai-codex / copilot", file=sys.stderr)
+            return 2
+        token = oauth_auth.resolve_provider_token(provider_id, provider.get("key_env", ""), refresh=True)
+        if not token:
+            print(f"{provider_id} token 未配置；先运行 `ivyea model auth {provider_id}` 查看登录方式。", file=sys.stderr)
+            return 1
+        try:
+            from .providers.base import LLMError
+            if provider_id == "google-gemini-cli":
+                from .providers.gemini_code_assist_provider import probe_gemini_code_assist
+                result = probe_gemini_code_assist(token, model=provider.get("default_model", "gemini-3-pro-preview"),
+                                                  timeout=getattr(args, "timeout", 30.0) or 30.0)
+            elif provider_id == "openai-codex":
+                from .providers.codex_provider import probe_codex
+                result = probe_codex(token, model=provider.get("default_model", "gpt-5.3-codex"),
+                                     base_url=provider.get("base", "https://chatgpt.com/backend-api/codex"),
+                                     timeout=getattr(args, "timeout", 30.0) or 30.0)
+            else:
+                from .providers.copilot_provider import probe_copilot
+                result = probe_copilot(token, model=provider.get("default_model", "gpt-4o"),
+                                       base_url=provider.get("base", "https://api.githubcopilot.com"),
+                                       timeout=getattr(args, "timeout", 30.0) or 30.0)
+        except (oauth_auth.OAuthAuthError, LLMError, OSError) as exc:
+            print(f"{provider_id} probe 失败：{exc}", file=sys.stderr)
+            if provider_id == "google-gemini-cli":
+                from .providers.gemini_code_assist_provider import diagnose_gemini_code_assist_error
+                for hint in diagnose_gemini_code_assist_error(exc):
+                    print(f"排查：{hint}", file=sys.stderr)
+            elif provider_id == "openai-codex":
+                print("排查：确认 Codex device-code 登录未失效、账号具备 Codex 访问权限，并尝试 `ivyea model auth openai-codex --refresh`。", file=sys.stderr)
+            else:
+                print("排查：确认 GH_TOKEN/GITHUB_TOKEN 可用于 Copilot，classic PAT(ghp_*) 不支持；可先运行 `ivyea model auth copilot --exchange`。", file=sys.stderr)
+            return 1
+        rows = [
+            ("model", result.get("model", "-")),
+            ("response", result.get("content") or "-"),
+            ("usage", json.dumps(result.get("usage") or {}, ensure_ascii=False)),
+        ]
+        if provider_id == "google-gemini-cli":
+            rows.insert(1, ("gcp_project", result.get("project") or "(empty project)"))
+        print(f"{provider_id} probe 成功")
+        print(ui.kv(rows, color=False))
+        return 0
+    status = models.key_status(provider)
+    print(f"{provider_id}: {status}")
+    if auth in ("oauth_external", "oauth_device_code", "copilot"):
+        print(_render_auth_detail(provider_id, provider))
+    if provider.get("status") != "usable":
+        print(provider.get("note") or "该 provider 需要专用 OAuth/transport，尚未可用。")
+        return 1
+    if provider_id == "qwen-oauth":
+        print("如果已安装 Qwen CLI，可一键登录并导入：")
+        print("  ivyea model auth qwen-oauth --login")
+        print("也可直接运行 Qwen OAuth device-code 流程（官方免费层已于 2026-04-15 停用，可能被服务端拒绝）：")
+        print("  ivyea model auth qwen-oauth --device-code")
+        print("可先从已授权环境取得 Bearer token 后导入：")
+        print("  ivyea model auth qwen-oauth --token <access_token>")
+        print("如果本机已登录 Qwen CLI，可直接导入：")
+        print("  ivyea model auth qwen-oauth --import-qwen-cli")
+        print("已有 refresh token 时可手动刷新：")
+        print("  ivyea model auth qwen-oauth --refresh")
+        print("也可以设置环境变量 QWEN_API_KEY，优先级高于 auth.json。")
+        return 0
+    if provider_id == "openai-codex":
+        print("可运行 OpenAI Codex device-code 登录：")
+        print("  ivyea model auth openai-codex --device-code")
+        print("已有 refresh token 时可手动刷新：")
+        print("  ivyea model auth openai-codex --refresh")
+        print("验证 Codex OAuth Responses 是否真实可用：")
+        print("  ivyea model auth openai-codex --probe")
+        print("提示：Codex Responses transport 已接入；选择 openai-codex:<model> 后可作为主脑使用。")
+        return 0
+    if provider_id == "copilot":
+        print("可先配置 COPILOT_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN。")
+        print("支持 gho_、github_pat_、ghu_；不支持 classic PAT(ghp_*)。")
+        print("验证并换取 Copilot API token：")
+        print("  ivyea model auth copilot --exchange")
+        print("验证 Copilot chat/completions 是否真实可用：")
+        print("  ivyea model auth copilot --probe")
+        print("提示：Copilot chat/completions transport 已接入；选择 copilot:<model> 后可作为主脑使用。")
+        return 0
+    if provider_id == "google-gemini-cli":
+        print("可运行浏览器 OAuth 登录：")
+        print("  ivyea model auth google-gemini-cli --login")
+        print("服务器/SSH 环境可用手动粘贴模式：")
+        print("  ivyea model auth google-gemini-cli --login --no-browser")
+        print("如需固定 Google Cloud project，可保存：")
+        print("  ivyea model auth google-gemini-cli --project <gcp-project-id>")
+        print("验证 token/project/onboarding/配额是否真实可用：")
+        print("  ivyea model auth google-gemini-cli --probe")
+        print("可先导入 Google OAuth access token / refresh token：")
+        print("  ivyea model auth google-gemini-cli --token <access_token> --refresh-token <refresh_token>")
+        print("已有 refresh token 时可手动刷新：")
+        print("  ivyea model auth google-gemini-cli --refresh")
+        print(f"当前 GCP project：{oauth_auth.google_project_id() or '(空 project；将按 Code Assist 可用性尝试)'}")
+        print("提示：Gemini Code Assist transport 已接入；可作为主脑使用。")
+        return 0
+    print(provider.get("note") or "该 provider 需要导入 token 或配置对应环境变量。")
+    return 0
 
 
 def _cmd_onboard(args: argparse.Namespace = None) -> int:
@@ -138,7 +498,7 @@ def _print_config() -> int:
         (".env", f"{config.ENV_FILE} ({'存在' if config.ENV_FILE.exists() else '缺失'})"),
         ("mcp.json", f"{config.MCP_FILE} ({'存在' if config.MCP_FILE.exists() else '缺失'})"),
         ("主脑模型", f"{s.get('label', s.get('provider'))} · {s.get('model')} · kind={s.get('kind')}"
-                 f" · key {'已配置' if config.get_active_key() else '未配置'}"),
+                 f" · provider={s.get('provider_id', '-')} · {_model_key_label(s)}"),
         ("站点", f"{s.get('site')} · 目标 ACoS {s.get('target_acos')}"),
         ("MCP 服务器", ', '.join(servers) if servers else "(无，用 ivyea mcp add 添加)"),
     ]), kind="info"))
@@ -854,7 +1214,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         except Exception:
             pass
 
-    keyst = "已配置" if cfg.get_active_key() else "未配 key（/model 配置后可对话）"
+    keyst = _model_key_label(cfg.load_settings())
     mode = "真实写" if args.execute else "dry-run"
     print(f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}")
     _print_welcome_box([
@@ -1011,8 +1371,13 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
         # 自然语言 → Agent 循环
         api_key = cfg.get_active_key()
-        if not api_key:
-            print(ui.message("warn", "未配置主脑模型 key，自然语言对话不可用。用 /model 选模型并配 key，或先用斜杠命令。"))
+        current_model_settings = cfg.load_settings()
+        if (current_model_settings.get("kind") in ("native", "oauth", "login")
+                and current_model_settings.get("api_mode") not in ("gemini_native", "gemini_code_assist", "bedrock_converse", "copilot_chat_completions", "codex_responses")):
+            print(ui.message("warn", "当前 provider 需要尚未接入的原生/OAuth transport。请用 /model 切到 API key、OpenAI 兼容、本地或自定义 provider。"))
+            continue
+        if _model_needs_key(current_model_settings) and not api_key:
+            print(ui.message("warn", f"未配置主脑模型 key（{current_model_settings.get('key_env')}）。用 /model 配 key，或切到本地/自定义 no-key provider。"))
             continue
         # 成本护栏：每日 ¥ 上限
         _lim = pricing.daily_limit()
@@ -1090,11 +1455,22 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 def _cmd_model(args: argparse.Namespace) -> int:
     from . import config as cfg, models
     cfg.ensure_dirs()
+    if args.spec in ("auth", "login"):
+        return _cmd_model_auth(args, "auth")
+    if args.spec in ("logout", "disconnect"):
+        return _cmd_model_auth(args, "logout")
+    if args.spec in ("providers", "provider"):
+        print(_render_model_providers())
+        return 0
+    if args.spec in ("doctor", "status"):
+        print(_render_model_doctor())
+        return 0
     if args.spec == "list":
         for group, items in models.grouped():
             print(group)
             for m in items:
-                print(f"  {m['id']:<16} {m['label']}")
+                status = "" if m.get("status") == "usable" else f" [{m.get('auth_type', '-')}:待接]"
+                print(f"  {m['id']:<34} {m['label']}{status}")
         return 0
     if args.spec:  # ivyea model <id>
         m = models.by_id(args.spec)
@@ -1104,7 +1480,7 @@ def _cmd_model(args: argparse.Namespace) -> int:
             return 2
         cfg.apply_model(m)
         print(f"已切换主脑: {m['label']}"
-              f"（{'已配置 key' if cfg.get_active_key() else '未配置 key，运行 ivyea model 配置'}）")
+              f"（{_model_key_label(cfg.load_settings())}）")
         return 0
     _model_picker()   # 无参 → 交互选择清单
     return 0
@@ -2490,6 +2866,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     pmo = sub.add_parser("model", help="查看/配置主脑模型（交互；或 ivyea model deepseek:deepseek-chat）")
     pmo.add_argument("spec", nargs="?", help="provider:model，如 deepseek:deepseek-chat")
+    pmo.add_argument("extra", nargs="?", help="auth/logout 时的 provider id")
+    pmo.add_argument("--token", help="为 OAuth/Bearer provider 保存 access token")
+    pmo.add_argument("--refresh-token", help="为 OAuth provider 保存 refresh token（可选）")
+    pmo.add_argument("--expires-at", type=float, default=0, help="access token 过期时间戳（可选）")
+    pmo.add_argument("--project", help="为 google-gemini-cli 保存 Google Cloud project id")
+    pmo.add_argument("--probe", action="store_true", help="真实探测 provider 是否可用（目前支持 google-gemini-cli）")
+    pmo.add_argument("--timeout", type=float, default=30.0, help="auth probe 超时时间（秒）")
+    pmo.add_argument("--refresh", action="store_true", help="刷新 OAuth access token（支持 qwen-oauth/openai-codex）")
+    pmo.add_argument("--login", action="store_true", help="运行浏览器 OAuth 登录（目前支持 google-gemini-cli）")
+    pmo.add_argument("--no-browser", action="store_true", help="OAuth 登录时不自动打开浏览器，改为手动粘贴 callback URL/code")
+    pmo.add_argument("--device-code", action="store_true", help="运行 OAuth device-code 登录（目前支持 openai-codex）")
+    pmo.add_argument("--exchange", action="store_true", help="验证并换取短期 API token（目前支持 copilot）")
+    pmo.add_argument("--import-qwen-cli", action="store_true", help="从 ~/.qwen/oauth_creds.json 导入 qwen-oauth 凭证")
     pmo.set_defaults(func=_cmd_model)
 
     pmem = sub.add_parser("memory", help="记忆：status（默认）/ search <词> / note [asin]")

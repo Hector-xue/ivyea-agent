@@ -112,3 +112,14 @@ def test_build_chain_no_fallback_returns_single(ivyea_home):
     prov = build_chain({"kind": "openai", "model": "deepseek-chat",
                         "base_url": "https://api.deepseek.com"}, "sk-x")
     assert not isinstance(prov, ChainProvider)   # 无备用 → 不套链
+
+
+def test_oauth_provider_reports_transport_not_member_login():
+    from ivyea_agent.providers import from_settings
+    with pytest.raises(LLMError) as exc:
+        from_settings({"kind": "oauth", "auth_type": "oauth_external",
+                       "label": "OpenAI Codex OAuth", "model": "gpt-5-codex"}, "")
+    msg = str(exc.value)
+    assert "oauth_external" in msg
+    assert "登录制" not in msg
+    assert "普通会员" in msg

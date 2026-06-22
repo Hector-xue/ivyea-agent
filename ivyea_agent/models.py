@@ -1,52 +1,499 @@
-"""主流模型清单（国内 + 国外 + 登录制），供 `ivyea model` / `/model` 选择。
+"""Model/provider catalog for `ivyea model`.
 
-kind:
-  openai    —— OpenAI 兼容端点（key 鉴权）。OpenAI 官方/DeepSeek/通义/Kimi/GLM/豆包/
-               MiniMax/OpenRouter/自定义 都走这条，现已可用。
-  anthropic —— Claude 原生（官方 SDK，含 prompt caching），现已可用（需 ANTHROPIC_API_KEY）。
-  native    —— 其它厂商原生 API（Gemini），适配规划中。
-  login     —— 登录制（Codex 用 ChatGPT 会员、Claude 订阅），免 API key，接入规划中。
+Hermes' useful pattern is a provider profile registry: auth type, endpoint,
+fallback models, aliases, and live model discovery live with the provider
+instead of being scattered through the CLI.  Ivyea keeps the implementation
+lighter, but follows the same shape so adding providers no longer means
+hard-coding one more special case in the picker.
 """
 from __future__ import annotations
 
+import json
+import os
+import urllib.error
+import urllib.request
 from typing import Any, Optional
 
-# (id, 标签, kind, model, base_url, key_env, note)
-MODELS: list[dict[str, Any]] = [
-    # ── 国外（OpenAI 兼容，可用）──
-    {"id": "gpt-4o",          "label": "OpenAI GPT-4o",            "kind": "openai", "model": "gpt-4o",              "base": "https://api.openai.com/v1",  "key_env": "OPENAI_API_KEY",  "group": "国外"},
-    {"id": "gpt-4o-mini",     "label": "OpenAI GPT-4o mini（便宜）", "kind": "openai", "model": "gpt-4o-mini",         "base": "https://api.openai.com/v1",  "key_env": "OPENAI_API_KEY",  "group": "国外"},
-    # ── 国外（Anthropic 原生，可用，高端档）──
-    {"id": "claude-opus",     "label": "Claude Opus 4.8（最强）",   "kind": "anthropic", "model": "claude-opus-4-8",   "key_env": "ANTHROPIC_API_KEY", "group": "国外"},
-    {"id": "claude-sonnet",   "label": "Claude Sonnet 4.6（均衡）", "kind": "anthropic", "model": "claude-sonnet-4-6", "key_env": "ANTHROPIC_API_KEY", "group": "国外"},
-    {"id": "claude-haiku",    "label": "Claude Haiku 4.5（快/省）", "kind": "anthropic", "model": "claude-haiku-4-5",  "key_env": "ANTHROPIC_API_KEY", "group": "国外"},
-    # ── 国外（原生 API，规划中）──
-    {"id": "gemini",          "label": "Google Gemini 2.5",        "kind": "native", "model": "gemini-2.5-pro",      "key_env": "GEMINI_API_KEY",  "group": "国外", "note": "原生 API 适配规划中"},
-    # ── 国内（OpenAI 兼容，可用）──
-    {"id": "deepseek-chat",   "label": "DeepSeek V3（deepseek-chat）", "kind": "openai", "model": "deepseek-chat",     "base": "https://api.deepseek.com",   "key_env": "DEEPSEEK_API_KEY", "group": "国内"},
-    {"id": "deepseek-reasoner", "label": "DeepSeek R1（reasoner）",  "kind": "openai", "model": "deepseek-reasoner",   "base": "https://api.deepseek.com",   "key_env": "DEEPSEEK_API_KEY", "group": "国内"},
-    {"id": "qwen-max",        "label": "通义千问 Qwen-Max",         "kind": "openai", "model": "qwen-max",            "base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "key_env": "DASHSCOPE_API_KEY", "group": "国内"},
-    {"id": "kimi",            "label": "Kimi / Moonshot",          "kind": "openai", "model": "moonshot-v1-8k",      "base": "https://api.moonshot.cn/v1", "key_env": "MOONSHOT_API_KEY", "group": "国内"},
-    {"id": "glm-4",           "label": "智谱 GLM-4",                "kind": "openai", "model": "glm-4-plus",          "base": "https://open.bigmodel.cn/api/paas/v4", "key_env": "ZHIPU_API_KEY", "group": "国内"},
-    {"id": "doubao",          "label": "字节 豆包 Doubao",          "kind": "openai", "model": "doubao-pro-32k",      "base": "https://ark.cn-beijing.volces.com/api/v3", "key_env": "ARK_API_KEY", "group": "国内"},
-    {"id": "minimax",         "label": "MiniMax abab",             "kind": "openai", "model": "abab6.5s-chat",       "base": "https://api.minimax.chat/v1", "key_env": "MINIMAX_API_KEY", "group": "国内"},
-    # ── 聚合 / 自定义 ──
-    {"id": "openrouter",      "label": "OpenRouter（任意模型）",     "kind": "openai", "model": "openai/gpt-4o-mini",  "base": "https://openrouter.ai/api/v1", "key_env": "OPENROUTER_API_KEY", "group": "聚合/自定义"},
-    {"id": "custom",          "label": "自定义 OpenAI 兼容端点",     "kind": "openai", "model": "",                    "base": "",  "key_env": "CUSTOM_API_KEY", "group": "聚合/自定义", "note": "自填 base_url / model / key"},
-    # ── 登录制（免 key，规划中）──
-    {"id": "codex",           "label": "Codex（ChatGPT 会员登录）",  "kind": "login",  "model": "gpt-5-codex",         "key_env": "", "group": "登录制", "note": "用 ChatGPT 会员账号登录、免 API key — 登录接入规划中"},
-    {"id": "claude-sub",      "label": "Claude（订阅登录）",         "kind": "login",  "model": "claude",              "key_env": "", "group": "登录制", "note": "Claude 订阅登录、免 API key — 登录接入规划中"},
+
+PROVIDERS: list[dict[str, Any]] = [
+    {
+        "id": "openai",
+        "label": "OpenAI API",
+        "group": "国外 API",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "https://api.openai.com/v1",
+        "key_env": "OPENAI_API_KEY",
+        "signup_url": "https://platform.openai.com/api-keys",
+        "models": ["gpt-4.1", "gpt-4o", "gpt-4o-mini"],
+        "default_model": "gpt-4o",
+        "status": "usable",
+    },
+    {
+        "id": "anthropic",
+        "label": "Anthropic Claude API",
+        "group": "国外 API",
+        "kind": "anthropic",
+        "api_mode": "anthropic_messages",
+        "auth_type": "api_key",
+        "base": "https://api.anthropic.com",
+        "key_env": "ANTHROPIC_API_KEY",
+        "signup_url": "https://console.anthropic.com/settings/keys",
+        "models": [
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+            "claude-sonnet-4-20250514",
+        ],
+        "default_model": "claude-sonnet-4-6",
+        "status": "usable",
+    },
+    {
+        "id": "gemini",
+        "label": "Google Gemini API",
+        "group": "国外 API",
+        "kind": "native",
+        "api_mode": "gemini_native",
+        "auth_type": "api_key",
+        "base": "https://generativelanguage.googleapis.com/v1beta",
+        "key_env": "GEMINI_API_KEY",
+        "signup_url": "https://aistudio.google.com/app/apikey",
+        "models": ["gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3.5-flash", "gemini-2.5-pro"],
+        "default_model": "gemini-3.1-pro-preview",
+        "status": "usable",
+        "note": "聊天主脑走 Gemini native generateContent；视觉命令也支持 Gemini 调用。",
+    },
+    {
+        "id": "google-gemini-cli",
+        "label": "Gemini Code Assist OAuth",
+        "group": "OAuth / 订阅",
+        "kind": "oauth",
+        "api_mode": "gemini_code_assist",
+        "auth_type": "oauth_external",
+        "base": "cloudcode-pa://google",
+        "key_env": "",
+        "models": ["gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3-flash-preview"],
+        "default_model": "gemini-3-pro-preview",
+        "status": "usable",
+        "note": "使用 Google OAuth token 调用 cloudcode-pa Code Assist；支持浏览器登录、手动粘贴模式、refresh token 和 project 保存。",
+    },
+    {
+        "id": "openai-codex",
+        "label": "OpenAI Codex OAuth",
+        "group": "OAuth / 订阅",
+        "kind": "oauth",
+        "api_mode": "codex_responses",
+        "auth_type": "oauth_external",
+        "base": "https://chatgpt.com/backend-api/codex",
+        "key_env": "",
+        "models": ["gpt-5.3-codex", "gpt-5.2-codex", "gpt-5-codex"],
+        "default_model": "gpt-5.3-codex",
+        "status": "usable",
+        "note": "Codex OAuth device-code 登录后走 chatgpt.com/backend-api/codex Responses；支持 Responses streaming 和工具调用。",
+    },
+    {
+        "id": "copilot",
+        "label": "GitHub Copilot / GitHub Models",
+        "group": "OAuth / 订阅",
+        "kind": "oauth",
+        "api_mode": "copilot_chat_completions",
+        "auth_type": "copilot",
+        "base": "https://api.githubcopilot.com",
+        "key_env": "GITHUB_TOKEN",
+        "models": ["gpt-4o", "gpt-4.1", "claude-sonnet-4-6", "gemini-3-pro-preview"],
+        "default_model": "gpt-4o",
+        "status": "usable",
+        "note": "使用 GitHub token 换取短期 Copilot API token 后走 Copilot chat/completions；classic PAT(ghp_*) 不支持。",
+    },
+    {
+        "id": "deepseek",
+        "label": "DeepSeek",
+        "group": "国内 API",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "https://api.deepseek.com",
+        "key_env": "DEEPSEEK_API_KEY",
+        "signup_url": "https://platform.deepseek.com/",
+        "models": ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro", "deepseek-v4-flash"],
+        "default_model": "deepseek-chat",
+        "status": "usable",
+    },
+    {
+        "id": "qwen",
+        "label": "通义千问 / DashScope",
+        "group": "国内 API",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "key_env": "DASHSCOPE_API_KEY",
+        "models": ["qwen-max", "qwen-plus", "qwen3-coder-plus", "qwen3-coder-next"],
+        "default_model": "qwen-max",
+        "status": "usable",
+    },
+    {
+        "id": "qwen-oauth",
+        "label": "Qwen OAuth / Portal",
+        "group": "OAuth / 订阅",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "oauth_external",
+        "base": "https://portal.qwen.ai/v1",
+        "key_env": "QWEN_API_KEY",
+        "models": ["qwen3.7-max", "qwen3-coder-next", "qwen3-coder-plus"],
+        "default_model": "qwen3.7-max",
+        "status": "usable",
+        "note": "可用 QWEN_API_KEY，或用 Qwen CLI 登录导入/手动 token 存本地 Bearer token；支持 refresh token 自动刷新。",
+    },
+    {
+        "id": "kimi",
+        "label": "Kimi / Moonshot",
+        "group": "国内 API",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "https://api.moonshot.cn/v1",
+        "key_env": "MOONSHOT_API_KEY",
+        "models": ["moonshot-v1-8k", "kimi-k2.6", "kimi-k2.5", "kimi-k2-thinking"],
+        "default_model": "moonshot-v1-8k",
+        "status": "usable",
+    },
+    {
+        "id": "kimi-coding",
+        "label": "Kimi Coding",
+        "group": "国内 API",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "https://api.moonshot.ai/v1",
+        "key_env": "KIMI_API_KEY",
+        "models": ["kimi-k2.6", "kimi-k2.5", "kimi-k2-thinking", "kimi-for-coding"],
+        "default_model": "kimi-k2.6",
+        "status": "usable",
+        "note": "sk-kimi-* 的 Anthropic-compatible /coding 形态后续单独接；普通 key 走 OpenAI 兼容。",
+    },
+    {
+        "id": "zai",
+        "label": "Z.AI / 智谱 GLM",
+        "group": "国内 API",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "https://api.z.ai/api/paas/v4",
+        "key_env": "ZAI_API_KEY",
+        "models": ["glm-5.1", "glm-5", "glm-4.7", "glm-4.5"],
+        "default_model": "glm-5",
+        "status": "usable",
+    },
+    {
+        "id": "glm-legacy",
+        "label": "智谱 GLM legacy",
+        "group": "国内 API",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "https://open.bigmodel.cn/api/paas/v4",
+        "key_env": "ZHIPU_API_KEY",
+        "models": ["glm-4-plus", "glm-4-flash"],
+        "default_model": "glm-4-plus",
+        "status": "usable",
+    },
+    {
+        "id": "doubao",
+        "label": "字节豆包 / Volcano Ark",
+        "group": "国内 API",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "https://ark.cn-beijing.volces.com/api/v3",
+        "key_env": "ARK_API_KEY",
+        "models": ["doubao-pro-32k", "doubao-seed-1-6"],
+        "default_model": "doubao-pro-32k",
+        "status": "usable",
+        "note": "豆包实际 model/deployment 名通常由火山控制台生成，可选择后覆盖。",
+    },
+    {
+        "id": "minimax",
+        "label": "MiniMax",
+        "group": "国内 API",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "https://api.minimax.chat/v1",
+        "key_env": "MINIMAX_API_KEY",
+        "models": ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.5", "abab6.5s-chat"],
+        "default_model": "MiniMax-M3",
+        "status": "usable",
+        "note": "Hermes 使用 MiniMax anthropic endpoint；Ivyea 当前先走 OpenAI 兼容。",
+    },
+    {
+        "id": "openrouter",
+        "label": "OpenRouter",
+        "group": "聚合 / 路由",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "https://openrouter.ai/api/v1",
+        "models_url": "https://openrouter.ai/api/v1/models",
+        "key_env": "OPENROUTER_API_KEY",
+        "signup_url": "https://openrouter.ai/keys",
+        "models": [
+            "anthropic/claude-sonnet-4.6",
+            "openai/gpt-4o",
+            "google/gemini-3-pro-preview",
+            "deepseek/deepseek-chat",
+            "moonshotai/kimi-k2.6",
+            "minimax/minimax-m3",
+            "z-ai/glm-5.1",
+        ],
+        "default_model": "anthropic/claude-sonnet-4.6",
+        "status": "usable",
+    },
+    {
+        "id": "nous",
+        "label": "Nous Portal",
+        "group": "聚合 / 路由",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "https://inference.nousresearch.com/v1",
+        "key_env": "NOUS_API_KEY",
+        "models": ["hermes-3-405b", "hermes-3-70b", "anthropic/claude-sonnet-4.6"],
+        "default_model": "hermes-3-405b",
+        "status": "usable",
+        "note": "当前按 NOUS_API_KEY 使用；Portal device-code 登录后续接入。",
+    },
+    {
+        "id": "xai",
+        "label": "xAI / Grok",
+        "group": "国外 API",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "https://api.x.ai/v1",
+        "key_env": "XAI_API_KEY",
+        "models": ["grok-4.3", "grok-code-fast-1"],
+        "default_model": "grok-4.3",
+        "status": "usable",
+    },
+    {
+        "id": "ollama",
+        "label": "Ollama / Local OpenAI-compatible",
+        "group": "本地 / 自定义",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "none",
+        "base": "http://localhost:11434/v1",
+        "key_env": "OLLAMA_API_KEY",
+        "models": ["qwen3-coder", "deepseek-r1", "llama3.1"],
+        "default_model": "qwen3-coder",
+        "status": "usable",
+        "note": "本地 Ollama 通常不需要 key；若服务要求鉴权可设置 OLLAMA_API_KEY。",
+    },
+    {
+        "id": "bedrock",
+        "label": "AWS Bedrock",
+        "group": "云厂商",
+        "kind": "native",
+        "api_mode": "bedrock_converse",
+        "auth_type": "aws_sdk",
+        "base": "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "key_env": "",
+        "models": ["us.anthropic.claude-sonnet-4-6", "us.amazon.nova-pro-v1:0", "deepseek.v3.2"],
+        "default_model": "us.anthropic.claude-sonnet-4-6",
+        "status": "usable",
+        "note": "需要可选依赖 boto3 和 AWS 默认凭据链。",
+    },
+    {
+        "id": "azure-foundry",
+        "label": "Azure AI Foundry",
+        "group": "云厂商",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "",
+        "key_env": "AZURE_FOUNDRY_API_KEY",
+        "models": [],
+        "default_model": "",
+        "status": "usable",
+        "note": "每个 Azure 资源 endpoint/model 不同，选择 custom 或此 provider 后填写 base_url/model。",
+    },
+    {
+        "id": "custom",
+        "label": "自定义 OpenAI 兼容端点",
+        "group": "本地 / 自定义",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "",
+        "key_env": "CUSTOM_API_KEY",
+        "models": [],
+        "default_model": "",
+        "status": "usable",
+        "note": "适合 vLLM、LiteLLM、llama.cpp、企业网关、自建代理。",
+    },
 ]
 
-GROUP_ORDER = ["国外", "国内", "聚合/自定义", "登录制"]
+GROUP_ORDER = ["国外 API", "国内 API", "聚合 / 路由", "OAuth / 订阅", "云厂商", "本地 / 自定义"]
 
 
-def by_id(mid: str) -> Optional[dict]:
+def providers() -> list[dict[str, Any]]:
+    return list(PROVIDERS)
+
+
+def provider_by_id(pid: str) -> Optional[dict[str, Any]]:
+    for p in PROVIDERS:
+        if p["id"] == pid:
+            return p
+    return None
+
+
+def model_entries() -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for provider in PROVIDERS:
+        for model in provider.get("models") or []:
+            entry = {
+                "id": f"{provider['id']}:{model}",
+                "provider_id": provider["id"],
+                "label": f"{provider['label']} · {model}",
+                "kind": provider["kind"],
+                "api_mode": provider.get("api_mode", ""),
+                "model": model,
+                "base": provider.get("base", ""),
+                "key_env": provider.get("key_env", ""),
+                "group": provider["group"],
+                "auth_type": provider.get("auth_type", "api_key"),
+                "status": provider.get("status", "usable"),
+                "note": provider.get("note", ""),
+            }
+            entries.append(entry)
+    # Back-compatible aliases used by existing docs/tests/users.
+    aliases = {
+        "gpt-4o": ("openai", "gpt-4o"),
+        "gpt-4o-mini": ("openai", "gpt-4o-mini"),
+        "claude-opus": ("anthropic", "claude-opus-4-8"),
+        "claude-sonnet": ("anthropic", "claude-sonnet-4-6"),
+        "claude-haiku": ("anthropic", "claude-haiku-4-5"),
+        "gemini": ("gemini", "gemini-3.1-pro-preview"),
+        "deepseek-chat": ("deepseek", "deepseek-chat"),
+        "deepseek-reasoner": ("deepseek", "deepseek-reasoner"),
+        "qwen-max": ("qwen", "qwen-max"),
+        "kimi": ("kimi", "moonshot-v1-8k"),
+        "glm-4": ("glm-legacy", "glm-4-plus"),
+        "doubao": ("doubao", "doubao-pro-32k"),
+        "minimax": ("minimax", "MiniMax-M3"),
+        "openrouter": ("openrouter", "anthropic/claude-sonnet-4.6"),
+        "custom": ("custom", ""),
+    }
+    by_pair = {(e["provider_id"], e["model"]): e for e in entries}
+    for alias, pair in aliases.items():
+        if pair in by_pair:
+            base = dict(by_pair[pair])
+        else:
+            provider = provider_by_id(pair[0]) or {}
+            base = {
+                "provider_id": pair[0],
+                "label": provider.get("label", pair[0]),
+                "kind": provider.get("kind", "openai"),
+                "api_mode": provider.get("api_mode", "chat_completions"),
+                "model": pair[1],
+                "base": provider.get("base", ""),
+                "key_env": provider.get("key_env", ""),
+                "group": provider.get("group", "本地 / 自定义"),
+                "auth_type": provider.get("auth_type", "api_key"),
+                "status": provider.get("status", "usable"),
+                "note": provider.get("note", ""),
+            }
+        base["id"] = alias
+        base["label"] = base["label"].replace(" · ", " ")
+        entries.append(base)
+    return entries
+
+
+MODELS: list[dict[str, Any]] = model_entries()
+
+
+def by_id(mid: str) -> Optional[dict[str, Any]]:
     for m in MODELS:
         if m["id"] == mid:
             return m
+    if ":" in mid:
+        provider_id, model = mid.split(":", 1)
+        provider = provider_by_id(provider_id)
+        if provider:
+            return {
+                "id": mid,
+                "provider_id": provider_id,
+                "label": f"{provider['label']} · {model}",
+                "kind": provider["kind"],
+                "api_mode": provider.get("api_mode", ""),
+                "model": model,
+                "base": provider.get("base", ""),
+                "key_env": provider.get("key_env", ""),
+                "group": provider.get("group", "本地 / 自定义"),
+                "auth_type": provider.get("auth_type", "api_key"),
+                "status": provider.get("status", "usable"),
+                "note": provider.get("note", ""),
+            }
     return None
 
 
 def grouped() -> list[tuple[str, list[dict]]]:
     return [(g, [m for m in MODELS if m["group"] == g]) for g in GROUP_ORDER]
+
+
+def grouped_providers() -> list[tuple[str, list[dict]]]:
+    return [(g, [p for p in PROVIDERS if p["group"] == g]) for g in GROUP_ORDER]
+
+
+def key_status(provider: dict[str, Any], *, environ: dict[str, str] | None = None) -> str:
+    env = environ if environ is not None else os.environ
+    auth = provider.get("auth_type", "api_key")
+    key_env = provider.get("key_env", "")
+    if auth in ("none", "aws_sdk"):
+        return auth
+    if auth in ("oauth_external", "oauth_device_code", "copilot"):
+        if key_env and env.get(key_env):
+            return f"configured:{key_env}"
+        if auth == "copilot":
+            for name in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+                if env.get(name):
+                    return f"configured:{name}"
+        try:
+            from . import oauth_auth
+            token_state = oauth_auth.token_status(str(provider.get("id", "")))
+        except (ImportError, OSError):
+            token_state = "not-authenticated"
+        if token_state != "not-authenticated":
+            return token_state
+        return f"missing:{key_env or 'auth-token'}"
+    if not key_env:
+        return "oauth" if "oauth" in auth or auth == "copilot" else "no-key-env"
+    return "configured" if env.get(key_env) else f"missing:{key_env}"
+
+
+def live_models(provider: dict[str, Any], api_key: str = "", timeout: float = 6.0) -> list[str] | None:
+    """Fetch a provider model catalog when it exposes an OpenAI-compatible /models endpoint."""
+    url = (provider.get("models_url") or "").strip()
+    base = (provider.get("base") or "").strip()
+    if not url and base and provider.get("kind") == "openai":
+        url = base.rstrip("/") + "/models"
+    if not url:
+        return None
+    req = urllib.request.Request(url)
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", "ivyea-agent")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    items = data if isinstance(data, list) else data.get("data", [])
+    ids = [str(m["id"]) for m in items if isinstance(m, dict) and m.get("id")]
+    return ids or None

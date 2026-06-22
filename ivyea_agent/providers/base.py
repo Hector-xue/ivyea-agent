@@ -49,11 +49,27 @@ def from_settings(model_cfg: dict, api_key: str) -> LLMProvider:
     """按模型配置(models.py 条目/settings)构造 provider。
 
     kind=openai → 通用 OpenAI 兼容（OpenAI/DeepSeek/通义/Kimi/GLM/豆包/MiniMax/
-    OpenRouter/自定义，现已可用）。native(Anthropic/Gemini)/login(Codex/Claude订阅)
-    给清晰"规划中"提示，不假装可用。"""
+    OpenRouter/自定义，现已可用）。anthropic → Claude 原生。native/oauth 等
+    给清晰提示，不假装可用。"""
     kind = (model_cfg.get("kind") or "openai").lower()
     model = model_cfg.get("model") or "deepseek-chat"
     base_url = model_cfg.get("base_url") or model_cfg.get("base") or "https://api.deepseek.com"
+    api_mode = (model_cfg.get("api_mode") or "").lower()
+    if api_mode == "gemini_native":
+        from .gemini_provider import GeminiProvider
+        return GeminiProvider(api_key, model, base_url)
+    if api_mode == "gemini_code_assist":
+        from .gemini_code_assist_provider import GeminiCodeAssistProvider
+        return GeminiCodeAssistProvider(api_key, model, base_url)
+    if api_mode == "bedrock_converse":
+        from .bedrock_provider import BedrockProvider
+        return BedrockProvider(api_key, model, base_url)
+    if api_mode == "copilot_chat_completions":
+        from .copilot_provider import CopilotProvider
+        return CopilotProvider(api_key, model, base_url)
+    if api_mode == "codex_responses":
+        from .codex_provider import CodexProvider
+        return CodexProvider(api_key, model, base_url)
     if kind == "openai":
         from .openai_compat import OpenAICompatProvider
         return OpenAICompatProvider(api_key, model, base_url)
@@ -65,7 +81,9 @@ def from_settings(model_cfg: dict, api_key: str) -> LLMProvider:
         return AnthropicProvider(api_key, model, gw)
     if kind == "native":
         raise LLMError(f"{model_cfg.get('label', model)} 走厂商原生 API，适配规划中；"
-                       "当前可用：OpenAI 兼容类（OpenAI/DeepSeek/通义/Kimi/GLM/豆包/MiniMax/OpenRouter/自定义）。")
-    if kind == "login":
-        raise LLMError(f"{model_cfg.get('label', model)} 为登录制（免 API key），登录接入规划中。")
+                       "当前可用：Claude 原生 + Gemini 原生 + Bedrock Converse + OpenAI 兼容类（OpenAI/DeepSeek/通义/Kimi/GLM/豆包/MiniMax/OpenRouter/本地/自定义）。")
+    if kind in ("oauth", "login"):
+        auth_type = model_cfg.get("auth_type") or kind
+        raise LLMError(f"{model_cfg.get('label', model)} 需要 {auth_type} 认证/专用 transport，尚未接入；"
+                       "不要按普通会员网页登录理解。当前可用：API key、OpenAI 兼容端点、本地 Ollama、自定义网关。")
     raise LLMError(f"未知模型类型 kind={kind}")

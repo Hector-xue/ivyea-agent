@@ -13,11 +13,15 @@ IVYEA_DIR = Path(os.environ.get("IVYEA_HOME", str(Path.home() / ".ivyea")))
 ENV_FILE = IVYEA_DIR / ".env"
 SETTINGS_FILE = IVYEA_DIR / "settings.json"
 MCP_FILE = IVYEA_DIR / "mcp.json"
+AUTH_FILE = IVYEA_DIR / "auth.json"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "provider": "deepseek-chat",  # 选中的模型 id（见 models.py）
     "label": "DeepSeek V3（deepseek-chat）",
     "kind": "openai",             # openai 兼容 / native / login
+    "provider_id": "deepseek",
+    "api_mode": "chat_completions",
+    "auth_type": "api_key",
     "model": "deepseek-chat",
     "base_url": "https://api.deepseek.com",
     "key_env": "DEEPSEEK_API_KEY",
@@ -28,8 +32,24 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 # provider -> 该 provider 读取的环境变量名（API key）
 PROVIDER_ENV_KEYS = {
     "deepseek": "DEEPSEEK_API_KEY",
+    "deepseek-chat": "DEEPSEEK_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "openai-api": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
+    "claude": "ANTHROPIC_API_KEY",
+    "qwen": "DASHSCOPE_API_KEY",
+    "qwen-oauth": "QWEN_API_KEY",
+    "kimi": "MOONSHOT_API_KEY",
+    "kimi-coding": "KIMI_API_KEY",
+    "zai": "ZAI_API_KEY",
+    "glm-legacy": "ZHIPU_API_KEY",
+    "doubao": "ARK_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "nous": "NOUS_API_KEY",
+    "xai": "XAI_API_KEY",
+    "ollama": "OLLAMA_API_KEY",
+    "custom": "CUSTOM_API_KEY",
 }
 
 
@@ -89,6 +109,9 @@ def get_model_config() -> dict[str, Any]:
         "provider": s.get("provider", "deepseek-chat"),
         "label": s.get("label", s.get("provider", "")),
         "kind": s.get("kind", "openai"),
+        "provider_id": s.get("provider_id", s.get("provider", "deepseek-chat")),
+        "api_mode": s.get("api_mode", "chat_completions"),
+        "auth_type": s.get("auth_type", "api_key"),
         "model": s.get("model", "deepseek-chat"),
         "base_url": s.get("base_url", "https://api.deepseek.com"),
         "key_env": s.get("key_env", "DEEPSEEK_API_KEY"),
@@ -96,19 +119,32 @@ def get_model_config() -> dict[str, Any]:
 
 
 def get_active_key() -> str:
-    """当前主脑模型对应的 API key（从 ~/.ivyea/.env / 环境读取）。"""
+    """当前主脑模型对应凭证（从 ~/.ivyea/.env / 环境 / auth.json 读取）。"""
     load_env()
     s = load_settings()
     env_name = s.get("key_env") or PROVIDER_ENV_KEYS.get(s.get("provider", ""), "")
-    return os.environ.get(env_name, "") if env_name else ""
+    auth = (s.get("auth_type") or "api_key").lower()
+    if auth == "copilot":
+        from . import oauth_auth
+        return oauth_auth.resolve_copilot_api_token()
+    if env_name and os.environ.get(env_name):
+        return os.environ[env_name]
+    if auth in ("oauth_external", "oauth_device_code", "copilot"):
+        from . import oauth_auth
+        provider_id = s.get("provider_id") or s.get("provider") or ""
+        return oauth_auth.resolve_provider_token(str(provider_id), str(env_name or ""))
+    return ""
 
 
 def apply_model(entry: dict[str, Any], model: str = "", base_url: str = "") -> None:
     """把 models.py 的一个条目（或自定义）写入 settings。"""
     s = load_settings()
     s["provider"] = entry.get("id", s.get("provider"))
+    s["provider_id"] = entry.get("provider_id", entry.get("id", s.get("provider_id", "")))
     s["label"] = entry.get("label", s.get("label"))
     s["kind"] = entry.get("kind", "openai")
+    s["api_mode"] = entry.get("api_mode", s.get("api_mode", "chat_completions"))
+    s["auth_type"] = entry.get("auth_type", s.get("auth_type", "api_key"))
     s["model"] = model or entry.get("model", s.get("model"))
     s["base_url"] = base_url or entry.get("base", s.get("base_url"))
     s["key_env"] = entry.get("key_env", s.get("key_env"))
