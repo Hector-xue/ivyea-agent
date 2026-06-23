@@ -169,8 +169,12 @@ def test_service_health_shape_without_socket(ivyea_home):
     assert manifest["capabilities"]["knowledge_management"] is True
     assert manifest["capabilities"]["workspace_understanding"] is True
     assert manifest["capabilities"]["code_agent"] is True
+    assert manifest["capabilities"]["mcp_stdio_server"] is True
     assert manifest["capabilities"]["write_execution"] is False
+    assert manifest["mcp"]["args"] == ["mcp", "serve"]
+    assert manifest["mcp"]["read_only"] is True
     assert any(e["path"] == "/v1/openapi.json" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/mcp/self-config" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/system/status" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/system/doctor" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/chat" for e in manifest["endpoints"])
@@ -204,6 +208,7 @@ def test_service_health_shape_without_socket(ivyea_home):
     assert spec["info"]["title"] == "Ivyea Agent Local API"
     assert "/v1/chat" in spec["paths"]
     assert "/v1/chat/stream" in spec["paths"]
+    assert "/v1/mcp/self-config" in spec["paths"]
     assert "/v1/skills/search" in spec["paths"]
     assert "/v1/knowledge/audit" in spec["paths"]
     assert "/v1/knowledge/rebuild" in spec["paths"]
@@ -214,6 +219,11 @@ def test_service_health_shape_without_socket(ivyea_home):
 
 def test_service_task_api_helpers(ivyea_home):
     from ivyea_agent import service
+
+    mcp = service.mcp_self_config()
+    assert mcp["ok"] is True
+    assert mcp["mcp"]["transport"] == "stdio"
+    assert mcp["mcp"]["read_only"] is True
 
     created = service.task_create({"title": "Embed task", "steps": ["inspect", "patch"], "notes": "local"})
     task_id = created["task"]["id"]
@@ -437,6 +447,11 @@ def test_local_service_health_and_retrieval(ivyea_home, monkeypatch):
             spec = json.loads(resp.read().decode("utf-8"))
         assert spec["openapi"] == "3.1.0"
         assert "/v1/chat/stream" in spec["paths"]
+
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/mcp/self-config", timeout=5) as resp:
+            mcp_config = json.loads(resp.read().decode("utf-8"))
+        assert mcp_config["ok"] is True
+        assert mcp_config["mcp"]["args"] == ["mcp", "serve"]
 
         payload = json.dumps({"query": "高点击 零单 否词", "limit": 3}).encode("utf-8")
         req = urllib.request.Request(

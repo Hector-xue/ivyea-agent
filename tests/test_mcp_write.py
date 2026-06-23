@@ -1,6 +1,9 @@
 """MCP writeActions templates and validation."""
 from __future__ import annotations
 
+import io
+import json
+
 
 def test_mcp_write_template_validates():
     from ivyea_agent import mcp_write
@@ -175,3 +178,113 @@ def test_mcp_doctor_security_hints():
     rendered = mcp_status.render([row, writer])
     assert "security=auth_over_plain_http" in rendered
     assert "writeActions 已配置" in rendered
+
+
+def test_ivyea_mcp_server_lists_and_calls_readonly_tools(ivyea_home):
+    from ivyea_agent import mcp_server, task_runner, traces
+
+    tools = mcp_server.list_tools()
+    names = {tool["name"] for tool in tools}
+    assert "ivyea_knowledge_search" in names
+    assert "ivyea_code_plan" in names
+    assert "ivyea_task_list" in names
+    assert "ivyea_task_detail" in names
+    assert "ivyea_task_resume" in names
+    assert "ivyea_trace_list" in names
+    assert "ivyea_trace_stats" in names
+    assert "execute_actions" not in names
+
+    task = task_runner.create("MCP task", steps=["inspect", "finish"])
+    task_runner.start_next(task["id"])
+    traces.record("mcp-session", "turn-1", "tool_call", "knowledge_search", ok=True, duration_ms=5, summary="ok")
+    traces.record("mcp-session", "turn-1", "tool_call", "bad_tool", ok=False, duration_ms=7, summary="fail")
+
+    init = mcp_server.handle_message({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    assert init["result"]["serverInfo"]["name"] == "ivyea-agent"
+
+    listed = mcp_server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    assert any(tool["name"] == "ivyea_retrieval_search" for tool in listed["result"]["tools"])
+
+    called = mcp_server.handle_message({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {"name": "ivyea_knowledge_search", "arguments": {"query": "否词", "limit": 2}},
+    })
+    assert called["result"]["structuredContent"]["ok"] is True
+    assert called["result"]["structuredContent"]["results"]
+    assert called["result"]["isError"] is False
+
+    tasks = mcp_server.handle_message({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "tools/call",
+        "params": {"name": "ivyea_task_list", "arguments": {"limit": 5}},
+    })
+    assert any(row["id"] == task["id"] for row in tasks["result"]["structuredContent"]["tasks"])
+
+    detail = mcp_server.handle_message({
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "tools/call",
+        "params": {"name": "ivyea_task_detail", "arguments": {"id": task["id"]}},
+    })
+    assert detail["result"]["structuredContent"]["task"]["id"] == task["id"]
+
+    resume = mcp_server.handle_message({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {"name": "ivyea_task_resume", "arguments": {"id": task["id"]}},
+    })
+    assert "Ivyea Task Resume" in resume["result"]["structuredContent"]["resume"]
+    assert resume["result"]["structuredContent"]["next_step"]["title"] == "inspect"
+
+    trace_rows = mcp_server.handle_message({
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "tools/call",
+        "params": {"name": "ivyea_trace_list", "arguments": {"session_id": "mcp-session", "limit": 5}},
+    })
+    assert len(trace_rows["result"]["structuredContent"]["traces"]) == 2
+
+    trace_stats = mcp_server.handle_message({
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "tools/call",
+        "params": {"name": "ivyea_trace_stats", "arguments": {"limit": 10}},
+    })
+    assert trace_stats["result"]["structuredContent"]["stats"]["failures"] >= 1
+
+    missing = mcp_server.handle_message({
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "tools/call",
+        "params": {"name": "ivyea_missing", "arguments": {}},
+    })
+    assert missing["result"]["isError"] is True
+
+
+def test_ivyea_mcp_server_stdio_loop(ivyea_home):
+    from ivyea_agent import mcp_server
+
+    stdin = io.StringIO(
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n" +
+        json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}) + "\n"
+    )
+    stdout = io.StringIO()
+    assert mcp_server.serve_stdio(stdin, stdout) == 0
+    rows = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert rows[0]["result"]["serverInfo"]["name"] == "ivyea-agent"
+    assert any(tool["name"] == "ivyea_health" for tool in rows[1]["result"]["tools"])
+
+
+def test_cli_mcp_self_config(ivyea_home, capsys):
+    from ivyea_agent.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["mcp", "self-config"])
+    assert args.func(args) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["transport"] == "stdio"
+    assert data["args"] == ["mcp", "serve"]

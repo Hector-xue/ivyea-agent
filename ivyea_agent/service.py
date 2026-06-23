@@ -69,7 +69,14 @@ def manifest() -> dict[str, Any]:
             "chat": True,
             "workspace_understanding": True,
             "code_agent": True,
+            "mcp_stdio_server": True,
             "write_execution": False,
+        },
+        "mcp": {
+            "transport": "stdio",
+            "command": "ivyea",
+            "args": ["mcp", "serve"],
+            "read_only": True,
         },
         "endpoints": [
             {"method": "GET", "path": "/health", "description": "health, version, model status, knowledge and retrieval summary"},
@@ -77,6 +84,7 @@ def manifest() -> dict[str, Any]:
             {"method": "GET", "path": "/v1/openapi.json", "description": "OpenAPI discovery document"},
             {"method": "GET", "path": "/v1/capabilities", "description": "retrieval capabilities"},
             {"method": "GET", "path": "/v1/model", "description": "current model status without secrets"},
+            {"method": "GET", "path": "/v1/mcp/self-config", "description": "stdio MCP server config for local clients"},
             {"method": "GET", "path": "/v1/system/status", "description": "install/runtime status for IvyeaOps diagnostics"},
             {"method": "GET", "path": "/v1/system/doctor", "description": "install/runtime doctor checks"},
             {"method": "GET", "path": "/v1/chat/sessions", "description": "list persisted embedded chat sessions"},
@@ -153,6 +161,19 @@ def openapi_spec() -> dict[str, Any]:
 
 def task_list(limit: int = 20, status: str = "") -> dict[str, Any]:
     return {"ok": True, "tasks": task_runner.list_tasks(limit=limit, status=status or "")}
+
+
+def mcp_self_config() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "mcp": {
+            "transport": "stdio",
+            "command": "ivyea",
+            "args": ["mcp", "serve"],
+            "read_only": True,
+            "note": "Read-only IvyeaAgent MCP server. Write operations are not exposed.",
+        },
+    }
 
 
 def task_detail(task_id: str) -> dict[str, Any]:
@@ -554,6 +575,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/model":
             self._json(200, {"ok": True, "model": health()["model"]})
+            return
+        if parsed.path == "/v1/mcp/self-config":
+            self._json(200, mcp_self_config())
             return
         if parsed.path == "/v1/system/status":
             self._json(200, system_status())

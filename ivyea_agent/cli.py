@@ -717,6 +717,13 @@ def _mcp_add_wizard() -> int:
 
 def _cmd_mcp(args: argparse.Namespace) -> int:
     config.ensure_dirs()
+    if args.action == "serve":
+        from . import mcp_server
+        return mcp_server.serve_stdio()
+    if args.action == "self-config":
+        from . import mcp_server
+        print(json.dumps(mcp_server.self_config(), ensure_ascii=False, indent=2))
+        return 0
     if args.action == "add":
         return _mcp_add_wizard()
     if args.action == "list":
@@ -2785,8 +2792,11 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("value", nargs="?")
     pc.set_defaults(func=_cmd_config)
 
-    pm = sub.add_parser("mcp", help="MCP 配置/自检（add/list/remove/edit/tools/call/suggest/template/validate/doctor）")
-    pm.add_argument("action", choices=["add", "list", "remove", "edit", "tools", "call", "suggest", "template", "validate", "doctor"])
+    pm = sub.add_parser("mcp", help="MCP 配置/自检/反向服务（add/list/remove/edit/tools/call/suggest/template/validate/doctor/serve/self-config）")
+    pm.add_argument("action", choices=[
+        "add", "list", "remove", "edit", "tools", "call", "suggest",
+        "template", "validate", "doctor", "serve", "self-config",
+    ])
     pm.add_argument("name", nargs="?", help="服务器名（remove/tools/call 需要）")
     pm.add_argument("tool", nargs="?", help="工具名（call 需要）")
     pm.add_argument("--args", help="call 的入参 JSON，如 '{\"asin\":\"B0..\"}'")
