@@ -13,7 +13,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import panels, permission, policy, security
+from . import config, panels, permission, policy, security
 
 _MAX_OUT = 4000          # 工具返回截断（防爆上下文）
 _EXEC_TIMEOUT = 30       # 执行类默认超时（秒）
@@ -134,6 +134,133 @@ def t_web_search(args: dict, ctx) -> str:
         return f"搜索失败（尽力而为）：{e}"
 
 
+# ── 代码导航（只读，自动放行）────────────────────────────────────────────────
+_GREP_BINARY = re.compile(rb"\x00")
+
+
+def _ws_root(ctx):
+    from . import workspace
+    return workspace.resolve_root(getattr(ctx, "workspace", "") or None)
+
+
+def t_grep(args: dict, ctx) -> str:
+    """内容正则搜索（ripgrep 风格），返回 file:line 命中行。只读，自动放行。"""
+    pattern = args.get("pattern", "")
+    if not pattern:
+        return "pattern 为空。"
+    try:
+        rx = re.compile(pattern)
+    except re.error as e:
+        return f"正则无效：{e}"
+    from . import workspace
+    root = _ws_root(ctx)
+    ok, msg = policy.check_path(root, "read")
+    if not ok:
+        return msg
+    glob = (args.get("glob") or "").strip()
+    max_hits = min(int(args.get("max_results") or 80), 300)
+    hits: list[str] = []
+    scanned = 0
+    for path in workspace.iter_files(root):
+        if glob and not path.match(glob):
+            continue
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if _GREP_BINARY.search(raw[:4096]):
+            continue  # 跳过二进制
+        scanned += 1
+        text = raw.decode("utf-8", errors="replace")
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            rel = path
+        for i, line in enumerate(text.splitlines(), 1):
+            if rx.search(line):
+                hits.append(f"{rel}:{i}: {line.strip()[:200]}")
+                if len(hits) >= max_hits:
+                    break
+        if len(hits) >= max_hits:
+            break
+    if not hits:
+        return f"无匹配（扫描 {scanned} 文件）：{pattern}"
+    return f"命中 {len(hits)} 处（扫描 {scanned} 文件）：\n" + _truncate("\n".join(hits))
+
+
+def t_code_search(args: dict, ctx) -> str:
+    """按符号/路径/预览检索代码库相关文件（索引搜索）。只读。"""
+    from . import workspace
+    q = args.get("query", "")
+    if not q:
+        return "query 为空。"
+    rows = workspace.search(q, root=_ws_root(ctx), limit=min(int(args.get("limit") or 10), 30))
+    return _truncate(workspace.render_search(rows, q))
+
+
+def t_code_symbols(args: dict, ctx) -> str:
+    """列出/搜索代码库里的函数/类等符号定义位置。只读。"""
+    from . import workspace
+    data = workspace.symbol_index(root=_ws_root(ctx), query=args.get("query", "") or "",
+                                  limit=min(int(args.get("limit") or 40), 120))
+    return _truncate(workspace.render_symbols(data))
+
+
+def t_code_impact(args: dict, ctx) -> str:
+    """查某个符号/文件的调用方、导入方与受影响测试。只读。"""
+    from . import workspace
+    target = args.get("target", "")
+    if not target:
+        return "target 为空。"
+    data = workspace.impact_analysis(target, root=_ws_root(ctx), limit=min(int(args.get("limit") or 60), 120))
+    return _truncate(workspace.render_impact(data))
+
+
+# ── 代码闭环（结构化补丁 / 测试 / 修复计划）──────────────────────────────────
+def t_code_apply_patch(args: dict, ctx) -> str:
+    """校验/应用结构化补丁并跑测试。默认 dry-run（只校验、不写）；execute=true 才真写，
+    且经人工审批。补丁 ops=[{path, old, new}]，old 必须在文件中唯一出现。"""
+    ops = args.get("ops")
+    if not isinstance(ops, list) or not ops:
+        return "ops 为空：需要 [{path, old, new}, ...]，old 必须在文件中唯一出现。"
+    execute = bool(args.get("execute"))
+    if execute:
+        preview = "应用结构化补丁并执行测试：\n" + "\n".join(
+            f"  · {o.get('path')}" for o in ops if isinstance(o, dict))
+        ok, msg = _gate(ctx, "code_apply_patch", preview)
+        if not ok:
+            return msg
+    from . import code_agent
+    try:
+        result = code_agent.patch_apply_loop(
+            {"ops": ops}, root=_ws_root(ctx),
+            test_command=args.get("test_command", "") or "", execute=execute)
+    except Exception as e:  # noqa: BLE001
+        return f"补丁执行出错：{e}"
+    return _truncate(code_agent.render_run(result))
+
+
+def t_run_tests(args: dict, ctx) -> str:
+    """在工作目录跑测试命令并返回结果（执行，会弹审批）。默认 `python -m pytest`。"""
+    command = (args.get("command") or "python -m pytest").strip()
+    ok, msg = _gate(ctx, "run_tests", "运行测试：" + command)
+    if not ok:
+        return msg
+    from . import code_agent
+    res = code_agent.run_tests(command, root=_ws_root(ctx), timeout=int(args.get("timeout") or 120))
+    head = "✓ 测试通过" if res.get("ok") else f"✗ 测试失败（exit {res.get('returncode')}）"
+    return _truncate(head + "\n" + (res.get("output") or ""))
+
+
+def t_code_repair(args: dict, ctx) -> str:
+    """解析失败的测试输出，生成下一轮修复计划（可疑文件/失败摘要/重跑命令）。只读。"""
+    output = args.get("test_output", "") or ""
+    if not output.strip():
+        return "test_output 为空：把失败的测试输出贴进来。"
+    from . import code_agent
+    return _truncate(code_agent.render_repair(code_agent.repair_plan(output, root=_ws_root(ctx))))
+
+
 # ── 写/执行类（门控）─────────────────────────────────────────────────────────
 def t_write_file(args: dict, ctx) -> str:
     path = os.path.expanduser(args.get("path", ""))
@@ -192,6 +319,36 @@ def t_edit_file(args: dict, ctx) -> str:
         return f"编辑失败：{e}"
 
 
+def _make_preexec(timeout: int):
+    """POSIX 资源限额（在子进程 fork 后、exec 前生效）：内存(地址空间)、CPU 时间、
+    单文件大小、禁 core dump。Windows / 无 resource 模块时返回 None（优雅降级）。"""
+    if os.name == "nt":
+        return None
+    try:
+        import resource
+    except ImportError:
+        return None
+    mem_mb = int(config.get_setting("exec_memory_limit_mb", 2048))
+    fsize_mb = int(config.get_setting("exec_file_limit_mb", 512))
+    cpu_s = max(1, int(timeout)) + 5
+
+    def _apply():
+        limits = [(resource.RLIMIT_CPU, cpu_s, cpu_s + 5), (resource.RLIMIT_CORE, 0, 0)]
+        if mem_mb > 0:
+            b = mem_mb * 1024 * 1024
+            limits.append((resource.RLIMIT_AS, b, b))  # 内存上限：Linux 强制；macOS 忽略 RLIMIT_AS
+        if fsize_mb > 0:
+            b = fsize_mb * 1024 * 1024
+            limits.append((resource.RLIMIT_FSIZE, b, b))
+        for res, soft, hard in limits:
+            try:
+                resource.setrlimit(res, (soft, hard))
+            except (ValueError, OSError):
+                pass
+
+    return _apply
+
+
 def _run(cmd, args, ctx, kind: str, preview: str) -> str:
     ok, msg = _gate(ctx, kind, preview)
     if not ok:
@@ -201,7 +358,8 @@ def _run(cmd, args, ctx, kind: str, preview: str) -> str:
     try:
         proc = subprocess.run(cmd, cwd=workdir, timeout=timeout,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              text=True, encoding="utf-8", errors="replace")
+                              text=True, encoding="utf-8", errors="replace",
+                              preexec_fn=_make_preexec(timeout))
     except subprocess.TimeoutExpired:
         return f"超时（>{timeout}s）已终止。"
     except Exception as e:  # noqa: BLE001
@@ -335,6 +493,26 @@ GENERAL_TOOL_SCHEMAS = [
         {"url": {"type": "string"}}, ["url"]),
     _fn("web_search", "网页搜索关键词（尽力而为，无 key）。",
         {"query": {"type": "string"}}, ["query"]),
+    _fn("grep", "在代码库里做内容正则搜索（ripgrep 风格），返回 file:line 命中行。只读，自动放行。找代码先用它，别瞎猜路径。",
+        {"pattern": {"type": "string", "description": "正则表达式"},
+         "glob": {"type": "string", "description": "可选：只搜匹配此 glob 的文件，如 *.py"},
+         "max_results": {"type": "integer", "description": "最多命中条数，默认 80"}}, ["pattern"]),
+    _fn("code_search", "按符号/路径/预览检索代码库里最相关的文件（索引搜索）。只读。适合“这功能在哪实现的”。",
+        {"query": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]),
+    _fn("code_symbols", "列出/搜索代码库里的函数/类等符号定义位置。只读。",
+        {"query": {"type": "string", "description": "可选，过滤符号名"}, "limit": {"type": "integer"}}),
+    _fn("code_impact", "查某个符号或文件的调用方、导入方与受影响测试（改动影响面）。只读。改代码前先看它。",
+        {"target": {"type": "string", "description": "符号名或文件路径"}, "limit": {"type": "integer"}}, ["target"]),
+    _fn("code_apply_patch", "校验/应用结构化补丁并跑测试。默认 dry-run 只校验不写；execute=true 才真写(经人工审批)。"
+        "ops=[{path,old,new}]，old 必须在文件中唯一出现。多文件/要顺带跑测试时优先用它而非 edit_file。",
+        {"ops": {"type": "array", "items": {"type": "object", "properties": {
+            "path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}}}},
+         "test_command": {"type": "string", "description": "可选：execute 后跑的测试命令"},
+         "execute": {"type": "boolean", "description": "true=真写并测试(审批)，默认 false 只校验"}}, ["ops"]),
+    _fn("run_tests", "在工作目录跑测试命令并返回结果（执行，会弹审批）。默认 python -m pytest。",
+        {"command": {"type": "string"}, "timeout": {"type": "integer"}}),
+    _fn("code_repair", "解析失败测试输出，生成下一轮修复计划（可疑文件/失败摘要/重跑命令）。只读。",
+        {"test_output": {"type": "string"}}, ["test_output"]),
     _fn("todo_write", "维护多步任务计划(让长任务可视化)。每步 {content, status: pending|in_progress|completed}。开始多步任务时先列计划，完成一步就更新状态。",
         {"todos": {"type": "array", "items": {"type": "object", "properties": {
             "content": {"type": "string"},
@@ -366,6 +544,9 @@ GENERAL_DISPATCH = {
     "write_file": t_write_file, "edit_file": t_edit_file,
     "run_python": t_run_python, "run_command": t_run_command,
     "web_fetch": t_web_fetch, "web_search": t_web_search,
+    "grep": t_grep, "code_search": t_code_search,
+    "code_symbols": t_code_symbols, "code_impact": t_code_impact,
+    "code_apply_patch": t_code_apply_patch, "run_tests": t_run_tests, "code_repair": t_code_repair,
     "todo_write": t_todo_write,
     "task_read": t_task_read,
     "task_step": t_task_step,

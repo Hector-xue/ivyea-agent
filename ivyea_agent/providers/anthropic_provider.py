@@ -137,7 +137,7 @@ class AnthropicProvider(LLMProvider):
         try:
             msg = self._cli().with_options(timeout=timeout).messages.create(
                 model=self.model, max_tokens=_DEFAULT_MAX_TOKENS,
-                system=system or None,
+                system=_system_param(system),   # cache the (often-repeated) system prefix
                 messages=[{"role": "user", "content": user}])
         except Exception as e:  # noqa: BLE001
             raise LLMError(f"Claude 调用失败：{e}") from e
