@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable
 
 from . import config, traces, ui
-from .agent_tools import TOOL_SCHEMAS, ToolContext, dispatch_result
+from .agent_tools import PARALLEL_SAFE, TOOL_SCHEMAS, ToolContext, dispatch_result
 from .providers import LLMProvider
 
 SYSTEM_PROMPT = """你是 Ivyea Agent，一个亚马逊运营助手。专长是广告巡检，也能处理日常运营杂活。
@@ -105,27 +106,47 @@ def _append_tool_call_msg(messages: list, content, tool_calls: list) -> None:
     })
 
 
+def _record_tool_result(ctx: ToolContext, messages: list, tc: dict, res, duration_ms: int,
+                        narrate: Callable[[str], None]) -> None:
+    result = res.text
+    payload = {"arguments": tc.get("arguments") or {}}
+    if res.error:
+        payload["traceback"] = res.error[:2000]
+    traces.record(
+        getattr(ctx, "session_id", ""), getattr(ctx, "turn_id", ""),
+        "tool_call", tc["name"], ok=res.ok, duration_ms=duration_ms,
+        summary=result[:300], payload=payload)
+    narrate(ui.tool_result(result))
+    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+
+
+def _run_one(tc: dict, ctx: ToolContext):
+    started = time.time()
+    res = dispatch_result(tc["name"], tc["arguments"], ctx)
+    return res, int((time.time() - started) * 1000)
+
+
 def _dispatch_tool_calls(ctx: ToolContext, messages: list, status: TurnStatus, tool_calls: list,
                          step_idx: int, max_steps: int, narrate: Callable[[str], None]) -> None:
-    """派发本步所有工具调用：叙述、执行、记 trace、把结果回灌到 messages。"""
+    """派发本步所有工具调用：叙述、执行、记 trace、把结果按原顺序回灌到 messages。
+    当本步全部是只读且并行安全的工具时并发执行（降延迟）；否则顺序执行（保留审批/写入语义）。"""
+    parallel = len(tool_calls) > 1 and all(tc["name"] in PARALLEL_SAFE for tc in tool_calls)
+    if parallel:
+        for call_idx, tc in enumerate(tool_calls, start=1):
+            status.record_tool_call()
+            narrate(ui.tool_call(tc["name"], tc.get("arguments") or {},
+                                 step=f"{step_idx + 1}/{max_steps}.{call_idx}∥"))
+        with ThreadPoolExecutor(max_workers=min(len(tool_calls), 8)) as ex:
+            outcomes = list(ex.map(lambda tc: _run_one(tc, ctx), tool_calls))
+        for tc, (res, dur) in zip(tool_calls, outcomes):
+            _record_tool_result(ctx, messages, tc, res, dur, narrate)
+        return
     for call_idx, tc in enumerate(tool_calls, start=1):
         status.record_tool_call()
         narrate(ui.tool_call(tc["name"], tc.get("arguments") or {},
                              step=f"{step_idx + 1}/{max_steps}.{call_idx}"))
-        started = time.time()
-        res = dispatch_result(tc["name"], tc["arguments"], ctx)
-        result = res.text
-        payload = {"arguments": tc.get("arguments") or {}}
-        if res.error:
-            payload["traceback"] = res.error[:2000]
-        traces.record(
-            getattr(ctx, "session_id", ""), getattr(ctx, "turn_id", ""),
-            "tool_call", tc["name"],
-            ok=res.ok,
-            duration_ms=int((time.time() - started) * 1000),
-            summary=result[:300], payload=payload)
-        narrate(ui.tool_result(result))
-        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+        res, dur = _run_one(tc, ctx)
+        _record_tool_result(ctx, messages, tc, res, dur, narrate)
 
 
 def _finalize_limit(ctx: ToolContext, messages: list, status: TurnStatus, max_steps: int,
