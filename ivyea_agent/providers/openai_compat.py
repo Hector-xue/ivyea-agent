@@ -118,6 +118,10 @@ class OpenAICompatProvider(LLMProvider):
         return (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
 
     def chat(self, messages, tools=None, temperature=0.3, timeout=120.0):
+        # Prompt caching：OpenAI/DeepSeek 等兼容服务对稳定前缀（system + tools）做服务端
+        # 自动缓存，无需也不接受请求侧 cache 提示（不同于 Anthropic 的 cache_control）。
+        # 我们保证 system 消息与 tools 在会话内稳定（见 cli._sys_msg / agent_tools.TOOL_SCHEMAS），
+        # 命中率体现在 usage.prompt_cache_hit_tokens / prompt_tokens_details.cached_tokens。
         payload = {"model": self.model, "messages": messages,
                    "temperature": temperature, "stream": False}
         if tools:
