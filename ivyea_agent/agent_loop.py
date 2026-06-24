@@ -94,6 +94,50 @@ def _record_task_interruption(ctx: ToolContext, text: str, status: TurnStatus) -
         return
 
 
+def _append_tool_call_msg(messages: list, content, tool_calls: list) -> None:
+    """回灌助手的 tool_calls 消息（OpenAI 格式）。"""
+    messages.append({
+        "role": "assistant", "content": content or None,
+        "tool_calls": [{"id": tc["id"], "type": "function",
+                        "function": {"name": tc["name"],
+                                     "arguments": json.dumps(tc["arguments"], ensure_ascii=False)}}
+                       for tc in tool_calls],
+    })
+
+
+def _dispatch_tool_calls(ctx: ToolContext, messages: list, status: TurnStatus, tool_calls: list,
+                         step_idx: int, max_steps: int, narrate: Callable[[str], None]) -> None:
+    """派发本步所有工具调用：叙述、执行、记 trace、把结果回灌到 messages。"""
+    for call_idx, tc in enumerate(tool_calls, start=1):
+        status.record_tool_call()
+        narrate(ui.tool_call(tc["name"], tc.get("arguments") or {},
+                             step=f"{step_idx + 1}/{max_steps}.{call_idx}"))
+        started = time.time()
+        result = dispatch(tc["name"], tc["arguments"], ctx)
+        traces.record(
+            getattr(ctx, "session_id", ""), getattr(ctx, "turn_id", ""),
+            "tool_call", tc["name"],
+            ok=not result.startswith("工具 ") and "执行出错" not in result,
+            duration_ms=int((time.time() - started) * 1000),
+            summary=result[:300], payload={"arguments": tc.get("arguments") or {}})
+        narrate(ui.tool_result(result))
+        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+
+
+def _finalize_limit(ctx: ToolContext, messages: list, status: TurnStatus, max_steps: int,
+                    extra_payload: dict | None = None) -> str:
+    """到达步数上限时的统一收尾：写续跑提示、记任务中断、记 trace。"""
+    text = _limit_payload(max_steps, status)
+    _append_limit_context(messages, text)
+    _record_task_interruption(ctx, text, status)
+    payload = {"max_steps": max_steps, "tool_calls": status.tool_calls}
+    if extra_payload:
+        payload.update(extra_payload)
+    traces.record(getattr(ctx, "session_id", ""), getattr(ctx, "turn_id", ""),
+                  "turn_limit", "tool_steps", ok=False, summary=text, payload=payload)
+    return text
+
+
 def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
              max_steps: int | None = None, narrate: Callable[[str], None] = print) -> str:
     """跑一轮对话（messages 含 system+历史+本次 user）。就地追加消息，返回最终回答。"""
@@ -107,45 +151,9 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
             content = msg.get("content", "") or ""
             messages.append({"role": "assistant", "content": content})
             return content
-        # 回灌助手的 tool_calls 消息（OpenAI 格式）
-        messages.append({
-            "role": "assistant", "content": msg.get("content") or None,
-            "tool_calls": [{"id": tc["id"], "type": "function",
-                            "function": {"name": tc["name"],
-                                         "arguments": json.dumps(tc["arguments"], ensure_ascii=False)}}
-                           for tc in tool_calls],
-        })
-        for call_idx, tc in enumerate(tool_calls, start=1):
-            status.record_tool_call()
-            narrate(ui.tool_call(tc["name"], tc.get("arguments") or {},
-                                 step=f"{step_idx + 1}/{max_steps}.{call_idx}"))
-            started = time.time()
-            result = dispatch(tc["name"], tc["arguments"], ctx)
-            traces.record(
-                getattr(ctx, "session_id", ""),
-                getattr(ctx, "turn_id", ""),
-                "tool_call",
-                tc["name"],
-                ok=not result.startswith("工具 ") and "执行出错" not in result,
-                duration_ms=int((time.time() - started) * 1000),
-                summary=result[:300],
-                payload={"arguments": tc.get("arguments") or {}},
-            )
-            narrate(ui.tool_result(result))
-            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
-    text = _limit_payload(max_steps, status)
-    _append_limit_context(messages, text)
-    _record_task_interruption(ctx, text, status)
-    traces.record(
-        getattr(ctx, "session_id", ""),
-        getattr(ctx, "turn_id", ""),
-        "turn_limit",
-        "tool_steps",
-        ok=False,
-        summary=text,
-        payload={"max_steps": max_steps, "tool_calls": status.tool_calls},
-    )
-    return text
+        _append_tool_call_msg(messages, msg.get("content"), tool_calls)
+        _dispatch_tool_calls(ctx, messages, status, tool_calls, step_idx, max_steps, narrate)
+    return _finalize_limit(ctx, messages, status, max_steps)
 
 
 def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
@@ -184,41 +192,7 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
             content = final.get("content", "") or ""
             messages.append({"role": "assistant", "content": content})
             return {"text": content, "usage": total_usage}
-        messages.append({
-            "role": "assistant", "content": final.get("content") or None,
-            "tool_calls": [{"id": tc["id"], "type": "function",
-                            "function": {"name": tc["name"],
-                                         "arguments": json.dumps(tc["arguments"], ensure_ascii=False)}}
-                           for tc in tool_calls],
-        })
-        for call_idx, tc in enumerate(tool_calls, start=1):
-            status.record_tool_call()
-            narrate(ui.tool_call(tc["name"], tc.get("arguments") or {},
-                                 step=f"{step_idx + 1}/{max_steps}.{call_idx}"))
-            started = time.time()
-            result = dispatch(tc["name"], tc["arguments"], ctx)
-            traces.record(
-                getattr(ctx, "session_id", ""),
-                getattr(ctx, "turn_id", ""),
-                "tool_call",
-                tc["name"],
-                ok=not result.startswith("工具 ") and "执行出错" not in result,
-                duration_ms=int((time.time() - started) * 1000),
-                summary=result[:300],
-                payload={"arguments": tc.get("arguments") or {}},
-            )
-            narrate(ui.tool_result(result))
-            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
-    text = _limit_payload(max_steps, status)
-    _append_limit_context(messages, text)
-    _record_task_interruption(ctx, text, status)
-    traces.record(
-        getattr(ctx, "session_id", ""),
-        getattr(ctx, "turn_id", ""),
-        "turn_limit",
-        "tool_steps",
-        ok=False,
-        summary=text,
-        payload={"max_steps": max_steps, "tool_calls": status.tool_calls, "usage": total_usage},
-    )
+        _append_tool_call_msg(messages, final.get("content"), tool_calls)
+        _dispatch_tool_calls(ctx, messages, status, tool_calls, step_idx, max_steps, narrate)
+    text = _finalize_limit(ctx, messages, status, max_steps, extra_payload={"usage": total_usage})
     return {"text": text, "usage": total_usage}
