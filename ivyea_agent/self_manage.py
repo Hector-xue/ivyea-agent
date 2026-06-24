@@ -646,8 +646,9 @@ def execute_plan(plan: dict[str, Any], timeout: int = 300) -> dict[str, Any]:
         if not assessed.get("ok"):
             results.append({"command": command, "ok": False, "output": "\n".join(assessed.get("reasons") or [])})
             break
+        shell = ["cmd", "/c", command] if os.name == "nt" else ["bash", "-c", command]
         proc = subprocess.run(
-            ["bash", "-lc", command],
+            shell,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

@@ -14,6 +14,7 @@ the first writable patch workflow auditable.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -104,8 +105,12 @@ def suggested_tests(root: str | Path = ".") -> list[str]:
 
 
 def run_test_command(command: str, root: str | Path = ".", timeout: int = 120) -> dict[str, Any]:
+    # Windows has no bash; on POSIX use a non-login shell so the inherited PATH
+    # (e.g. the active interpreter from CI's setup-python) is preserved instead
+    # of being reset by login profiles.
+    shell = ["cmd", "/c", command] if os.name == "nt" else ["bash", "-c", command]
     proc = subprocess.run(
-        ["bash", "-lc", command],
+        shell,
         cwd=str(Path(root).expanduser().resolve()),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
