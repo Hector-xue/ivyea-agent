@@ -13,7 +13,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import panels, permission, policy, security
+from . import config, panels, permission, policy, security
 
 _MAX_OUT = 4000          # 工具返回截断（防爆上下文）
 _EXEC_TIMEOUT = 30       # 执行类默认超时（秒）
@@ -319,6 +319,36 @@ def t_edit_file(args: dict, ctx) -> str:
         return f"编辑失败：{e}"
 
 
+def _make_preexec(timeout: int):
+    """POSIX 资源限额（在子进程 fork 后、exec 前生效）：内存(地址空间)、CPU 时间、
+    单文件大小、禁 core dump。Windows / 无 resource 模块时返回 None（优雅降级）。"""
+    if os.name == "nt":
+        return None
+    try:
+        import resource
+    except ImportError:
+        return None
+    mem_mb = int(config.get_setting("exec_memory_limit_mb", 2048))
+    fsize_mb = int(config.get_setting("exec_file_limit_mb", 512))
+    cpu_s = max(1, int(timeout)) + 5
+
+    def _apply():
+        limits = [(resource.RLIMIT_CPU, cpu_s, cpu_s + 5), (resource.RLIMIT_CORE, 0, 0)]
+        if mem_mb > 0:
+            b = mem_mb * 1024 * 1024
+            limits.append((resource.RLIMIT_AS, b, b))
+        if fsize_mb > 0:
+            b = fsize_mb * 1024 * 1024
+            limits.append((resource.RLIMIT_FSIZE, b, b))
+        for res, soft, hard in limits:
+            try:
+                resource.setrlimit(res, (soft, hard))
+            except (ValueError, OSError):
+                pass
+
+    return _apply
+
+
 def _run(cmd, args, ctx, kind: str, preview: str) -> str:
     ok, msg = _gate(ctx, kind, preview)
     if not ok:
@@ -328,7 +358,8 @@ def _run(cmd, args, ctx, kind: str, preview: str) -> str:
     try:
         proc = subprocess.run(cmd, cwd=workdir, timeout=timeout,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              text=True, encoding="utf-8", errors="replace")
+                              text=True, encoding="utf-8", errors="replace",
+                              preexec_fn=_make_preexec(timeout))
     except subprocess.TimeoutExpired:
         return f"超时（>{timeout}s）已终止。"
     except Exception as e:  # noqa: BLE001
