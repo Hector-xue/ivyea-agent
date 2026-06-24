@@ -117,3 +117,25 @@ def test_registered_in_agent_tools():
     names = {t["function"]["name"] for t in TOOL_SCHEMAS}
     for n in tg.GENERAL_DISPATCH:
         assert n in names and n in _DISPATCH
+
+
+def test_task_tools_update_bound_task(tmp_path, monkeypatch):
+    from ivyea_agent import task_runner
+
+    monkeypatch.setattr(task_runner, "TASK_DIR", tmp_path / "tasks")
+    task = task_runner.create("Tool task", steps=["inspect", "finish"])
+    ctx = _ctx(tmp_path)
+    ctx.task_id = task["id"]
+
+    assert "Tool task" in tg.t_task_read({}, ctx)
+    out = tg.t_task_step({"index": 1, "status": "in_progress", "notes": "reading"}, ctx)
+    assert "reading" in out
+    out = tg.t_task_step({"index": 1, "status": "completed", "notes": "done"}, ctx)
+    assert "done" in out
+    out = tg.t_task_log({"text": "agent progress"}, ctx)
+    assert "agent progress" in out
+    assert "继续 Ivyea 长任务" in tg.t_task_resume({}, ctx)
+
+    saved = task_runner.load(task["id"])
+    assert saved["steps"][0]["status"] == "completed"
+    assert saved["events"][-1]["kind"] == "agent"

@@ -42,9 +42,25 @@ function Install-FromWheelhouse($wheel, $wheelhouse) {
   New-Item -ItemType Directory -Force -Path $binDir | Out-Null
   "@echo off`r`n`"$venvPython`" -m ivyea_agent.cli %*`r`n" | Set-Content -Encoding ASCII $launcher
 
+  $semanticManifest = Join-Path $scriptDir "semantic-manifest.json"
+  if (Test-Path $semanticManifest) {
+    $manifest = Get-Content $semanticManifest -Raw | ConvertFrom-Json
+    $src = Join-Path $scriptDir $manifest.model_dir
+    if (-not (Test-Path $src)) { Die "离线 embedding 模型目录不存在：$src" }
+    $dstRoot = if ($env:IVYEA_EMBEDDING_MODEL_DIR) { $env:IVYEA_EMBEDDING_MODEL_DIR } else { Join-Path $HOME ".ivyea\models\embedding" }
+    $dst = Join-Path $dstRoot $manifest.name
+    New-Item -ItemType Directory -Force -Path $dstRoot | Out-Null
+    if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
+    Copy-Item -Recurse -Force $src $dst
+    Info "配置离线本地语义检索模型：$($manifest.model) -> $dst"
+    & $launcher retrieval embeddings --backend sentence-transformers --model $manifest.model --model-path $dst --no-download --json | Out-Null
+  }
+
   Info "✓ 离线安装完成。"
   Info "如果 ivyea 不能直接执行，把这个目录加入 PATH：$binDir"
   & $launcher self doctor
+  Info "初始化本地检索索引…"
+  & $launcher retrieval sync --json | Out-Null
   Info "下一步：ivyea config，然后 ivyea chat"
 }
 
@@ -126,5 +142,10 @@ try {
   & $py -m ivyea_agent.cli self doctor
 } catch {
   Info "安装后诊断未运行：$($_.Exception.Message)"
+}
+try {
+  & $py -m ivyea_agent.cli retrieval sync --json | Out-Null
+} catch {
+  Info "检索索引初始化未运行：$($_.Exception.Message)"
 }
 Info "  ivyea config   然后  ivyea chat"

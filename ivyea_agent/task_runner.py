@@ -59,6 +59,7 @@ def create(title: str, steps: list[str] | None = None, notes: str = "", workspac
             if str(s).strip()
         ],
         "events": [],
+        "resume": {},
     }
     add_event(task, "created", "任务创建")
     return _save(task)
@@ -114,7 +115,7 @@ def update_step(task_id: str, index: int, status: str, note: str = "") -> dict[s
     steps[index - 1]["status"] = status
     if note:
         steps[index - 1]["notes"] = security.redact_text(note)
-    if status == "in_progress" and task.get("status") == "pending":
+    if status == "in_progress" and task.get("status") in {"pending", "blocked"}:
         task["status"] = "in_progress"
     if steps and all(s.get("status") in {"completed", "skipped"} for s in steps):
         task["status"] = "completed"
@@ -144,7 +145,14 @@ def append_log(task_id: str, text: str, kind: str = "log") -> dict[str, Any]:
     return _save(task)
 
 
-def record_interruption(task_id: str, reason: str, note: str = "") -> dict[str, Any]:
+def record_interruption(
+    task_id: str,
+    reason: str,
+    note: str = "",
+    *,
+    resume_prompt: str = "",
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     task = load(task_id)
     text = f"{reason}: {note}".strip(": ")
     active = next_step(task)
@@ -154,8 +162,40 @@ def record_interruption(task_id: str, reason: str, note: str = "") -> dict[str, 
             active["notes"] = security.redact_text(note)
     if task.get("status") not in {"completed", "cancelled"}:
         task["status"] = "blocked"
+    task["resume"] = resume_state(task, reason=reason, note=note, prompt=resume_prompt, state=state or {})
     add_event(task, "interrupted", text)
     return _save(task)
+
+
+def resume_state(
+    task: dict[str, Any],
+    *,
+    reason: str = "",
+    note: str = "",
+    prompt: str = "",
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a structured resume payload for CLI, API and IvyeaOps."""
+    step = next_step(task)
+    safe_state = _safe_state(state or {})
+    resume_prompt = security.redact_text(prompt or _default_resume_prompt(task, step, reason, note, safe_state))
+    data = {
+        "reason": security.redact_text(reason or str((task.get("resume") or {}).get("reason") or "")),
+        "note": security.redact_text(note or str((task.get("resume") or {}).get("note") or "")),
+        "prompt": resume_prompt[:4000],
+        "state": safe_state,
+        "updated_at": _now(),
+        "next_step": dict(step) if step else None,
+    }
+    return data
+
+
+def resume_payload(task_id: str) -> dict[str, Any]:
+    task = load(task_id)
+    resume = task.get("resume") if isinstance(task.get("resume"), dict) else {}
+    if resume and resume.get("prompt"):
+        return {"ok": True, "task": task, "resume": resume}
+    return {"ok": True, "task": task, "resume": resume_state(task)}
 
 
 def progress(task: dict[str, Any]) -> dict[str, int]:
@@ -219,6 +259,7 @@ def render(task: dict[str, Any]) -> str:
 
 def render_resume(task: dict[str, Any]) -> str:
     step = next_step(task)
+    resume = task.get("resume") if isinstance(task.get("resume"), dict) else {}
     lines = [
         "Ivyea Task Resume",
         "",
@@ -232,4 +273,64 @@ def render_resume(task: dict[str, Any]) -> str:
             lines.append(f"- note: {step.get('notes')}")
     else:
         lines.append("- next: 无待处理步骤")
+    prompt = str(resume.get("prompt") or resume_state(task).get("prompt") or "").strip()
+    if prompt:
+        lines.extend(["", "Resume prompt:", prompt])
+    return "\n".join(lines)
+
+
+def _safe_state(state: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in state.items():
+        if isinstance(value, (int, float, bool)) or value is None:
+            out[str(key)] = value
+        elif isinstance(value, str):
+            out[str(key)] = security.redact_text(value)[:1000]
+        elif isinstance(value, list):
+            out[str(key)] = [
+                security.redact_text(str(item))[:500]
+                for item in value[:20]
+            ]
+        elif isinstance(value, dict):
+            out[str(key)] = _safe_state(value)
+        else:
+            out[str(key)] = security.redact_text(str(value))[:500]
+    return out
+
+
+def _default_resume_prompt(
+    task: dict[str, Any],
+    step: dict[str, Any] | None,
+    reason: str,
+    note: str,
+    state: dict[str, Any],
+) -> str:
+    lines = [
+        f"继续 Ivyea 长任务：{task.get('title')}",
+        f"任务 ID：{task.get('id')}",
+        f"当前状态：{task.get('status')}",
+    ]
+    if reason:
+        lines.append(f"暂停原因：{reason}")
+    if state:
+        tool_calls = state.get("tool_calls")
+        max_steps = state.get("max_steps")
+        if tool_calls is not None or max_steps is not None:
+            lines.append(f"上一轮工具调用：{tool_calls or 0}/{max_steps or '?'}")
+        if state.get("session_id"):
+            lines.append(f"会话：{state.get('session_id')}")
+        if state.get("turn_id"):
+            lines.append(f"轮次：{state.get('turn_id')}")
+    if step:
+        lines.append(f"下一步：#{step.get('index')} [{step.get('status')}] {step.get('title')}")
+        if step.get("notes") or note:
+            lines.append(f"步骤备注：{step.get('notes') or note}")
+    else:
+        lines.append("下一步：检查任务是否已完成，若未完成则列出剩余工作。")
+    lines.extend([
+        "继续要求：",
+        "1. 先读取当前任务状态和最近事件，确认已完成与未完成事项。",
+        "2. 从上面“下一步”继续，不要重复上一轮已经成功的工具调用。",
+        "3. 若仍然接近工具上限，先保存进度并给出下一段续跑提示。",
+    ])
     return "\n".join(lines)

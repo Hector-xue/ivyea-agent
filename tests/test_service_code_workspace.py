@@ -57,6 +57,31 @@ def test_service_workspace_and_code_helpers(ivyea_home, tmp_path):
     ctx = service.code_context({"root": str(root), "goal": "change add behavior"})
     assert any(row["path"] == "pkg/calc.py" for row in ctx["context"]["files"])
 
+    bundle = service.code_bundle({
+        "root": str(root),
+        "goal": "change add behavior",
+        "output": "FAILED tests/test_calc.py::test_add - AssertionError: expected sum",
+    })
+    assert bundle["ok"] is True
+    assert bundle["bundle"]["mode"] == "read-only-task-bundle"
+    assert bundle["bundle"]["repair"]["failure_summary"][0]["kind"] == "assertion"
+
+    loop = service.code_apply_loop({
+        "root": str(root),
+        "spec": {
+            "ops": [{
+                "path": "pkg/calc.py",
+                "old": "    return left + right\n",
+                "new": "    return left + right + 0\n",
+            }]
+        },
+        "execute": False,
+        "persist": False,
+    })
+    assert loop["ok"] is True
+    assert loop["run"]["patch"]["status"] == "valid"
+    assert loop["run"]["patch"]["apply"]["applied"] is False
+
     quality = service.code_quality({"root": str(root)})
     assert quality["quality"]["file_count"] >= 3
 
@@ -104,6 +129,37 @@ def test_service_workspace_and_code_http_routes(ivyea_home, tmp_path):
             plan = json.loads(resp.read().decode("utf-8"))
         assert plan["ok"] is True
         assert "pkg/calc.py" in plan["plan"]["relevant_files"]
+
+        req = urllib.request.Request(
+            f"http://{host}:{port}/v1/code/bundle",
+            data=json.dumps({"root": str(root), "goal": "change add behavior"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            bundle = json.loads(resp.read().decode("utf-8"))
+        assert bundle["ok"] is True
+        assert bundle["bundle"]["mode"] == "read-only-task-bundle"
+
+        req = urllib.request.Request(
+            f"http://{host}:{port}/v1/code/apply-loop",
+            data=json.dumps({
+                "root": str(root),
+                "spec": {"ops": [{
+                    "path": "pkg/calc.py",
+                    "old": "    return left + right\n",
+                    "new": "    return left + right + 0\n",
+                }]},
+                "execute": False,
+                "persist": False,
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            loop = json.loads(resp.read().decode("utf-8"))
+        assert loop["ok"] is True
+        assert loop["run"]["patch"]["status"] == "valid"
     finally:
         server.shutdown()
         server.server_close()

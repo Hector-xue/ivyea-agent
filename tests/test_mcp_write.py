@@ -187,6 +187,7 @@ def test_ivyea_mcp_server_lists_and_calls_readonly_tools(ivyea_home):
     names = {tool["name"] for tool in tools}
     assert "ivyea_knowledge_search" in names
     assert "ivyea_code_plan" in names
+    assert "ivyea_code_bundle" in names
     assert "ivyea_task_list" in names
     assert "ivyea_task_detail" in names
     assert "ivyea_task_resume" in names
@@ -204,6 +205,7 @@ def test_ivyea_mcp_server_lists_and_calls_readonly_tools(ivyea_home):
 
     listed = mcp_server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     assert any(tool["name"] == "ivyea_retrieval_search" for tool in listed["result"]["tools"])
+    assert any(tool["name"] == "ivyea_code_bundle" for tool in listed["result"]["tools"])
 
     called = mcp_server.handle_message({
         "jsonrpc": "2.0",

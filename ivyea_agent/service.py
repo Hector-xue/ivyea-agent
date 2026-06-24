@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import hmac
+import os
+import base64
+import binascii
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -21,6 +24,11 @@ DEFAULT_PORT = 8765
 
 def health() -> dict[str, Any]:
     model_cfg = config.get_model_config()
+    provider = (
+        models.provider_by_id(str(model_cfg.get("provider_id") or ""))
+        or models.provider_by_id(str(model_cfg.get("provider") or ""))
+        or model_cfg
+    )
     return {
         "ok": True,
         "name": "ivyea-agent",
@@ -32,7 +40,9 @@ def health() -> dict[str, Any]:
             "model": model_cfg.get("model", ""),
             "api_mode": model_cfg.get("api_mode", ""),
             "auth_type": model_cfg.get("auth_type", ""),
-            "key_status": models.key_status(models.provider_by_id(model_cfg.get("provider", "")) or model_cfg),
+            "key_status": models.key_status(provider),
+            "capabilities": models.provider_capabilities(provider),
+            "badges": models.capability_badges(provider),
         },
         "knowledge": {
             "cards": len(knowledge.list_cards()),
@@ -84,9 +94,19 @@ def manifest() -> dict[str, Any]:
             {"method": "GET", "path": "/v1/openapi.json", "description": "OpenAPI discovery document"},
             {"method": "GET", "path": "/v1/capabilities", "description": "retrieval capabilities"},
             {"method": "GET", "path": "/v1/model", "description": "current model status without secrets"},
+            {"method": "GET", "path": "/v1/model/providers", "description": "provider capability matrix without secrets"},
+            {"method": "GET", "path": "/v1/model/providers/{id}/models", "description": "live/cache/builtin model catalog for one provider"},
+            {"method": "POST", "path": "/v1/model/providers/{id}/probe", "description": "minimal provider connectivity probe without returning secrets"},
+            {"method": "POST", "path": "/v1/model/configure", "description": "configure the active IvyeaAgent model without returning secrets"},
             {"method": "GET", "path": "/v1/mcp/self-config", "description": "stdio MCP server config for local clients"},
             {"method": "GET", "path": "/v1/system/status", "description": "install/runtime status for IvyeaOps diagnostics"},
             {"method": "GET", "path": "/v1/system/doctor", "description": "install/runtime doctor checks"},
+            {"method": "GET", "path": "/v1/system/bootstrap", "description": "IvyeaOps local bootstrap and autodiscovery contract"},
+            {"method": "GET", "path": "/v1/system/service/status", "description": "local service process/pid/health status"},
+            {"method": "GET", "path": "/v1/system/service/logs", "description": "tail local service logs"},
+            {"method": "POST", "path": "/v1/system/service/start", "description": "start the local IvyeaAgent service"},
+            {"method": "POST", "path": "/v1/system/service/stop", "description": "stop the local IvyeaAgent service"},
+            {"method": "POST", "path": "/v1/system/service/autostart", "description": "write local autostart template"},
             {"method": "GET", "path": "/v1/chat/sessions", "description": "list persisted embedded chat sessions"},
             {"method": "POST", "path": "/v1/chat/sessions", "description": "create an embedded chat session"},
             {"method": "GET", "path": "/v1/chat/sessions/{id}", "description": "load embedded chat session"},
@@ -98,8 +118,19 @@ def manifest() -> dict[str, Any]:
             {"method": "GET", "path": "/v1/knowledge/cards", "description": "list bundled and user knowledge cards"},
             {"method": "POST", "path": "/v1/knowledge/cards", "description": "create a user-supplied knowledge card"},
             {"method": "GET", "path": "/v1/knowledge/cards/{id}", "description": "load knowledge card detail"},
+            {"method": "GET", "path": "/v1/knowledge/files", "description": "list user knowledge files and uploaded source documents"},
+            {"method": "GET", "path": "/v1/knowledge/file", "description": "read one user knowledge/upload file by relative path"},
+            {"method": "DELETE", "path": "/v1/knowledge/file", "description": "delete one user knowledge/upload file by relative path"},
+            {"method": "GET", "path": "/v1/knowledge/uploads", "description": "list knowledge upload history"},
+            {"method": "POST", "path": "/v1/knowledge/upload", "description": "save an uploaded document, extract text, and build an import draft"},
+            {"method": "POST", "path": "/v1/knowledge/uploads/apply", "description": "apply a confirmed upload draft into the knowledge base"},
             {"method": "GET", "path": "/v1/knowledge/audit", "description": "structured source quality and freshness audit"},
+            {"method": "GET", "path": "/v1/knowledge/sources", "description": "knowledge source registry and review summary"},
+            {"method": "GET", "path": "/v1/knowledge/watchlist", "description": "curated Amazon knowledge sources to review before import"},
             {"method": "GET", "path": "/v1/knowledge/conflicts", "description": "knowledge conflict review queue"},
+            {"method": "POST", "path": "/v1/knowledge/update/draft", "description": "build a reviewed knowledge update draft with diff"},
+            {"method": "POST", "path": "/v1/knowledge/update/apply", "description": "apply a confirmed knowledge update draft and rebuild indexes"},
+            {"method": "POST", "path": "/v1/knowledge/import-directory", "description": "scan or import a legacy local knowledge directory into user knowledge"},
             {"method": "POST", "path": "/v1/knowledge/rebuild", "description": "validate knowledge metadata and rebuild local indexes"},
             {"method": "GET", "path": "/v1/knowledge/search", "description": "query bundled and user knowledge"},
             {"method": "GET", "path": "/v1/retrieval/embeddings", "description": "local embedding backend status"},
@@ -107,10 +138,12 @@ def manifest() -> dict[str, Any]:
             {"method": "POST", "path": "/v1/retrieval/search", "description": "unified local retrieval over knowledge and memory"},
             {"method": "POST", "path": "/v1/retrieval/embeddings", "description": "configure local embedding backend"},
             {"method": "POST", "path": "/v1/retrieval/embeddings/probe", "description": "probe configured local embedding backend"},
-            {"method": "POST", "path": "/v1/retrieval/index", "description": "rebuild persistent local retrieval index"},
+            {"method": "POST", "path": "/v1/retrieval/index", "description": "rebuild or sync persistent local retrieval index"},
             {"method": "GET", "path": "/v1/tasks", "description": "list tasks"},
             {"method": "POST", "path": "/v1/tasks", "description": "create task"},
             {"method": "GET", "path": "/v1/tasks/{id}", "description": "load task detail"},
+            {"method": "GET", "path": "/v1/tasks/{id}/resume", "description": "load structured task resume prompt"},
+            {"method": "POST", "path": "/v1/tasks/{id}/continue", "description": "continue a task from its structured resume prompt"},
             {"method": "POST", "path": "/v1/tasks/{id}/start", "description": "start next task step"},
             {"method": "POST", "path": "/v1/tasks/{id}/step", "description": "update a task step"},
             {"method": "POST", "path": "/v1/tasks/{id}/status", "description": "update task status"},
@@ -124,6 +157,8 @@ def manifest() -> dict[str, Any]:
             {"method": "POST", "path": "/v1/workspace/impact", "description": "analyze symbol/file impact"},
             {"method": "POST", "path": "/v1/code/plan", "description": "build a deterministic code task plan"},
             {"method": "POST", "path": "/v1/code/context", "description": "collect compact code context for a task"},
+            {"method": "POST", "path": "/v1/code/bundle", "description": "build a read-only multi-round code task bundle"},
+            {"method": "POST", "path": "/v1/code/apply-loop", "description": "validate/apply/test one structured patch with repair audit"},
             {"method": "POST", "path": "/v1/code/quality", "description": "run read-only code quality heuristics"},
             {"method": "POST", "path": "/v1/code/review", "description": "run read-only diff review gate"},
             {"method": "POST", "path": "/v1/code/repair", "description": "parse test output and generate a repair plan"},
@@ -176,8 +211,188 @@ def mcp_self_config() -> dict[str, Any]:
     }
 
 
+def model_providers() -> dict[str, Any]:
+    return {"ok": True, "providers": models.provider_matrix()}
+
+
+def _provider_secret(provider: dict[str, Any], payload_key: str = "") -> str:
+    if payload_key:
+        return payload_key
+    config.load_env()
+    auth = str(provider.get("auth_type") or "api_key").lower()
+    if auth in ("oauth_external", "oauth_device_code", "copilot"):
+        try:
+            from . import oauth_auth
+            return oauth_auth.resolve_provider_token(str(provider.get("id") or ""), str(provider.get("key_env") or ""), refresh=True)
+        except Exception:
+            return ""
+    key_env = str(provider.get("key_env") or "")
+    return os.environ.get(key_env, "") if key_env else ""
+
+
+def model_provider_catalog(provider_id: str, refresh: bool = False) -> dict[str, Any]:
+    provider = models.provider_by_id(provider_id)
+    if not provider:
+        return {"ok": False, "error": "provider_not_found", "provider_id": provider_id}
+    return {
+        "ok": True,
+        "catalog": models.provider_model_catalog(
+            provider,
+            api_key=_provider_secret(provider),
+            refresh=refresh,
+        ),
+    }
+
+
+def model_provider_probe(provider_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    provider = models.provider_by_id(provider_id)
+    if not provider:
+        return {"ok": False, "error": "provider_not_found", "provider_id": provider_id}
+    result = models.probe_provider(
+        provider,
+        api_key=_provider_secret(provider, str(payload.get("api_key") or "")),
+        model=str(payload.get("model") or ""),
+        timeout=float(payload.get("timeout") or 30.0),
+    )
+    return {"ok": bool(result.get("ok")), "probe": result}
+
+
+_OPS_PROVIDER_ALIASES = {
+    "google": "gemini",
+    "gemini": "gemini",
+    "kimi": "kimi-coding",
+    "moonshot": "kimi",
+}
+
+_OPENAI_COMPAT_BASES = {
+    "xiaomi": "https://token-plan-sgp.xiaomimimo.com/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "together": "https://api.together.xyz/v1",
+    "custom": "",
+}
+
+_OPENAI_COMPAT_KEY_ENVS = {
+    "xiaomi": "XIAOMI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "together": "TOGETHER_API_KEY",
+    "custom": "CUSTOM_API_KEY",
+}
+
+
+def _model_entry_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_provider = str(payload.get("provider_id") or payload.get("provider") or "").strip().lower()
+    provider_id = _OPS_PROVIDER_ALIASES.get(raw_provider, raw_provider)
+    entry = models.provider_by_id(provider_id)
+    if entry:
+        out = dict(entry)
+    else:
+        base = str(payload.get("base_url") or _OPENAI_COMPAT_BASES.get(raw_provider, "")).strip()
+        key_env = str(payload.get("key_env") or _OPENAI_COMPAT_KEY_ENVS.get(raw_provider, "IVYEA_AGENT_MODEL_API_KEY")).strip()
+        label = str(payload.get("label") or raw_provider or "Custom OpenAI-compatible").strip()
+        out = {
+            "id": raw_provider or "custom",
+            "provider_id": raw_provider or "custom",
+            "label": label,
+            "kind": "openai",
+            "api_mode": "chat_completions",
+            "auth_type": "api_key" if key_env else "none",
+            "base": base,
+            "key_env": key_env,
+            "models": [str(payload.get("model") or "").strip()] if payload.get("model") else [],
+            "default_model": str(payload.get("model") or "").strip(),
+            "status": "usable",
+        }
+    if payload.get("base_url"):
+        out["base"] = str(payload.get("base_url") or "").strip()
+    if payload.get("key_env"):
+        out["key_env"] = str(payload.get("key_env") or "").strip()
+    return out
+
+
+def model_configure(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist active model settings for embedded IvyeaOps configuration.
+
+    Secrets are written to ``~/.ivyea/.env`` and never returned. Unknown
+    providers are treated as OpenAI-compatible when a base_url/model is supplied.
+    """
+    entry = _model_entry_from_payload(payload)
+    model = str(payload.get("model") or entry.get("default_model") or entry.get("model") or "").strip()
+    base_url = str(payload.get("base_url") or entry.get("base") or "").strip()
+    if not model:
+        return {"ok": False, "error": "model_required"}
+    if (entry.get("kind") == "openai" or entry.get("api_mode") == "chat_completions") and not base_url:
+        return {"ok": False, "error": "base_url_required"}
+
+    config.apply_model(entry, model=model, base_url=base_url)
+    api_key = payload.get("api_key")
+    key_env = str(entry.get("key_env") or "").strip()
+    if isinstance(api_key, str) and api_key:
+        if key_env:
+            config.set_env_key(key_env, api_key)
+    elif payload.get("clear_api_key") and key_env:
+        config.set_env_key(key_env, "")
+    return {
+        "ok": True,
+        "model": health()["model"],
+        "configured": {
+            "provider": entry.get("id", ""),
+            "provider_id": entry.get("provider_id", entry.get("id", "")),
+            "model": model,
+            "base_url": base_url,
+            "key_env": key_env,
+            "key_configured": bool(isinstance(api_key, str) and api_key) or bool(config.get_active_key()),
+        },
+    }
+
+
 def task_detail(task_id: str) -> dict[str, Any]:
     return {"ok": True, "task": task_runner.load(task_id)}
+
+
+def task_resume(task_id: str) -> dict[str, Any]:
+    return task_runner.resume_payload(task_id)
+
+
+def task_continue(task_id: str, payload: dict[str, Any], provider: Any | None = None) -> dict[str, Any]:
+    task = task_runner.load(task_id)
+    resume_before = task_runner.resume_payload(task_id)["resume"]
+    model_cfg = config.get_model_config()
+    api_key = config.get_active_key()
+    if _model_requires_key(model_cfg) and not api_key and provider is None:
+        return {
+            "ok": False,
+            "error": "model_not_configured",
+            "model": health()["model"],
+            "task": task,
+            "resume": resume_before,
+        }
+    step = task_runner.next_step(task)
+    if step and step.get("status") in {"pending", "blocked"}:
+        task = task_runner.update_step(task_id, int(step["index"]), "in_progress", "continue requested")
+    resume = task_runner.resume_payload(task_id)["resume"]
+    extra = str(payload.get("message") or payload.get("instruction") or "").strip()
+    message = str(resume.get("prompt") or task_runner.render_resume(task)).strip()
+    if extra:
+        message += "\n\n[本轮补充要求]\n" + extra
+    state = resume.get("state") if isinstance(resume.get("state"), dict) else {}
+    chat_payload = {
+        **payload,
+        "message": message,
+        "task_id": task_id,
+        "workspace": str(payload.get("workspace") or task.get("workspace") or ""),
+        "session_id": str(payload.get("session_id") or state.get("session_id") or ""),
+        "turn_id": str(payload.get("turn_id") or "task-continue"),
+        "plan_mode": payload.get("plan_mode", True),
+        "inject_retrieval": payload.get("inject_retrieval", False),
+        "persist": payload.get("persist", True),
+    }
+    result = chat_run(chat_payload, provider=provider)
+    return {
+        "ok": bool(result.get("ok")),
+        "task": task_runner.load(task_id),
+        "resume": task_runner.resume_payload(task_id)["resume"],
+        "chat": result,
+    }
 
 
 def task_create(payload: dict[str, Any]) -> dict[str, Any]:
@@ -235,6 +450,57 @@ def system_doctor() -> dict[str, Any]:
         "checks": data.get("checks") or [],
         "next_steps": data.get("next_steps") or [],
     }
+
+
+def system_bootstrap() -> dict[str, Any]:
+    data = self_manage.ops_bootstrap(host=DEFAULT_HOST, port=DEFAULT_PORT)
+    info = data.get("info") or {}
+    data["info"] = _public_install_info(info)
+    return data
+
+
+def system_service_status(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    body = payload or {}
+    return {
+        "ok": True,
+        "service": self_manage.service_status(
+            host=str(body.get("host") or DEFAULT_HOST),
+            port=_int(body.get("port"), DEFAULT_PORT),
+            probe=body.get("probe") if isinstance(body.get("probe"), bool) else True,
+        ),
+    }
+
+
+def system_service_logs(lines: int = 80) -> dict[str, Any]:
+    return {"ok": True, "logs": self_manage.service_log_tail(lines=lines)}
+
+
+def system_service_start(payload: dict[str, Any]) -> dict[str, Any]:
+    result = self_manage.service_start(
+        host=str(payload.get("host") or DEFAULT_HOST),
+        port=_int(payload.get("port"), DEFAULT_PORT),
+        allow_remote=bool(payload.get("allow_remote")),
+        api_token=str(payload.get("api_token") or ""),
+        wait=payload.get("wait") if isinstance(payload.get("wait"), bool) else True,
+        timeout=float(payload.get("timeout") or 10),
+    )
+    return {"ok": bool(result.get("ok")), "result": result}
+
+
+def system_service_stop(payload: dict[str, Any]) -> dict[str, Any]:
+    result = self_manage.service_stop(
+        timeout=float(payload.get("timeout") or 10),
+        force=bool(payload.get("force")),
+    )
+    return {"ok": bool(result.get("ok")), "result": result}
+
+
+def system_service_autostart(payload: dict[str, Any]) -> dict[str, Any]:
+    result = self_manage.write_autostart(
+        host=str(payload.get("host") or DEFAULT_HOST),
+        port=_int(payload.get("port"), DEFAULT_PORT),
+    )
+    return {"ok": bool(result.get("ok")), "autostart": result}
 
 
 def skill_list(limit: int = 100) -> dict[str, Any]:
@@ -305,6 +571,169 @@ def knowledge_audit() -> dict[str, Any]:
     }
 
 
+def knowledge_sources() -> dict[str, Any]:
+    data = knowledge.source_registry()
+    return {"ok": True, "summary": data.get("summary") or {}, "sources": data.get("sources") or []}
+
+
+def knowledge_watchlist() -> dict[str, Any]:
+    data = knowledge.source_watchlist()
+    return {"ok": True, "summary": data.get("summary") or {}, "sources": data.get("sources") or []}
+
+
+def knowledge_update_draft(payload: dict[str, Any]) -> dict[str, Any]:
+    body = str(payload.get("body") or payload.get("content") or "").strip()
+    if not body:
+        raise ValueError("body is required")
+    draft = knowledge.draft_update(
+        str(payload.get("title") or payload.get("id") or "用户知识"),
+        body,
+        source_url=str(payload.get("source_url") or ""),
+        source_type=str(payload.get("source_type") or "user"),
+        confidence=str(payload.get("confidence") or ""),
+        tags=payload.get("tags"),
+        card_id=str(payload.get("id") or payload.get("card_id") or ""),
+        license=str(payload.get("license") or "user_supplied"),
+    )
+    return {"ok": True, "draft": _public_knowledge_draft(draft)}
+
+
+def knowledge_update_apply(payload: dict[str, Any]) -> dict[str, Any]:
+    draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else {}
+    if not draft or not draft.get("body"):
+        body = str(payload.get("body") or payload.get("content") or "").strip()
+        if not body:
+            raise ValueError("body is required")
+        draft = knowledge.draft_update(
+            str(payload.get("title") or payload.get("id") or "用户知识"),
+            body,
+            source_url=str(payload.get("source_url") or ""),
+            source_type=str(payload.get("source_type") or "user"),
+            confidence=str(payload.get("confidence") or ""),
+            tags=payload.get("tags"),
+            card_id=str(payload.get("id") or payload.get("card_id") or ""),
+            license=str(payload.get("license") or "user_supplied"),
+        )
+    result = knowledge.apply_update(
+        draft,
+        confirm=bool(payload.get("confirm")),
+        rebuild_indexes=payload.get("rebuild") if isinstance(payload.get("rebuild"), bool) else True,
+    )
+    public = dict(result)
+    if isinstance(public.get("draft"), dict):
+        public["draft"] = _public_knowledge_draft(public["draft"])
+    if isinstance(public.get("card"), dict):
+        public["card"] = _public_knowledge_card(public["card"])
+    return {"ok": bool(result.get("ok")), "result": public}
+
+
+def knowledge_files(limit: int = 500) -> dict[str, Any]:
+    data = knowledge.list_files(limit=limit)
+    return {
+        "ok": True,
+        "root": data.get("root", ""),
+        "uploads_root": data.get("uploads_root", ""),
+        "uploads": data.get("uploads") or [],
+        "cards": data.get("cards") or [],
+        "history": [_public_knowledge_upload(row) for row in data.get("history") or []],
+    }
+
+
+def knowledge_file_read(path: str) -> dict[str, Any]:
+    data = knowledge.read_file(path)
+    return {"ok": True, "file": data}
+
+
+def knowledge_file_delete(path: str) -> dict[str, Any]:
+    return knowledge.delete_file(path)
+
+
+def knowledge_uploads(limit: int = 50) -> dict[str, Any]:
+    data = knowledge.list_uploads(limit=limit)
+    return {"ok": True, "root": data.get("root", ""), "uploads": [_public_knowledge_upload(row) for row in data.get("uploads") or []]}
+
+
+def knowledge_upload(payload: dict[str, Any]) -> dict[str, Any]:
+    filename = str(payload.get("filename") or payload.get("name") or "upload.txt")
+    raw = str(payload.get("content_base64") or payload.get("data_base64") or "")
+    if not raw:
+        raise ValueError("content_base64 is required")
+    try:
+        data = base64.b64decode(raw.encode("ascii"), validate=True)
+    except (binascii.Error, UnicodeEncodeError) as exc:
+        raise ValueError("invalid content_base64") from exc
+    result = knowledge.upload_document(
+        filename,
+        data,
+        title=str(payload.get("title") or ""),
+        source_url=str(payload.get("source_url") or ""),
+        source_type=str(payload.get("source_type") or "user"),
+        confidence=str(payload.get("confidence") or ""),
+        tags=payload.get("tags"),
+        card_id=str(payload.get("id") or payload.get("card_id") or ""),
+        license=str(payload.get("license") or "user_supplied"),
+        confirm=bool(payload.get("confirm")),
+        rebuild_indexes=payload.get("rebuild") if isinstance(payload.get("rebuild"), bool) else True,
+    )
+    public = {
+        "ok": True,
+        "upload": _public_knowledge_upload(result.get("upload") or {}),
+        "extraction": result.get("extraction") or {},
+        "draft": _public_knowledge_draft(result.get("draft") or {}),
+    }
+    if isinstance(result.get("apply"), dict):
+        applied = dict(result["apply"])
+        if isinstance(applied.get("card"), dict):
+            applied["card"] = _public_knowledge_card(applied["card"])
+        if isinstance(applied.get("draft"), dict):
+            applied["draft"] = _public_knowledge_draft(applied["draft"])
+        public["apply"] = applied
+    return public
+
+
+def knowledge_upload_apply(payload: dict[str, Any]) -> dict[str, Any]:
+    upload_id = str(payload.get("upload_id") or payload.get("id") or "").strip()
+    if not upload_id:
+        raise ValueError("upload_id is required")
+    result = knowledge.apply_upload(
+        upload_id,
+        confirm=bool(payload.get("confirm")),
+        rebuild_indexes=payload.get("rebuild") if isinstance(payload.get("rebuild"), bool) else True,
+    )
+    public = {
+        "ok": bool(result.get("ok")),
+        "upload": _public_knowledge_upload(result.get("upload") or {}),
+        "draft": _public_knowledge_draft(result.get("draft") or {}),
+        "result": dict(result.get("result") or {}),
+    }
+    if isinstance(public["result"].get("card"), dict):
+        public["result"]["card"] = _public_knowledge_card(public["result"]["card"])
+    if isinstance(public["result"].get("draft"), dict):
+        public["result"]["draft"] = _public_knowledge_draft(public["result"]["draft"])
+    return public
+
+
+def knowledge_import_directory(payload: dict[str, Any]) -> dict[str, Any]:
+    result = knowledge.import_directory(
+        str(payload.get("root") or payload.get("path") or ""),
+        namespace=str(payload.get("namespace") or "gbrain"),
+        confirm=bool(payload.get("confirm")),
+        max_files=_int(payload.get("max_files"), 1000),
+        max_file_bytes=_int(payload.get("max_file_bytes"), 5 * 1024 * 1024),
+        rebuild_indexes=payload.get("rebuild") if isinstance(payload.get("rebuild"), bool) else True,
+    )
+    if payload.get("confirm") and (payload.get("rebuild") if isinstance(payload.get("rebuild"), bool) else True):
+        result.setdefault("indexes", {})["retrieval"] = retrieval.rebuild_index()
+    public = dict(result)
+    public["imported"] = [
+        {k: v for k, v in row.items() if k != "card"} | (
+            {"card": _public_knowledge_card(row["card"])} if isinstance(row.get("card"), dict) else {}
+        )
+        for row in result.get("imported") or []
+    ]
+    return {"ok": bool(result.get("ok")), "import": public}
+
+
 def knowledge_conflicts() -> dict[str, Any]:
     return {"ok": True, "conflicts": knowledge.conflicts()}
 
@@ -359,6 +788,33 @@ def code_context(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def code_bundle(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "bundle": code_agent.task_bundle(
+            str(payload.get("goal") or ""),
+            root=_root(payload),
+            test_output=str(payload.get("test_output") or payload.get("output") or payload.get("text") or ""),
+            limit=_int(payload.get("limit"), 8),
+        ),
+    }
+
+
+def code_apply_loop(payload: dict[str, Any]) -> dict[str, Any]:
+    spec = payload.get("spec") if isinstance(payload.get("spec"), dict) else {}
+    return {
+        "ok": True,
+        "run": code_agent.patch_apply_loop(
+            spec,
+            root=_root(payload),
+            test_command=str(payload.get("test_command") or payload.get("command") or ""),
+            execute=bool(payload.get("execute")),
+            timeout=_int(payload.get("timeout"), 120),
+            persist=payload.get("persist") if isinstance(payload.get("persist"), bool) else True,
+        ),
+    }
+
+
 def code_quality(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "quality": code_agent.quality(root=_root(payload))}
 
@@ -397,6 +853,10 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
         workspace=str(payload.get("workspace") or ""),
         task_id=str(payload.get("task_id") or ""),
     )
+    if isinstance(payload.get("ops_bridge"), dict):
+        ctx.ops_bridge = dict(payload.get("ops_bridge") or {})
+    if isinstance(payload.get("ops_context"), dict):
+        ctx.ops_context = dict(payload.get("ops_context") or {})
     ctx.session_id = str(payload.get("session_id") or "") or sessions.new_id()
     ctx.turn_id = str(payload.get("turn_id") or "")
     if payload.get("asin"):
@@ -465,6 +925,10 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None)
         workspace=str(payload.get("workspace") or ""),
         task_id=str(payload.get("task_id") or ""),
     )
+    if isinstance(payload.get("ops_bridge"), dict):
+        ctx.ops_bridge = dict(payload.get("ops_bridge") or {})
+    if isinstance(payload.get("ops_context"), dict):
+        ctx.ops_context = dict(payload.get("ops_context") or {})
     ctx.session_id = str(payload.get("session_id") or "") or sessions.new_id()
     ctx.turn_id = str(payload.get("turn_id") or "")
     if payload.get("asin"):
@@ -576,6 +1040,14 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/model":
             self._json(200, {"ok": True, "model": health()["model"]})
             return
+        if parsed.path == "/v1/model/providers":
+            self._json(200, model_providers())
+            return
+        if parsed.path.startswith("/v1/model/providers/") and parsed.path.endswith("/models"):
+            parts = parsed.path.strip("/").split("/")
+            provider_id = parts[3] if len(parts) >= 5 else ""
+            self._json(200, model_provider_catalog(provider_id, refresh=(_first(qs, "refresh") in ("1", "true", "yes"))))
+            return
         if parsed.path == "/v1/mcp/self-config":
             self._json(200, mcp_self_config())
             return
@@ -584,6 +1056,18 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/system/doctor":
             self._json(200, system_doctor())
+            return
+        if parsed.path == "/v1/system/bootstrap":
+            self._json(200, system_bootstrap())
+            return
+        if parsed.path == "/v1/system/service/status":
+            self._json(200, system_service_status({
+                "host": _first(qs, "host") or DEFAULT_HOST,
+                "port": _int(_first(qs, "port"), DEFAULT_PORT),
+            }))
+            return
+        if parsed.path == "/v1/system/service/logs":
+            self._json(200, system_service_logs(lines=_int(_first(qs, "lines"), 80)))
             return
         if parsed.path == "/v1/chat/sessions":
             self._json(200, chat_session_list(limit=_int(_first(qs, "limit"), 20)))
@@ -611,8 +1095,26 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/knowledge/cards":
             self._json(200, knowledge_cards(limit=_int(_first(qs, "limit"), 200)))
             return
+        if parsed.path == "/v1/knowledge/files":
+            self._json(200, knowledge_files(limit=_int(_first(qs, "limit"), 500)))
+            return
+        if parsed.path == "/v1/knowledge/file":
+            try:
+                self._json(200, knowledge_file_read(_first(qs, "path")))
+            except (FileNotFoundError, ValueError) as exc:
+                self._json(404, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/knowledge/uploads":
+            self._json(200, knowledge_uploads(limit=_int(_first(qs, "limit"), 50)))
+            return
         if parsed.path == "/v1/knowledge/audit":
             self._json(200, knowledge_audit())
+            return
+        if parsed.path == "/v1/knowledge/sources":
+            self._json(200, knowledge_sources())
+            return
+        if parsed.path == "/v1/knowledge/watchlist":
+            self._json(200, knowledge_watchlist())
             return
         if parsed.path == "/v1/knowledge/conflicts":
             self._json(200, knowledge_conflicts())
@@ -645,9 +1147,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, trace_stats(limit=_int(_first(qs, "limit"), 1000)))
             return
         if parsed.path.startswith("/v1/tasks/"):
-            task_id = parsed.path.split("/", 3)[-1]
+            parts = parsed.path.strip("/").split("/")
+            task_id = parts[2] if len(parts) >= 3 else ""
             try:
-                self._json(200, task_detail(task_id))
+                if len(parts) >= 4 and parts[3] == "resume":
+                    self._json(200, task_resume(task_id))
+                else:
+                    self._json(200, task_detail(task_id))
             except FileNotFoundError as exc:
                 self._json(404, {"ok": False, "error": str(exc)})
             return
@@ -677,8 +1183,59 @@ class _Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._json(400, {"ok": False, "error": str(exc)})
             return
+        if parsed.path == "/v1/knowledge/update/draft":
+            try:
+                self._json(200, knowledge_update_draft(body))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/knowledge/update/apply":
+            try:
+                self._json(200, knowledge_update_apply(body))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/knowledge/upload":
+            try:
+                self._json(200, knowledge_upload(body))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/knowledge/uploads/apply":
+            try:
+                self._json(200, knowledge_upload_apply(body))
+            except FileNotFoundError as exc:
+                self._json(404, {"ok": False, "error": str(exc)})
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/knowledge/import-directory":
+            try:
+                self._json(200, knowledge_import_directory(body))
+            except FileNotFoundError as exc:
+                self._json(404, {"ok": False, "error": str(exc)})
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
         if parsed.path == "/v1/knowledge/rebuild":
             self._json(200, knowledge_rebuild())
+            return
+        if parsed.path.startswith("/v1/model/providers/") and parsed.path.endswith("/probe"):
+            parts = parsed.path.strip("/").split("/")
+            provider_id = parts[3] if len(parts) >= 5 else ""
+            self._json(200, model_provider_probe(provider_id, body))
+            return
+        if parsed.path == "/v1/model/configure":
+            self._json(200, model_configure(body))
+            return
+        if parsed.path == "/v1/system/service/start":
+            self._json(200, system_service_start(body))
+            return
+        if parsed.path == "/v1/system/service/stop":
+            self._json(200, system_service_stop(body))
+            return
+        if parsed.path == "/v1/system/service/autostart":
+            self._json(200, system_service_autostart(body))
             return
         if parsed.path == "/v1/retrieval/search":
             result = retrieval.search(
@@ -689,7 +1246,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, **result})
             return
         if parsed.path == "/v1/retrieval/index":
-            self._json(200, retrieval.rebuild_index())
+            self._json(200, retrieval.sync_index() if body.get("sync") else retrieval.rebuild_index())
             return
         if parsed.path == "/v1/retrieval/embeddings":
             model_path = body.get("model_path") if "model_path" in body else None
@@ -722,7 +1279,10 @@ class _Handler(BaseHTTPRequestHandler):
             if len(parts) >= 5:
                 task_id, action = parts[3], parts[4]
                 try:
-                    self._json(200, task_update(task_id, action, body))
+                    if action == "continue":
+                        self._json(200, task_continue(task_id, body))
+                    else:
+                        self._json(200, task_update(task_id, action, body))
                 except FileNotFoundError as exc:
                     self._json(404, {"ok": False, "error": str(exc)})
                 except (ValueError, IndexError) as exc:
@@ -749,6 +1309,12 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/code/context":
             self._json(200, code_context(body))
             return
+        if parsed.path == "/v1/code/bundle":
+            self._json(200, code_bundle(body))
+            return
+        if parsed.path == "/v1/code/apply-loop":
+            self._json(200, code_apply_loop(body))
+            return
         if parsed.path == "/v1/code/quality":
             self._json(200, code_quality(body))
             return
@@ -757,6 +1323,19 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/code/repair":
             self._json(200, code_repair(body))
+            return
+        self._json(404, {"ok": False, "error": "not_found", "path": parsed.path})
+
+    def do_DELETE(self) -> None:
+        if not self._authorized():
+            return
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        if parsed.path == "/v1/knowledge/file":
+            try:
+                self._json(200, knowledge_file_delete(_first(qs, "path")))
+            except (FileNotFoundError, ValueError) as exc:
+                self._json(404, {"ok": False, "error": str(exc)})
             return
         self._json(404, {"ok": False, "error": "not_found", "path": parsed.path})
 
@@ -838,6 +1417,21 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext) -> t
     if ctx.plan_mode:
         system += agent_loop.PLAN_NOTE
     system += "\n\n[IvyeaOps 嵌入模式] 当前默认只读。需要写入广告、文件或执行命令时，先输出计划和审批项，不要在本轮直接执行。"
+    if ctx.ops_bridge:
+        current_board = str((ctx.ops_context or {}).get("board") or (ctx.ops_context or {}).get("pathname") or "").strip()
+        system += (
+            "\n\n[IvyeaOps 板块工具桥]\n"
+            "你可以通过 `ivyea_ops_list_tools` 查看当前用户有权限调用的 IvyeaOps 板块工具，"
+            "再用 `ivyea_ops_call_tool` 操作对应板块。优先选择与用户当前页面相关的工具；"
+            "如果工具会启动长任务，调用后把 job_id 和下一步查询方式告诉用户。"
+        )
+        if current_board:
+            system += f"\n当前页面/板块：{current_board}"
+        if ctx.ops_context:
+            try:
+                system += "\n当前页面上下文：" + json.dumps(ctx.ops_context, ensure_ascii=False, default=str)[:2000]
+            except (TypeError, ValueError):
+                pass
     if payload.get("system"):
         system += "\n\n[调用方系统上下文]\n" + str(payload.get("system") or "")
     created_at = None
@@ -956,6 +1550,33 @@ def _public_knowledge_card(card: dict[str, Any], include_body: bool = False) -> 
     if include_body:
         row["body"] = security.redact_text(str(card.get("body") or ""))
     return row
+
+
+def _public_knowledge_draft(draft: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "ok", "action", "card_id", "title", "source_url", "source_type",
+        "confidence", "license", "tags", "old_hash", "new_hash", "old_scope",
+        "diff", "warnings", "review_required",
+    ]
+    row = {key: draft.get(key) for key in keys if key in draft}
+    if "source_url" in row:
+        row["source_url"] = security.redact_text(str(row.get("source_url") or ""))
+    if "diff" in row:
+        row["diff"] = security.redact_text(str(row.get("diff") or ""))
+    return row
+
+
+def _public_knowledge_upload(row: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "id", "filename", "title", "raw_path", "extracted_path", "size",
+        "created_at", "source_url", "source_type", "confidence", "license",
+        "tags", "card_id", "warnings", "text_chars", "body_hash",
+        "import_status", "imported_at",
+    ]
+    out = {key: row.get(key) for key in keys if key in row}
+    if "source_url" in out:
+        out["source_url"] = security.redact_text(str(out.get("source_url") or ""))
+    return out
 
 
 def _public_knowledge_audit(card: dict[str, Any]) -> dict[str, Any]:

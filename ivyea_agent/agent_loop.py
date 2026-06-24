@@ -72,13 +72,23 @@ def _append_limit_context(messages: list, text: str) -> None:
     messages.append({"role": "assistant", "content": text})
 
 
-def _record_task_interruption(ctx: ToolContext, text: str) -> None:
+def _record_task_interruption(ctx: ToolContext, text: str, status: TurnStatus) -> None:
     task_id = getattr(ctx, "task_id", "")
     if not task_id:
         return
     try:
         from . import task_runner
-        task_runner.record_interruption(task_id, "tool_step_limit", text)
+        task_runner.record_interruption(
+            task_id,
+            "tool_step_limit",
+            text,
+            state={
+                "session_id": getattr(ctx, "session_id", ""),
+                "turn_id": getattr(ctx, "turn_id", ""),
+                "max_steps": status.max_steps,
+                "tool_calls": status.tool_calls,
+            },
+        )
     except (OSError, ValueError, FileNotFoundError, json.JSONDecodeError):
         return
 
@@ -124,7 +134,7 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
     text = _limit_payload(max_steps, status)
     _append_limit_context(messages, text)
-    _record_task_interruption(ctx, text)
+    _record_task_interruption(ctx, text, status)
     traces.record(
         getattr(ctx, "session_id", ""),
         getattr(ctx, "turn_id", ""),
@@ -200,7 +210,7 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
     text = _limit_payload(max_steps, status)
     _append_limit_context(messages, text)
-    _record_task_interruption(ctx, text)
+    _record_task_interruption(ctx, text, status)
     traces.record(
         getattr(ctx, "session_id", ""),
         getattr(ctx, "turn_id", ""),

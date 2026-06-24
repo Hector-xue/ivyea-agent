@@ -5,8 +5,13 @@
 """
 from __future__ import annotations
 
+import json
+import socket
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from . import account_diagnosis, action_queue, actions as act_mod, competitor_audit, executor, guardrails, image_audit, knowledge, listing_audit, memory, ocr, offer_audit, permission, patrol as patrol_mod, profiles, review_audit, skills, tools_general
 from .rule_engine import RuleEngineError
@@ -29,6 +34,8 @@ class ToolContext:
     session_id: str = ""                                   # 用于运行时间线
     turn_id: str = ""                                      # 当前用户轮次
     task_id: str = ""                                      # 绑定长任务，用于自动记录续跑/阻塞点
+    ops_bridge: dict[str, Any] = field(default_factory=dict)  # IvyeaOps 嵌入模式工具桥接
+    ops_context: dict[str, Any] = field(default_factory=dict)  # 当前 Ops 页面/板块上下文
 
 
 # OpenAI function-calling schema
@@ -153,6 +160,20 @@ TOOL_SCHEMAS = [
         "description": "检索历史记忆(过往巡检、决策、记的要点)，跨会话回忆。",
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "ivyea_ops_list_tools",
+        "description": "仅 IvyeaOps 嵌入模式可用：列出当前用户可调用的 IvyeaOps 板块工具，包括 Home、市场、Listing、广告审计、领星、资讯、监控等。",
+        "parameters": {"type": "object", "properties": {
+            "module": {"type": "string", "description": "可选：按板块过滤，如 home/market/listing/tools/lingxing/news/servmon/skill-hub"},
+            "query": {"type": "string", "description": "可选：按名称或描述搜索"}},
+            "required": []}}},
+    {"type": "function", "function": {
+        "name": "ivyea_ops_call_tool",
+        "description": "仅 IvyeaOps 嵌入模式可用：调用一个 IvyeaOps 板块工具。写入/长任务会由 Ops 侧权限和工具策略控制。",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "工具名，先用 ivyea_ops_list_tools 查看"},
+            "arguments": {"type": "object", "description": "传给工具的 JSON 参数"}},
+            "required": ["name"]}}},
 ] + tools_general.GENERAL_TOOL_SCHEMAS
 
 
@@ -399,6 +420,76 @@ def _t_rollback(args: dict, ctx: ToolContext) -> str:
     return r["detail"]
 
 
+def _ops_bridge_request(ctx: ToolContext, path: str, payload: dict[str, Any], timeout: float = 80.0) -> dict[str, Any]:
+    bridge = ctx.ops_bridge if isinstance(ctx.ops_bridge, dict) else {}
+    base_url = str(bridge.get("base_url") or "").strip().rstrip("/")
+    token = str(bridge.get("token") or "").strip()
+    if not base_url or not token:
+        return {
+            "ok": False,
+            "error": "ops_bridge_unavailable",
+            "detail": "当前对话没有连接 IvyeaOps 工具桥。请在 IvyeaOps 右下角 IvyeaAgent 对话中使用。",
+        }
+    if "://" not in base_url:
+        return {"ok": False, "error": "invalid_ops_bridge", "detail": "IvyeaOps 工具桥地址无效"}
+    url = urllib.parse.urljoin(base_url + "/", path.lstrip("/"))
+    body = dict(payload or {})
+    if ctx.ops_context and "context" not in body:
+        body["context"] = ctx.ops_context
+    raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=raw,
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "IvyeaAgent-OpsBridge/1",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+            return data if isinstance(data, dict) else {"ok": False, "error": "invalid_response", "detail": "Ops 返回非对象 JSON"}
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:1000]
+        except OSError:
+            detail = str(exc.reason)
+        return {"ok": False, "error": f"HTTP {exc.code}", "detail": detail}
+    except (urllib.error.URLError, TimeoutError, socket.timeout, OSError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": "ops_bridge_error", "detail": str(exc)}
+
+
+def _compact_json_text(data: dict[str, Any], limit: int = 14000) -> str:
+    text = json.dumps(data, ensure_ascii=False, default=str, indent=2)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...（结果过长，已截断）"
+
+
+def _t_ivyea_ops_list_tools(args: dict, ctx: ToolContext) -> str:
+    data = _ops_bridge_request(ctx, "/tools", {
+        "module": str(args.get("module") or ""),
+        "query": str(args.get("query") or ""),
+    }, timeout=20.0)
+    return _compact_json_text(data, limit=12000)
+
+
+def _t_ivyea_ops_call_tool(args: dict, ctx: ToolContext) -> str:
+    name = str(args.get("name") or "").strip()
+    if not name:
+        return "错误：需要提供工具名 name。"
+    payload = {
+        "name": name,
+        "arguments": args.get("arguments") if isinstance(args.get("arguments"), dict) else {},
+    }
+    data = _ops_bridge_request(ctx, "/call", payload)
+    return _compact_json_text(data)
+
+
 _DISPATCH = {
     "run_patrol": _t_run_patrol,
     "run_account_diagnosis": _t_run_account_diagnosis,
@@ -415,6 +506,8 @@ _DISPATCH = {
     "run_image_audit": _t_run_image_audit,
     "run_image_ocr": _t_run_image_ocr,
     "recall": _t_recall,
+    "ivyea_ops_list_tools": _t_ivyea_ops_list_tools,
+    "ivyea_ops_call_tool": _t_ivyea_ops_call_tool,
     **tools_general.GENERAL_DISPATCH,
 }
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -51,11 +53,44 @@ def archive_dir(bundle_dir: Path, out_dir: Path) -> None:
             zf.write(path, path.relative_to(bundle_dir.parent))
 
 
+def project_wheel_path(dist_dir: Path, version: str) -> Path:
+    wheels = sorted(dist_dir.glob(f"ivyea_agent-{version}-*.whl"))
+    if not wheels:
+        raise SystemExit(f"No ivyea_agent {version} wheel produced in dist/")
+    return wheels[-1]
+
+
+def safe_model_name(value: str) -> str:
+    name = (value or "").strip().replace("\\", "/").rstrip("/").split("/")[-1]
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip(".-")
+    return name or "embedding-model"
+
+
+def copy_semantic_model(bundle_dir: Path, model_dir: Path, model_name: str = "") -> dict[str, str]:
+    src = model_dir.expanduser().resolve()
+    if not src.is_dir():
+        raise SystemExit(f"semantic model dir does not exist: {src}")
+    name = safe_model_name(model_name or src.name)
+    rel = Path("models") / "embedding" / name
+    dst = bundle_dir / rel
+    copy_tree(src, dst)
+    manifest = {
+        "backend": "sentence-transformers",
+        "model": model_name or name,
+        "name": name,
+        "model_dir": rel.as_posix(),
+    }
+    (bundle_dir / "semantic-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default="dist/offline", help="Output directory")
     parser.add_argument("--python", default=sys.executable, help="Python executable used for build/download")
     parser.add_argument("--with-semantic", action="store_true", help="Include optional sentence-transformers wheels")
+    parser.add_argument("--semantic-model-dir", help="Pre-bundled local sentence-transformers model directory")
+    parser.add_argument("--semantic-model-name", default="", help="Model name written into Ivyea settings")
     parser.add_argument("--no-archive", action="store_true", help="Only create directory, skip zip/tar.gz")
     args = parser.parse_args()
 
@@ -73,15 +108,16 @@ def main() -> int:
     run([args.python, "-m", "pip", "install", "--upgrade", "build"])
     run([args.python, "-m", "build", "--wheel"])
 
-    wheels = sorted(dist_dir.glob("ivyea_agent-*.whl"))
-    if not wheels:
-        raise SystemExit("No ivyea_agent wheel produced in dist/")
-    project_wheel = wheels[-1]
+    project_wheel = project_wheel_path(dist_dir, version)
 
     run([args.python, "-m", "pip", "download", str(project_wheel), "-d", str(wheelhouse)])
-    if args.with_semantic:
+    include_semantic = bool(args.with_semantic or args.semantic_model_dir)
+    semantic_manifest = None
+    if include_semantic:
         run([args.python, "-m", "pip", "download", "sentence-transformers>=3.0", "-d", str(wheelhouse)])
         (wheelhouse / ".ivyea-semantic").write_text("sentence-transformers\n", encoding="utf-8")
+    if args.semantic_model_dir:
+        semantic_manifest = copy_semantic_model(bundle_dir, Path(args.semantic_model_dir), args.semantic_model_name)
 
     shutil.copy2(ROOT / "scripts" / "install.sh", bundle_dir / "install.sh")
     shutil.copy2(ROOT / "scripts" / "install.ps1", bundle_dir / "install.ps1")
@@ -98,7 +134,10 @@ def main() -> int:
                 "",
                 "The installer uses ./wheelhouse and does not download Python packages.",
                 "If this bundle was built with --with-semantic, it also installs the local semantic retrieval dependency.",
+                "If semantic-manifest.json is present, the installer copies the bundled embedding model into ~/.ivyea/models/embedding,",
+                "configures retrieval_embedding_model_path, and runs ivyea retrieval sync after install.",
                 "If Python 3.9+ is not installed, install Python first or allow the online installer to bootstrap it.",
+                f"Bundled semantic model: {semantic_manifest['model']} ({semantic_manifest['model_dir']})" if semantic_manifest else "",
                 "",
             ]
         ),

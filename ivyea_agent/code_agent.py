@@ -629,6 +629,65 @@ def run_tests(command: str = "python -m pytest", root: str | Path = ".", timeout
     return result
 
 
+def patch_apply_loop(
+    spec: dict[str, Any],
+    root: str | Path = ".",
+    *,
+    test_command: str = "",
+    execute: bool = False,
+    timeout: int = 120,
+    persist: bool = False,
+) -> dict[str, Any]:
+    """Validate/apply/test one structured patch and produce an audit record."""
+    root_path = workspace.resolve_root(root)
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    run_id = hashlib.sha1(f"{root_path}:{started_at}:patch-loop:{json.dumps(spec, sort_keys=True, ensure_ascii=False)}".encode("utf-8")).hexdigest()[:12]
+    validation = patcher.validate_spec(spec, root=root_path)
+    apply_result = {"ok": False, "applied": False, "validation": validation, "message": "patch 校验失败"}
+    test_result = None
+    repair = None
+    if validation.get("ok"):
+        apply_result = patcher.apply_spec(spec, root=root_path, execute=execute)
+        if execute and apply_result.get("ok") and apply_result.get("applied"):
+            command = test_command or (patcher.suggested_tests(root_path)[0] if patcher.suggested_tests(root_path) else "python -m pytest")
+            test_result = run_tests(command, root=root_path, timeout=timeout)
+            if not test_result.get("ok"):
+                repair = repair_plan(test_result.get("output", ""), root=root_path)
+    review = review_ready(root_path)
+    data = {
+        "id": run_id,
+        "goal": "structured patch apply/test loop",
+        "root": str(root_path),
+        "started_at": started_at,
+        "mode": "execute" if execute else "dry-run",
+        "patch": {
+            "status": "applied" if apply_result.get("applied") else ("valid" if validation.get("ok") else "invalid"),
+            "spec": spec,
+            "validation": validation,
+            "apply": apply_result,
+        },
+        "selected_tests": [test_command] if test_command else patcher.suggested_tests(root_path)[:4],
+        "test_result": test_result,
+        "repair": repair,
+        "review": review,
+        "rounds": [{
+            "round": 1,
+            "status": "completed" if (not test_result or test_result.get("ok")) and apply_result.get("ok") else "needs_repair",
+            "patch_status": "applied" if apply_result.get("applied") else ("dry_run" if validation.get("ok") else "invalid"),
+            "test_status": "not_run" if test_result is None else ("passed" if test_result.get("ok") else "failed"),
+            "repair_status": "ready" if repair else "not_needed",
+        }],
+        "next_steps": [
+            "dry-run 模式只预览，不写文件；确认后用 --execute 进入真实写入。",
+            "测试失败时读取 repair.failure_summary，生成下一轮最小 patch spec。",
+            "通过后运行 code review / diff-brief，记录验证命令和剩余风险。",
+        ],
+    }
+    if persist:
+        save_run(data)
+    return data
+
+
 def impact(target: str, root: str | Path = ".") -> dict[str, Any]:
     data = workspace.impact_analysis(target, root=root)
     return {
@@ -824,6 +883,89 @@ def run_loop(
     if persist:
         save_run(data)
     return data
+
+
+def task_bundle(
+    goal: str,
+    root: str | Path = ".",
+    *,
+    test_output: str = "",
+    limit: int = 8,
+) -> dict[str, Any]:
+    """Build a read-only product bundle for a multi-round code task."""
+    root_path = workspace.resolve_root(root)
+    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    bundle_id = hashlib.sha1(f"{root_path}:{goal}:{generated_at}:bundle".encode("utf-8")).hexdigest()[:12]
+    plan = task_plan(goal, root_path)
+    ctx = context(goal, root_path, limit=limit)
+    q = quality(root_path)
+    impact_targets = _impact_targets(plan, ctx)
+    impacts = [impact(target, root_path) for target in impact_targets[:4]]
+    patch_stage = patch_candidate(goal, root_path)
+    selected_tests = _merge_paths(plan.get("suggested_tests", []), q.get("suggested_tests", []) if isinstance(q.get("suggested_tests"), list) else [])[:6]
+    if not selected_tests:
+        selected_tests = patcher.suggested_tests(root_path)[:6]
+    repair = repair_plan(test_output, root_path) if (test_output or "").strip() else None
+    review = review_ready(root_path)
+    phases = [
+        {"name": "plan", "status": "ready", "summary": f"{len(plan.get('relevant_files') or [])} relevant files"},
+        {"name": "context", "status": "ready", "summary": f"{len(ctx.get('files') or [])} files packed"},
+        {"name": "impact", "status": "ready", "summary": f"{len(impacts)} impact targets"},
+        {"name": "patch", "status": patch_stage.get("status", "needs_input"), "summary": "dry-run patch template only"},
+        {"name": "test", "status": "selected", "summary": ", ".join(selected_tests[:3])},
+        {"name": "repair", "status": "ready" if repair else "waiting_for_failure_output", "summary": f"{repair.get('failure_count')} failures" if repair else "no test output supplied"},
+        {"name": "review", "status": "ready" if review.get("ready") else "needs_attention", "summary": f"{len(review.get('review', {}).get('findings') or [])} findings"},
+    ]
+    resume_prompt = _bundle_resume_prompt(goal, plan, selected_tests, repair)
+    return {
+        "id": bundle_id,
+        "goal": goal,
+        "root": str(root_path),
+        "generated_at": generated_at,
+        "mode": "read-only-task-bundle",
+        "plan": plan,
+        "context": ctx,
+        "quality": q,
+        "impact_targets": impact_targets[:4],
+        "impacts": impacts,
+        "patch": patch_stage,
+        "selected_tests": selected_tests,
+        "repair": repair,
+        "review": review,
+        "phases": phases,
+        "resume_prompt": resume_prompt,
+        "next_steps": [
+            "确认 relevant_files 和 impact_targets 是否覆盖真实修改范围。",
+            "填写 patch.spec.ops 的 old/new，先运行 patch validate。",
+            "显式 apply 后先运行 selected_tests；失败输出交给 code repair 或重新生成 bundle。",
+            "通过后运行 code review，输出 diff 摘要、验证命令和剩余风险。",
+        ],
+    }
+
+
+def _bundle_resume_prompt(goal: str, plan: dict[str, Any], selected_tests: list[str], repair: dict[str, Any] | None) -> str:
+    files = "\n".join(f"- {path}" for path in (plan.get("relevant_files") or [])[:10])
+    tests = "\n".join(f"- {cmd}" for cmd in selected_tests[:6])
+    lines = [
+        "继续 Ivyea 代码任务。不要重复已经完成的 repo 扫描，直接从任务包继续。",
+        "",
+        f"目标：{goal}",
+        "",
+        "已识别相关文件：",
+        files or "- (none)",
+        "",
+        "建议测试：",
+        tests or "- (none)",
+    ]
+    if repair:
+        lines.extend(["", "上一轮失败摘要："])
+        for item in repair.get("failure_summary") or []:
+            lines.append(f"- {item.get('nodeid')} kind={item.get('kind')} rerun={item.get('rerun')}")
+    lines.extend([
+        "",
+        "下一步：先生成最小 patch spec 并 validate；需要写文件或执行命令时必须显式审批。",
+    ])
+    return "\n".join(lines)
 
 
 def save_run(data: dict[str, Any]) -> Path:
@@ -1145,6 +1287,47 @@ def render_run(data: dict[str, Any]) -> str:
         lines.append(f"- failures: {data['repair'].get('failure_count')}")
     review = data.get("review") or {}
     lines.extend(["", "Review Gate", f"- ok: {review.get('ok')}", f"- ready: {review.get('ready')}", f"- findings: {len(review.get('review', {}).get('findings') or [])}"])
+    if data.get("next_steps"):
+        lines.extend(["", "Next Steps"])
+        lines.extend(f"{i}. {step}" for i, step in enumerate(data["next_steps"], start=1))
+    return "\n".join(lines)
+
+
+def render_bundle(data: dict[str, Any]) -> str:
+    lines = [
+        "Code Task Bundle",
+        "",
+        f"- id: {data.get('id')}",
+        f"- goal: {data.get('goal')}",
+        f"- root: {data.get('root')}",
+        f"- mode: {data.get('mode')}",
+    ]
+    phases = data.get("phases") or []
+    if phases:
+        lines.extend(["", "Phases"])
+        for phase in phases:
+            lines.append(f"- {phase.get('name')}: {phase.get('status')} - {phase.get('summary')}")
+    plan = data.get("plan") or {}
+    if plan.get("relevant_files"):
+        lines.extend(["", "Relevant Files"])
+        lines.extend(f"- {path}" for path in plan["relevant_files"][:12])
+    if data.get("impact_targets"):
+        lines.extend(["", "Impact Targets"])
+        lines.extend(f"- {target}" for target in data["impact_targets"])
+    if data.get("selected_tests"):
+        lines.extend(["", "Selected Tests"])
+        lines.extend(f"- `{cmd}`" for cmd in data["selected_tests"])
+    repair = data.get("repair")
+    if repair:
+        lines.extend(["", "Repair"])
+        for item in repair.get("failure_summary") or []:
+            lines.append(f"- {item.get('nodeid')}: {item.get('kind')} `{item.get('rerun')}`")
+    review = data.get("review") or {}
+    lines.extend(["", "Review Gate"])
+    lines.append(f"- ready: {review.get('ready')}")
+    lines.append(f"- findings: {len(review.get('review', {}).get('findings') or [])}")
+    if data.get("resume_prompt"):
+        lines.extend(["", "Resume Prompt", "```text", data["resume_prompt"], "```"])
     if data.get("next_steps"):
         lines.extend(["", "Next Steps"])
         lines.extend(f"{i}. {step}" for i, step in enumerate(data["next_steps"], start=1))

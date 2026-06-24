@@ -35,6 +35,38 @@ def test_key_status_for_api_key_oauth_and_none(ivyea_home, monkeypatch):
     assert models.key_status(codex) == "missing:auth-token"
 
 
+def test_provider_capability_matrix_exposes_product_facing_flags(ivyea_home):
+    from ivyea_agent import models
+
+    openai = models.provider_by_id("openai")
+    codex = models.provider_by_id("openai-codex")
+    ollama = models.provider_by_id("ollama")
+
+    openai_caps = models.provider_capabilities(openai)
+    assert openai_caps["chat"] is True
+    assert openai_caps["tools"] is True
+    assert openai_caps["streaming"] is True
+    assert openai_caps["vision"] is True
+    assert openai_caps["live_model_catalog"] is True
+    assert "tools" in models.capability_badges(openai)
+    assert "models" in models.capability_badges(openai)
+
+    codex_caps = models.provider_capabilities(codex)
+    assert codex_caps["oauth"] is True
+    assert codex_caps["real_probe"] is True
+    assert codex_caps["supports_code_tasks"] is True
+
+    ollama_caps = models.provider_capabilities(ollama)
+    assert ollama_caps["local"] is True
+    assert ollama_caps["api_key"] is False
+
+    rows = {row["id"]: row for row in models.provider_matrix(environ={"OPENAI_API_KEY": "sk-test"})}
+    assert rows["openai"]["key_status"] == "configured"
+    assert rows["openai"]["model_count"] >= 1
+    assert rows["openai"]["capabilities"]["tools"] is True
+    assert rows["openai-codex"]["key_status"].startswith("missing:")
+
+
 def test_provider_models_uses_live_catalog_and_cache(ivyea_home, monkeypatch):
     from ivyea_agent import models
     provider = {"id": "demo", "kind": "openai", "base": "https://demo.test/v1", "models": ["built-in"]}
@@ -63,6 +95,54 @@ def test_provider_models_falls_back_to_builtin_without_live(ivyea_home, monkeypa
     rows, source = models.provider_models(provider, refresh=True)
     assert rows == ["built-in"]
     assert source == "builtin"
+
+
+def test_provider_model_catalog_reports_live_error(ivyea_home, monkeypatch):
+    from ivyea_agent import models
+    provider = {
+        "id": "demo",
+        "label": "Demo",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "base": "https://demo.test/v1",
+        "models": ["built-in"],
+        "default_model": "built-in",
+    }
+    monkeypatch.setattr(models, "live_models_result", lambda *a, **k: {"ok": False, "models": [], "error": "HTTP 401"})
+    catalog = models.provider_model_catalog(provider, refresh=True)
+    assert catalog["ok"] is True
+    assert catalog["models"] == ["built-in"]
+    assert catalog["source"] == "builtin"
+    assert catalog["error"] == "HTTP 401"
+    assert catalog["cache"]["has_cache"] is False
+
+
+def test_probe_provider_reports_missing_credential_and_success(monkeypatch):
+    from ivyea_agent import models
+    from ivyea_agent.providers import openai_compat
+
+    provider = {
+        "id": "demo",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "base": "https://demo.test/v1",
+        "key_env": "DEMO_API_KEY",
+        "auth_type": "api_key",
+        "default_model": "demo-model",
+    }
+    missing = models.probe_provider(provider, api_key="")
+    assert missing["ok"] is False
+    assert missing["error"] == "credential_missing"
+
+    monkeypatch.setattr(openai_compat, "probe_openai_compat", lambda token, **kwargs: {
+        "ok": True,
+        "model": kwargs["model"],
+        "content": "OK",
+        "usage": {},
+    })
+    ok = models.probe_provider(provider, api_key="sk-test")
+    assert ok["ok"] is True
+    assert ok["result"]["content"] == "OK"
 
 
 def test_live_models_parses_gemini_and_anthropic(monkeypatch):
@@ -108,10 +188,13 @@ def test_cli_model_provider_and_doctor_outputs(ivyea_home, capsys):
                                   refresh_token=None, expires_at=0))
     out = capsys.readouterr().out
     assert rc == 0 and "openai-codex" in out and "ollama" in out
+    assert "能力标签" in out
+    assert "tools" in out
     rc = cli._cmd_model(Namespace(spec="doctor", extra=None, token=None,
                                   refresh_token=None, expires_at=0))
     out = capsys.readouterr().out
     assert rc == 0 and "OK 当前模型配置可进入对话" in out
+    assert "capabilities" in out
 
 
 def test_cli_model_direct_oauth_runs_login(ivyea_home, monkeypatch, capsys):
