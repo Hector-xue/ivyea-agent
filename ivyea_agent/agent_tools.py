@@ -554,6 +554,8 @@ def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
 # 只读工具集：纯读/检索/审计/诊断，绝不写。供只读子 agent 使用。
 READONLY_TOOLS = PARALLEL_SAFE | {
     "code_search", "code_symbols", "code_impact", "code_repair",
+    "mcp_list_tools", "mcp_list_resources", "mcp_read_resource",
+    "mcp_list_prompts", "mcp_get_prompt",
     "knowledge_search", "skill_search", "recall",
     "run_patrol", "run_account_diagnosis", "propose_actions",
     "run_listing_audit", "run_review_audit", "run_offer_audit",

@@ -1,7 +1,8 @@
 """通用 MCP 客户端（极简 JSON-RPC over Streamable HTTP / SSE）。
 
 只依赖 httpx，兼容 Python 3.9，不引官方 mcp SDK（其要求 3.10+ 且体积大）。
-P1.5 支持 http/sse 传输（远程 MCP，如领星网关）；stdio 留待后续。
+支持 http / sse / stdio 三种传输（远程 MCP 如领星网关，或本地 stdio server）。
+协议覆盖 tools/resources/prompts；sampling/roots 暂不支持（运营场景用不到）。
 
 通用设计：不写死任何厂商的工具名/字段——连上后 list_tools 自动发现，调用由
 mcp.json 里的 dataSource 映射驱动（见 mcp_source.py）。
@@ -160,6 +161,21 @@ class MCPClient:
 
     def call_tool(self, name: str, arguments: Optional[dict] = None) -> dict[str, Any]:
         return self._rpc("tools/call", {"name": name, "arguments": arguments or {}})
+
+    def list_resources(self) -> list[dict[str, Any]]:
+        res = self._rpc("resources/list")
+        return (res or {}).get("resources", []) if isinstance(res, dict) else []
+
+    def read_resource(self, uri: str) -> list[dict[str, Any]]:
+        res = self._rpc("resources/read", {"uri": uri})
+        return (res or {}).get("contents", []) if isinstance(res, dict) else []
+
+    def list_prompts(self) -> list[dict[str, Any]]:
+        res = self._rpc("prompts/list")
+        return (res or {}).get("prompts", []) if isinstance(res, dict) else []
+
+    def get_prompt(self, name: str, arguments: Optional[dict] = None) -> dict[str, Any]:
+        return self._rpc("prompts/get", {"name": name, "arguments": arguments or {}}) or {}
 
     def close(self) -> None:
         if self._proc and self._proc.poll() is None:

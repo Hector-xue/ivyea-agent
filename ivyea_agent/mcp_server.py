@@ -10,7 +10,7 @@ import json
 import sys
 from typing import Any, Callable, TextIO
 
-from . import __version__, knowledge, retrieval, service, task_runner
+from . import __version__, knowledge, retrieval, service, skills, task_runner
 
 
 JsonDict = dict[str, Any]
@@ -200,6 +200,53 @@ def call_tool(name: str, arguments: JsonDict | None = None) -> JsonDict:
     return _tool_result(data, is_error=not bool(data.get("ok", True)))
 
 
+_KNOWLEDGE_URI = "ivyea-knowledge://"
+
+
+def list_resources() -> list[JsonDict]:
+    """Amazon 运营知识卡作为 MCP resources。"""
+    out: list[JsonDict] = []
+    for card in knowledge.list_cards():
+        tags = card.get("tags") or []
+        desc = card.get("category") or ""
+        if tags:
+            desc = (desc + " · " if desc else "") + ", ".join(str(t) for t in tags)
+        out.append({
+            "uri": f"{_KNOWLEDGE_URI}{card['id']}",
+            "name": card.get("title") or card["id"],
+            "description": desc,
+            "mimeType": "text/markdown",
+        })
+    return out
+
+
+def read_resource(uri: str) -> JsonDict:
+    card_id = uri[len(_KNOWLEDGE_URI):] if uri.startswith(_KNOWLEDGE_URI) else uri
+    card = knowledge.get_card(card_id)
+    if not card:
+        raise ValueError(f"unknown resource: {uri}")
+    return {"contents": [{"uri": uri, "mimeType": "text/markdown", "text": card.get("body") or ""}]}
+
+
+def list_prompts() -> list[JsonDict]:
+    """Ivyea Skills 作为 MCP prompt 模板。"""
+    return [{
+        "name": sk.id,
+        "description": (f"{sk.title} — {sk.description}")[:200],
+        "arguments": [],
+    } for sk in skills.list_skills()]
+
+
+def get_prompt(name: str, arguments: JsonDict | None = None) -> JsonDict:
+    sk = skills.get_skill(name)
+    if not sk:
+        raise ValueError(f"unknown prompt: {name}")
+    return {
+        "description": sk.title,
+        "messages": [{"role": "user", "content": {"type": "text", "text": skills.render_skill(sk)}}],
+    }
+
+
 def self_config() -> JsonDict:
     return {
         "transport": "stdio",
@@ -230,7 +277,11 @@ def handle_message(message: JsonDict) -> JsonDict | None:
         if method == "initialize":
             return _response(msg_id, {
                 "protocolVersion": "2025-06-18",
-                "capabilities": {"tools": {"listChanged": False}},
+                "capabilities": {
+                    "tools": {"listChanged": False},
+                    "resources": {"listChanged": False},
+                    "prompts": {"listChanged": False},
+                },
                 "serverInfo": {"name": "ivyea-agent", "version": __version__},
             })
         if method == "ping":
@@ -239,6 +290,14 @@ def handle_message(message: JsonDict) -> JsonDict | None:
             return _response(msg_id, {"tools": list_tools()})
         if method == "tools/call":
             return _response(msg_id, call_tool(str(params.get("name") or ""), params.get("arguments") or {}))
+        if method == "resources/list":
+            return _response(msg_id, {"resources": list_resources()})
+        if method == "resources/read":
+            return _response(msg_id, read_resource(str(params.get("uri") or "")))
+        if method == "prompts/list":
+            return _response(msg_id, {"prompts": list_prompts()})
+        if method == "prompts/get":
+            return _response(msg_id, get_prompt(str(params.get("name") or ""), params.get("arguments") or {}))
         return _error(msg_id, -32601, f"Method not found: {method}")
     except Exception as exc:  # noqa: BLE001
         return _error(msg_id, -32603, f"{type(exc).__name__}: {exc}")

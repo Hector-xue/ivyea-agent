@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -259,6 +260,161 @@ def t_code_repair(args: dict, ctx) -> str:
         return "test_output 为空：把失败的测试输出贴进来。"
     from . import code_agent
     return _truncate(code_agent.render_repair(code_agent.repair_plan(output, root=_ws_root(ctx))))
+
+
+# ── MCP（连任意已配置的 MCP 服务器：工具/资源/prompt）─────────────────────────
+def _mcp_servers() -> dict:
+    return config.load_mcp().get("mcpServers", {})
+
+
+def _mcp_run(server: str, fn):
+    """连 server → initialize → fn(client) → close。返回 (result, err_str)；任一为 None。"""
+    from .mcp_client import MCPClient, MCPError
+    spec = _mcp_servers().get(server)
+    if not spec:
+        return None, f"未配置 MCP 服务器：{server}（ivyea mcp list 查看 / ivyea mcp add 添加）"
+    client = None
+    try:
+        client = MCPClient(spec)
+        client.initialize()
+        return fn(client), None
+    except MCPError as e:
+        return None, f"MCP 错误（{server}）：{e}"
+    except Exception as e:  # noqa: BLE001
+        return None, f"MCP 调用出错（{server}）：{e}"
+    finally:
+        if client is not None:
+            client.close()
+
+
+def _mcp_targets(server: str):
+    servers = _mcp_servers()
+    if not servers:
+        return None, "未配置任何 MCP 服务器（ivyea mcp add 添加）。"
+    return ([server] if server else list(servers)), None
+
+
+def _render_mcp_content(res) -> str:
+    if not isinstance(res, dict):
+        return json.dumps(res, ensure_ascii=False) if res else "（空结果）"
+    parts = []
+    for block in res.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            parts.append(block.get("text") or "")
+        else:
+            parts.append(json.dumps(block, ensure_ascii=False))
+    text = "\n".join(p for p in parts if p) or json.dumps(res, ensure_ascii=False)
+    return ("[工具返回错误]\n" + text) if res.get("isError") else text
+
+
+def t_mcp_list_tools(args: dict, ctx) -> str:
+    """列出已配置 MCP 服务器的可用工具（只读）。server 省略=全部。"""
+    targets, err = _mcp_targets((args.get("server") or "").strip())
+    if err:
+        return err
+    out = []
+    for s in targets:
+        res, e = _mcp_run(s, lambda c: c.list_tools())
+        if e:
+            out.append(f"[{s}] {e}")
+            continue
+        lines = [f"[{s}] {len(res)} 个工具："]
+        lines += [f"  · {t.get('name')} — {(t.get('description') or '')[:80]}" for t in res]
+        out.append("\n".join(lines))
+    return _truncate("\n".join(out))
+
+
+def t_mcp_call_tool(args: dict, ctx) -> str:
+    """调用某个 MCP 服务器的工具。计划模式拒绝；trusted 服务器免审，否则人工审批。"""
+    server = (args.get("server") or "").strip()
+    tool = (args.get("tool") or "").strip()
+    if not server or not tool:
+        return "需要 server 和 tool。先用 mcp_list_tools 查看可用工具。"
+    spec = _mcp_servers().get(server)
+    if not spec:
+        return f"未配置 MCP 服务器：{server}（ivyea mcp list / add）"
+    arguments = args.get("arguments") or {}
+    if getattr(ctx, "plan_mode", False):
+        return f"计划模式（只读）：不调用 MCP 工具 {server}.{tool}。/approve 后再做。"
+    if not spec.get("trusted"):
+        preview = f"调用 MCP 工具 {server}.{tool}　参数：{json.dumps(arguments, ensure_ascii=False)[:300]}"
+        decision = permission.request_intent({"op_type": "mcp_call_tool"}, preview, ctx.perm)
+        if decision == permission.ABORT:
+            return "用户终止。"
+        if decision != permission.APPROVE:
+            return f"已跳过：{preview}"
+    res, e = _mcp_run(server, lambda c: c.call_tool(tool, arguments))
+    return e if e else _truncate(_render_mcp_content(res))
+
+
+def t_mcp_list_resources(args: dict, ctx) -> str:
+    """列出 MCP 服务器的资源（只读）。server 省略=全部。"""
+    targets, err = _mcp_targets((args.get("server") or "").strip())
+    if err:
+        return err
+    out = []
+    for s in targets:
+        res, e = _mcp_run(s, lambda c: c.list_resources())
+        if e:
+            out.append(f"[{s}] {e}")
+            continue
+        lines = [f"[{s}] {len(res)} 个资源："]
+        lines += [f"  · {r.get('uri')} — {(r.get('name') or r.get('description') or '')[:80]}" for r in res]
+        out.append("\n".join(lines))
+    return _truncate("\n".join(out))
+
+
+def t_mcp_read_resource(args: dict, ctx) -> str:
+    """读取 MCP 服务器某个资源的内容（只读）。"""
+    server = (args.get("server") or "").strip()
+    uri = (args.get("uri") or "").strip()
+    if not server or not uri:
+        return "需要 server 和 uri。先用 mcp_list_resources 查看。"
+    res, e = _mcp_run(server, lambda c: c.read_resource(uri))
+    if e:
+        return e
+    parts = [(c.get("text") or c.get("blob") or json.dumps(c, ensure_ascii=False))
+             for c in (res or []) if isinstance(c, dict)]
+    return _truncate("\n".join(p for p in parts if p) or "（空）")
+
+
+def t_mcp_list_prompts(args: dict, ctx) -> str:
+    """列出 MCP 服务器提供的 prompt 模板（只读）。server 省略=全部。"""
+    targets, err = _mcp_targets((args.get("server") or "").strip())
+    if err:
+        return err
+    out = []
+    for s in targets:
+        res, e = _mcp_run(s, lambda c: c.list_prompts())
+        if e:
+            out.append(f"[{s}] {e}")
+            continue
+        lines = [f"[{s}] {len(res)} 个 prompt："]
+        lines += [f"  · {p.get('name')} — {(p.get('description') or '')[:80]}" for p in res]
+        out.append("\n".join(lines))
+    return _truncate("\n".join(out))
+
+
+def t_mcp_get_prompt(args: dict, ctx) -> str:
+    """获取 MCP 服务器某个 prompt 模板的内容（只读）。"""
+    server = (args.get("server") or "").strip()
+    name = (args.get("name") or "").strip()
+    if not server or not name:
+        return "需要 server 和 name。先用 mcp_list_prompts 查看。"
+    res, e = _mcp_run(server, lambda c: c.get_prompt(name, args.get("arguments") or {}))
+    if e:
+        return e
+    parts = []
+    if isinstance(res, dict):
+        if res.get("description"):
+            parts.append(str(res["description"]))
+        for m in res.get("messages") or []:
+            content = m.get("content") if isinstance(m, dict) else None
+            txt = content.get("text") if isinstance(content, dict) else (content if isinstance(content, str) else "")
+            parts.append(f"[{m.get('role', '?')}] {txt}")
+    return _truncate("\n".join(p for p in parts if p) or json.dumps(res, ensure_ascii=False))
 
 
 # ── 写/执行类（门控）─────────────────────────────────────────────────────────
@@ -513,6 +669,20 @@ GENERAL_TOOL_SCHEMAS = [
         {"command": {"type": "string"}, "timeout": {"type": "integer"}}),
     _fn("code_repair", "解析失败测试输出，生成下一轮修复计划（可疑文件/失败摘要/重跑命令）。只读。",
         {"test_output": {"type": "string"}}, ["test_output"]),
+    _fn("mcp_list_tools", "列出已配置 MCP 服务器的可用工具（只读）。server 省略=全部。先用它发现工具，再 mcp_call_tool。",
+        {"server": {"type": "string", "description": "MCP 服务器名（mcp.json 配置）；省略=全部"}}),
+    _fn("mcp_call_tool", "调用某个 MCP 服务器的工具。会弹人工审批（mcp.json 标 trusted 的服务器免审）；计划模式下拒绝。",
+        {"server": {"type": "string"}, "tool": {"type": "string"},
+         "arguments": {"type": "object", "description": "传给工具的 JSON 参数"}}, ["server", "tool"]),
+    _fn("mcp_list_resources", "列出 MCP 服务器的资源（只读）。server 省略=全部。",
+        {"server": {"type": "string"}}),
+    _fn("mcp_read_resource", "读取 MCP 服务器某个资源的内容（只读）。",
+        {"server": {"type": "string"}, "uri": {"type": "string"}}, ["server", "uri"]),
+    _fn("mcp_list_prompts", "列出 MCP 服务器提供的 prompt 模板（只读）。server 省略=全部。",
+        {"server": {"type": "string"}}),
+    _fn("mcp_get_prompt", "获取 MCP 服务器某个 prompt 模板的内容（只读）。",
+        {"server": {"type": "string"}, "name": {"type": "string"},
+         "arguments": {"type": "object", "description": "模板参数（可选）"}}, ["server", "name"]),
     _fn("todo_write", "维护多步任务计划(让长任务可视化)。每步 {content, status: pending|in_progress|completed}。开始多步任务时先列计划，完成一步就更新状态。",
         {"todos": {"type": "array", "items": {"type": "object", "properties": {
             "content": {"type": "string"},
@@ -547,6 +717,9 @@ GENERAL_DISPATCH = {
     "grep": t_grep, "code_search": t_code_search,
     "code_symbols": t_code_symbols, "code_impact": t_code_impact,
     "code_apply_patch": t_code_apply_patch, "run_tests": t_run_tests, "code_repair": t_code_repair,
+    "mcp_list_tools": t_mcp_list_tools, "mcp_call_tool": t_mcp_call_tool,
+    "mcp_list_resources": t_mcp_list_resources, "mcp_read_resource": t_mcp_read_resource,
+    "mcp_list_prompts": t_mcp_list_prompts, "mcp_get_prompt": t_mcp_get_prompt,
     "todo_write": t_todo_write,
     "task_read": t_task_read,
     "task_step": t_task_step,
