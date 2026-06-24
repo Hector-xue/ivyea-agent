@@ -478,8 +478,101 @@ def key_status(provider: dict[str, Any], *, environ: dict[str, str] | None = Non
     return "configured" if env.get(key_env) else f"missing:{key_env}"
 
 
-def live_models(provider: dict[str, Any], api_key: str = "", timeout: float = 6.0) -> list[str] | None:
-    """Fetch a provider model catalog when it exposes an OpenAI-compatible /models endpoint."""
+def provider_capabilities(provider: dict[str, Any]) -> dict[str, Any]:
+    """Return stable, product-facing provider capabilities.
+
+    This is intentionally offline and conservative. Live probes and model list
+    refreshes are separate operations so the UI can render a trustworthy matrix
+    without surprising network calls.
+    """
+    pid = str(provider.get("id") or "")
+    kind = str(provider.get("kind") or "")
+    api_mode = str(provider.get("api_mode") or "")
+    auth = str(provider.get("auth_type") or "api_key")
+    base = str(provider.get("base") or "")
+    tool_modes = {
+        "chat_completions",
+        "anthropic_messages",
+        "gemini_native",
+        "gemini_code_assist",
+        "bedrock_converse",
+        "copilot_chat_completions",
+        "codex_responses",
+    }
+    stream_modes = {
+        "chat_completions",
+        "anthropic_messages",
+        "gemini_native",
+        "gemini_code_assist",
+        "copilot_chat_completions",
+        "codex_responses",
+    }
+    live_catalog = bool(
+        provider.get("models_url")
+        or (kind == "openai" and base)
+        or api_mode == "gemini_native"
+    )
+    return {
+        "chat": provider.get("status", "usable") == "usable",
+        "tools": api_mode in tool_modes,
+        "streaming": api_mode in stream_modes,
+        "vision": pid in {"openai", "anthropic", "gemini"} or api_mode == "gemini_native",
+        "oauth": auth in {"oauth_external", "oauth_device_code", "copilot"},
+        "api_key": auth == "api_key",
+        "local": auth == "none" or base.startswith(("http://localhost", "http://127.0.0.1")),
+        "aws_sdk": auth == "aws_sdk",
+        "custom_endpoint": pid in {"custom", "azure-foundry"} or not bool(base),
+        "live_model_catalog": live_catalog,
+        "real_probe": pid in {"google-gemini-cli", "openai-codex", "copilot", "qwen-oauth"},
+        "model_refresh": live_catalog,
+        "supports_code_tasks": pid in {
+            "openai", "anthropic", "google-gemini-cli", "openai-codex", "copilot",
+            "qwen", "qwen-oauth", "kimi-coding", "openrouter", "ollama", "custom",
+        },
+    }
+
+
+def capability_badges(provider: dict[str, Any]) -> list[str]:
+    caps = provider_capabilities(provider)
+    badges = []
+    mapping = [
+        ("tools", "tools"),
+        ("streaming", "stream"),
+        ("vision", "vision"),
+        ("oauth", "oauth"),
+        ("live_model_catalog", "models"),
+        ("real_probe", "probe"),
+        ("local", "local"),
+    ]
+    for key, label in mapping:
+        if caps.get(key):
+            badges.append(label)
+    return badges or ["chat"]
+
+
+def provider_matrix(*, environ: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    rows = []
+    for provider in PROVIDERS:
+        rows.append({
+            "id": provider.get("id", ""),
+            "label": provider.get("label", ""),
+            "group": provider.get("group", ""),
+            "kind": provider.get("kind", ""),
+            "api_mode": provider.get("api_mode", ""),
+            "auth_type": provider.get("auth_type", "api_key"),
+            "key_status": key_status(provider, environ=environ),
+            "default_model": provider.get("default_model", ""),
+            "models": list(provider.get("models") or []),
+            "model_count": len(provider.get("models") or []),
+            "capabilities": provider_capabilities(provider),
+            "badges": capability_badges(provider),
+            "note": provider.get("note", ""),
+        })
+    return rows
+
+
+def live_models_result(provider: dict[str, Any], api_key: str = "", timeout: float = 6.0) -> dict[str, Any]:
+    """Fetch a provider model catalog and keep the failure reason."""
     url = (provider.get("models_url") or "").strip()
     base = (provider.get("base") or "").strip()
     api_mode = provider.get("api_mode", "")
@@ -488,7 +581,7 @@ def live_models(provider: dict[str, Any], api_key: str = "", timeout: float = 6.
     if not url and base and provider.get("kind") == "openai":
         url = base.rstrip("/") + "/models"
     if not url:
-        return None
+        return {"ok": False, "models": [], "url": "", "error": "provider has no model catalog endpoint"}
     if api_mode == "gemini_native" and api_key:
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}key={api_key}"
@@ -503,8 +596,11 @@ def live_models(provider: dict[str, Any], api_key: str = "", timeout: float = 6.
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:500]
+        return {"ok": False, "models": [], "url": url, "error": f"HTTP {exc.code}: {body or exc.reason}"}
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return {"ok": False, "models": [], "url": url, "error": str(exc)}
     items = data if isinstance(data, list) else data.get("data", [])
     if not items and isinstance(data, dict):
         items = data.get("models", [])
@@ -519,7 +615,13 @@ def live_models(provider: dict[str, Any], api_key: str = "", timeout: float = 6.
         if model_id.startswith("models/"):
             model_id = model_id.split("/", 1)[1]
         ids.append(model_id)
-    return ids or None
+    return {"ok": bool(ids), "models": ids, "url": url, "error": "" if ids else "model catalog returned no model ids"}
+
+
+def live_models(provider: dict[str, Any], api_key: str = "", timeout: float = 6.0) -> list[str] | None:
+    """Fetch a provider model catalog when it exposes a supported /models endpoint."""
+    result = live_models_result(provider, api_key=api_key, timeout=timeout)
+    return list(result.get("models") or []) if result.get("ok") else None
 
 
 def _cache_file():
@@ -578,3 +680,113 @@ def provider_models(provider: dict[str, Any], api_key: str = "", *,
     if cached_models:
         return cached_models, "cache"
     return builtin, "builtin"
+
+
+def provider_model_catalog(provider: dict[str, Any], api_key: str = "", *,
+                           refresh: bool = False, ttl: float = 24 * 3600) -> dict[str, Any]:
+    """Return a UI/API friendly model catalog with source, cache and error info."""
+    builtin = list(provider.get("models") or [])
+    can_live = bool(
+        provider.get("models_url")
+        or (provider.get("kind") == "openai" and provider.get("base"))
+        or provider.get("api_mode") == "gemini_native"
+    )
+    key = _cache_key(provider)
+    cache = _load_model_cache()
+    row = cache.get(key) if isinstance(cache.get(key), dict) else {}
+    now = time.time()
+    cached_models = [str(m) for m in row.get("models", []) if m] if row else []
+    age = now - float(row.get("ts") or 0) if row else None
+    if cached_models and not refresh and age is not None and age <= ttl:
+        models_out, source, error = cached_models, "cache", ""
+    elif can_live:
+        live = live_models_result(provider, api_key=api_key)
+        if live.get("ok"):
+            models_out = [str(m) for m in live.get("models") or [] if m]
+            cache[key] = {"ts": now, "models": models_out}
+            _save_model_cache(cache)
+            source, error, age = "live", "", 0.0
+        elif cached_models:
+            models_out, source, error = cached_models, "cache", str(live.get("error") or "")
+        else:
+            models_out, source, error = builtin, "builtin", str(live.get("error") or "")
+    else:
+        models_out, source, error = builtin, "builtin", "provider has no supported live model catalog endpoint"
+    default = str(provider.get("default_model") or (models_out[0] if models_out else ""))
+    if default and models_out and default not in models_out:
+        default = models_out[0]
+    return {
+        "ok": bool(models_out),
+        "provider_id": provider.get("id", ""),
+        "label": provider.get("label", ""),
+        "models": models_out,
+        "default_model": default,
+        "source": source,
+        "cache": {
+            "key": key,
+            "age_seconds": round(float(age), 3) if age is not None else None,
+            "ttl_seconds": ttl,
+            "has_cache": bool(cached_models),
+        },
+        "error": error,
+        "capabilities": provider_capabilities(provider),
+    }
+
+
+def probe_provider(provider: dict[str, Any], api_key: str = "", *,
+                   model: str = "", timeout: float = 30.0) -> dict[str, Any]:
+    """Run a minimal live provider probe and return actionable diagnostics."""
+    pid = str(provider.get("id") or "")
+    api_mode = str(provider.get("api_mode") or "")
+    chosen_model = model or str(provider.get("default_model") or "")
+    auth = str(provider.get("auth_type") or "api_key")
+    token = api_key or ("local" if auth == "none" else "")
+    if auth not in ("none", "aws_sdk") and not token:
+        return {
+            "ok": False,
+            "provider_id": pid,
+            "model": chosen_model,
+            "error": "credential_missing",
+            "hints": [f"configure {provider.get('key_env') or 'OAuth token'} first"],
+        }
+    try:
+        if pid == "google-gemini-cli":
+            from .providers.gemini_code_assist_provider import probe_gemini_code_assist
+            result = probe_gemini_code_assist(token, model=chosen_model, timeout=timeout)
+        elif pid == "openai-codex":
+            from .providers.codex_provider import probe_codex
+            result = probe_codex(token, model=chosen_model, base_url=str(provider.get("base") or ""), timeout=timeout)
+        elif pid == "copilot":
+            from .providers.copilot_provider import probe_copilot
+            result = probe_copilot(token, model=chosen_model, base_url=str(provider.get("base") or ""), timeout=timeout)
+        elif api_mode == "chat_completions":
+            from .providers.openai_compat import probe_openai_compat
+            result = probe_openai_compat(token, model=chosen_model, base_url=str(provider.get("base") or ""), timeout=timeout)
+        else:
+            return {
+                "ok": False,
+                "provider_id": pid,
+                "model": chosen_model,
+                "error": f"probe_not_supported_for_{api_mode or 'provider'}",
+                "hints": ["use model auth probe for OAuth providers, or run a normal chat turn after configuration"],
+            }
+    except Exception as exc:  # noqa: BLE001 - provider modules normalize many transport exceptions differently.
+        return {
+            "ok": False,
+            "provider_id": pid,
+            "model": chosen_model,
+            "error": str(exc),
+            "hints": _probe_hints(pid, provider),
+        }
+    return {"ok": True, "provider_id": pid, "model": result.get("model", chosen_model), "result": result, "hints": []}
+
+
+def _probe_hints(pid: str, provider: dict[str, Any]) -> list[str]:
+    if pid == "openai-codex":
+        return ["refresh Codex OAuth token", "confirm the account can access the selected Codex model"]
+    if pid == "google-gemini-cli":
+        return ["refresh Google OAuth token", "set a valid GCP project with `ivyea model auth google-gemini-cli --project <id>`"]
+    if pid == "copilot":
+        return ["classic ghp_* tokens are not Copilot API tokens", "run `ivyea model auth copilot --exchange`"]
+    key_env = provider.get("key_env") or "provider API key"
+    return [f"check {key_env}", "refresh the live model catalog and choose a supported model"]

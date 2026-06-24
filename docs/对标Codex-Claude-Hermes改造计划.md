@@ -55,12 +55,14 @@
 - `body_hash/license` 元数据已记录。
 - `ivyea knowledge index` 构建 SQLite FTS5/LIKE 索引。
 - `ivyea knowledge conflicts` 做基础冲突风险审计。
+- `ivyea knowledge watchlist` 提供 Amazon 官方/社区来源观察清单。
+- `ivyea knowledge plan/apply` 先生成 hash + unified diff，确认后才写入用户知识库并重建索引。
 
 ## P5 后续
 
 - 记录摘要版本和来源正文快照。
-- 支持冲突提示：官方规则和社区打法不一致时让用户确认。
-- 后续可选 embedding。
+- 支持更细的冲突提示：官方规则和社区打法不一致时进入知识审核队列。
+- 继续扩大官方知识包覆盖面，并补目录/批量导入。
 
 ## P6 已完成第一版：Amazon 运营闭环
 

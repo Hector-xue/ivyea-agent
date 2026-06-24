@@ -249,6 +249,67 @@ def t_todo_write(args: dict, ctx) -> str:
     return f"已更新计划：{done}/{len(clean)} 完成。" if clean else "计划已清空。"
 
 
+def _task_id(args: dict, ctx) -> str:
+    return str(args.get("task_id") or getattr(ctx, "task_id", "") or "").strip()
+
+
+def t_task_read(args: dict, ctx) -> str:
+    task_id = _task_id(args, ctx)
+    if not task_id:
+        return "未绑定 task_id。请用 ivyea chat --task-id <id>，或在工具参数传 task_id。"
+    try:
+        from . import task_runner
+        return _truncate(task_runner.render(task_runner.load(task_id)))
+    except Exception as e:  # noqa: BLE001
+        return f"读取任务失败：{e}"
+
+
+def t_task_step(args: dict, ctx) -> str:
+    task_id = _task_id(args, ctx)
+    if not task_id:
+        return "未绑定 task_id，无法更新任务步骤。"
+    try:
+        from . import task_runner
+        task = task_runner.update_step(
+            task_id,
+            int(args.get("index") or 1),
+            str(args.get("status") or ""),
+            note=str(args.get("notes") or args.get("note") or ""),
+        )
+        return _truncate(task_runner.render(task))
+    except Exception as e:  # noqa: BLE001
+        return f"更新任务步骤失败：{e}"
+
+
+def t_task_log(args: dict, ctx) -> str:
+    task_id = _task_id(args, ctx)
+    if not task_id:
+        return "未绑定 task_id，无法写入任务日志。"
+    try:
+        from . import task_runner
+        task = task_runner.append_log(
+            task_id,
+            str(args.get("text") or args.get("notes") or ""),
+            kind=str(args.get("kind") or "agent"),
+        )
+        return _truncate(task_runner.render(task))
+    except Exception as e:  # noqa: BLE001
+        return f"写入任务日志失败：{e}"
+
+
+def t_task_resume(args: dict, ctx) -> str:
+    task_id = _task_id(args, ctx)
+    if not task_id:
+        return "未绑定 task_id，无法读取续跑提示。"
+    try:
+        from . import task_runner
+        data = task_runner.resume_payload(task_id)
+        resume = data.get("resume") or {}
+        return _truncate(str(resume.get("prompt") or task_runner.render_resume(data["task"])))
+    except Exception as e:  # noqa: BLE001
+        return f"读取续跑提示失败：{e}"
+
+
 # ── schema + dispatch ────────────────────────────────────────────────────────
 def _fn(name, desc, props, required=()):
     return {"type": "function", "function": {
@@ -279,6 +340,25 @@ GENERAL_TOOL_SCHEMAS = [
             "content": {"type": "string"},
             "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}}}},
         ["todos"]),
+    _fn("task_read", "读取当前绑定的 Ivyea 长任务状态、步骤和最近事件。续跑任务时应先调用。",
+        {"task_id": {"type": "string", "description": "可选；不传则使用当前对话绑定的 task_id"}}),
+    _fn("task_step", "更新当前绑定的 Ivyea 长任务步骤状态。用于执行过程中标记 in_progress/completed/blocked。",
+        {
+            "task_id": {"type": "string", "description": "可选；不传则使用当前对话绑定的 task_id"},
+            "index": {"type": "integer", "description": "步骤序号，从 1 开始"},
+            "status": {"type": "string", "enum": ["pending", "in_progress", "blocked", "completed", "skipped"]},
+            "notes": {"type": "string", "description": "步骤备注"},
+        },
+        ["index", "status"]),
+    _fn("task_log", "向当前绑定的 Ivyea 长任务追加执行日志或结论。",
+        {
+            "task_id": {"type": "string", "description": "可选；不传则使用当前对话绑定的 task_id"},
+            "text": {"type": "string"},
+            "kind": {"type": "string", "description": "日志类型，默认 agent"},
+        },
+        ["text"]),
+    _fn("task_resume", "读取当前绑定的 Ivyea 长任务结构化续跑提示。",
+        {"task_id": {"type": "string", "description": "可选；不传则使用当前对话绑定的 task_id"}}),
 ]
 
 GENERAL_DISPATCH = {
@@ -287,4 +367,8 @@ GENERAL_DISPATCH = {
     "run_python": t_run_python, "run_command": t_run_command,
     "web_fetch": t_web_fetch, "web_search": t_web_search,
     "todo_write": t_todo_write,
+    "task_read": t_task_read,
+    "task_step": t_task_step,
+    "task_log": t_task_log,
+    "task_resume": t_task_resume,
 }

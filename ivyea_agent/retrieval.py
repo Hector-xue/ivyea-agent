@@ -61,8 +61,9 @@ def search(query: str, *, limit: int = 8, sources: list[str] | tuple[str, ...] |
 
     if "knowledge" in wanted:
         hits.extend(_knowledge_hits(q, lim))
-        hits.extend(retrieval_index.search(q, max(3, min(lim, 8))))
         hits.extend(_knowledge_vector_hits(q, lim))
+    if any(s in wanted for s in ("knowledge", "memory")):
+        hits.extend(retrieval_index.search(q, max(3, min(lim, 8)), sources=wanted))
     if "memory" in wanted:
         hits.extend(_memory_hits(q, lim))
 
@@ -84,6 +85,11 @@ def index_status() -> dict[str, Any]:
 def rebuild_index() -> dict[str, Any]:
     """Rebuild the persisted local retrieval index."""
     return retrieval_index.rebuild()
+
+
+def sync_index() -> dict[str, Any]:
+    """Rebuild the persisted local retrieval index only when inputs changed."""
+    return retrieval_index.sync()
 
 
 def embeddings_status() -> dict[str, Any]:
@@ -181,9 +187,11 @@ def _memory_hits(query: str, limit: int) -> list[dict[str, Any]]:
     hits = []
     for i, row in enumerate(rows, start=1):
         text = str(row.get("text") or "")
+        rowid = row.get("rowid")
+        hit_id = f"memory:{rowid}" if rowid else f"memory:{int(row.get('ts') or 0)}:{i}"
         hits.append({
             "source": "memory",
-            "id": f"memory:{int(row.get('ts') or 0)}:{i}",
+            "id": hit_id,
             "title": row.get("asin") or "memory",
             "snippet": text[:500],
             "score": _memory_score(query, text, i),
@@ -220,7 +228,11 @@ def _memory_term_search(query: str, limit: int) -> list[dict[str, Any]]:
 def _dedupe_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: dict[tuple[str, str], dict[str, Any]] = {}
     for hit in hits:
-        key = (str(hit.get("source", "")), str(hit.get("id", "")))
+        source = str(hit.get("source", ""))
+        if source == "knowledge_index":
+            key = ("knowledge_index", str(hit.get("source_id") or hit.get("id", "")))
+        else:
+            key = (source, str(hit.get("id", "")))
         existing = rows.get(key)
         if not existing or float(hit.get("score") or 0) > float(existing.get("score") or 0):
             if existing and existing.get("match") and not hit.get("match"):

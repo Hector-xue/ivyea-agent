@@ -52,6 +52,7 @@ def status() -> dict[str, Any]:
     allow_download = bool(config.get_setting("retrieval_embedding_allow_download", False))
     package_available = importlib.util.find_spec("sentence_transformers") is not None
     path_exists = bool(model_path and Path(model_path).expanduser().exists())
+    local_candidates = _local_model_candidates()
 
     semantic_requested = backend == SENTENCE_BACKEND
     semantic_ready = semantic_requested and package_available and (path_exists or allow_download)
@@ -60,6 +61,8 @@ def status() -> dict[str, Any]:
         fallback_reason = "sentence-transformers is not installed"
     elif semantic_requested and not path_exists and not allow_download:
         fallback_reason = "model path is not configured and auto-download is disabled"
+        if local_candidates:
+            fallback_reason += "; local model candidates are available"
 
     return {
         "configured_backend": backend,
@@ -69,15 +72,21 @@ def status() -> dict[str, Any]:
         "model": model,
         "model_path": model_path,
         "model_path_exists": path_exists,
+        "local_model_dir": str(_local_model_root()),
+        "local_model_candidates": local_candidates,
+        "offline_model_available": bool(local_candidates),
         "allow_download": allow_download,
         "package_available": package_available,
         "fallback_reason": fallback_reason,
         "external_dependency": semantic_ready,
         "offline_safe": not semantic_ready,
         "probe_required_for_dense": semantic_ready,
-        "cache_hint": "pre-download the sentence-transformers model into retrieval_embedding_model_path for offline use",
+        "cache_hint": "pre-download the sentence-transformers model into retrieval_embedding_model_path or ~/.ivyea/models/embedding for offline use",
         "install_hint": "python -m pip install 'ivyea-agent[semantic]'"
-        if semantic_requested and not package_available else "",
+        if semantic_requested and not package_available else (
+            "run `ivyea retrieval embeddings --backend sentence-transformers --model-path <candidate> --no-download`"
+            if semantic_requested and local_candidates and not path_exists and not allow_download else ""
+        ),
     }
 
 
@@ -196,6 +205,22 @@ def _normal_backend(value: str) -> str:
     if raw in ("sentence", "sentence-transformer", "sentence-transformers", "semantic"):
         return SENTENCE_BACKEND
     return "hash"
+
+
+def _local_model_root() -> Path:
+    return config.IVYEA_DIR / "models" / "embedding"
+
+
+def _local_model_candidates() -> list[dict[str, str]]:
+    root = _local_model_root()
+    if not root.exists():
+        return []
+    rows = []
+    for path in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+        if not path.is_dir():
+            continue
+        rows.append({"name": path.name, "path": str(path)})
+    return rows
 
 
 def _expand_query(text: str) -> str:

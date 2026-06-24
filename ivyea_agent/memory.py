@@ -102,7 +102,7 @@ def recent_runs(asin: str = "", limit: int = 5) -> list[dict[str, Any]]:
 
 
 def _like_search(conn, query: str, limit: int):
-    return conn.execute("SELECT text, asin, ts FROM search_fts WHERE text LIKE ? "
+    return conn.execute("SELECT rowid, text, asin, ts FROM search_fts WHERE text LIKE ? "
                         "ORDER BY ts DESC LIMIT ?", (f"%{query}%", limit)).fetchall()
 
 
@@ -113,12 +113,24 @@ def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
     rows = []
     try:
         if _FTS_OK:
-            rows = conn.execute("SELECT text, asin, ts FROM search_fts WHERE search_fts MATCH ? "
+            rows = conn.execute("SELECT rowid, text, asin, ts FROM search_fts WHERE search_fts MATCH ? "
                                 "ORDER BY rank LIMIT ?", (query, limit)).fetchall()
         if not rows:
             rows = _like_search(conn, query, limit)
     except Exception:
         rows = _like_search(conn, query, limit)
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def index_rows(limit: int = 5000) -> list[dict[str, Any]]:
+    """Return memory search rows for the persistent retrieval index."""
+    lim = max(1, min(int(limit or 5000), 50000))
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT rowid, text, asin, ts FROM search_fts ORDER BY ts DESC LIMIT ?",
+        (lim,),
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

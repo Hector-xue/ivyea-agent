@@ -167,4 +167,8 @@ def test_run_turn_stream_limit_updates_bound_task(ivyea_home, tmp_path, monkeypa
     saved = task_runner.load(task["id"])
     assert saved["status"] == "blocked"
     assert saved["steps"][0]["status"] == "blocked"
+    assert saved["resume"]["reason"] == "tool_step_limit"
+    assert saved["resume"]["state"]["max_steps"] == 1
+    assert saved["resume"]["state"]["tool_calls"] == 1
+    assert "不要重复上一轮已经成功的工具调用" in saved["resume"]["prompt"]
     assert any(ev["kind"] == "interrupted" for ev in saved["events"])

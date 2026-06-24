@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import threading
 import urllib.error
 import urllib.request
@@ -25,22 +26,47 @@ def test_retrieval_combines_knowledge_and_memory(ivyea_home):
 
 
 def test_retrieval_index_rebuild_and_status(ivyea_home):
-    from ivyea_agent import retrieval, retrieval_index
+    from ivyea_agent import memory, retrieval, retrieval_index
+
+    memory.remember("Prime Day 前品牌词预算必须保护，不能误否。", asin="B0MEM")
 
     rebuilt = retrieval.rebuild_index()
     assert rebuilt["ok"] is True
     assert rebuilt["chunks"] > 0
     assert rebuilt["knowledge_cards"] >= 1
+    assert rebuilt["memory_chunks"] >= 1
+    assert rebuilt["sources"]["memory"] >= 1
 
     status = retrieval_index.status()
     assert status["enabled"] is True
     assert status["backend"] == "local_hash_embedding_v1"
     assert status["chunks"] == rebuilt["chunks"]
+    assert status["memory_chunks"] == rebuilt["memory_chunks"]
+    assert status["needs_rebuild"] is False
+    assert status["source_fingerprint"] == status["indexed_fingerprint"]
 
     hits = retrieval_index.search("主图 转化", limit=3)
     assert hits
     assert hits[0]["source"] == "knowledge_index"
     assert hits[0]["match"] == "local_hash_embedding_v1"
+
+    memory_hits = retrieval_index.search("Prime Day 品牌词预算", limit=3, sources=["memory"])
+    assert memory_hits
+    assert memory_hits[0]["source"] == "memory"
+    assert memory_hits[0]["id"].startswith("memory:")
+
+    knowledge_only = retrieval_index.search("Prime Day 品牌词预算", limit=3, sources=["knowledge"])
+    assert all(h["source"] != "memory" for h in knowledge_only)
+
+    memory.remember("新增记忆后索引应提示需要同步。", asin="B0SYNC")
+    stale = retrieval_index.status()
+    assert stale["needs_rebuild"] is True
+    synced = retrieval.sync_index()
+    assert synced["ok"] is True
+    assert synced["changed"] is True
+    fresh = retrieval.sync_index()
+    assert fresh["ok"] is True
+    assert fresh["changed"] is False
 
 
 def test_retrieval_embeddings_status_and_config(ivyea_home):
@@ -51,6 +77,11 @@ def test_retrieval_embeddings_status_and_config(ivyea_home):
     assert default["active_backend"] == "local_hash_embedding_v1"
     assert default["semantic_enabled"] is False
     assert default["offline_safe"] is True
+    local_model = ivyea_home / "models" / "embedding" / "bge-small"
+    local_model.mkdir(parents=True)
+    with_candidate = retrieval.embeddings_status()
+    assert with_candidate["offline_model_available"] is True
+    assert with_candidate["local_model_candidates"][0]["name"] == "bge-small"
 
     semantic = retrieval.configure_embeddings(
         backend="sentence-transformers",
@@ -117,9 +148,15 @@ def test_retrieval_cli_outputs_json(ivyea_home, capsys):
     assert indexed["ok"] is True
     assert indexed["chunks"] > 0
 
+    assert main(["retrieval", "sync", "--json"]) == 0
+    synced = json.loads(capsys.readouterr().out)
+    assert synced["ok"] is True
+    assert synced["changed"] is False
+
     assert main(["retrieval", "status", "--json"]) == 0
     status = json.loads(capsys.readouterr().out)
     assert status["index"]["backend"] == "local_hash_embedding_v1"
+    assert status["index"]["needs_rebuild"] is False
 
     assert main(["retrieval", "search", "否词", "--limit", "3", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
@@ -161,6 +198,8 @@ def test_service_health_shape_without_socket(ivyea_home):
     assert data["version"]
     assert data["retrieval"]["local"] is True
     assert "key_status" in data["model"]
+    assert data["model"]["capabilities"]["chat"] is True
+    assert "badges" in data["model"]
 
     manifest = service.manifest()
     assert manifest["api_version"] == "v1"
@@ -175,8 +214,14 @@ def test_service_health_shape_without_socket(ivyea_home):
     assert manifest["mcp"]["read_only"] is True
     assert any(e["path"] == "/v1/openapi.json" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/mcp/self-config" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/model/providers" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/model/providers/{id}/models" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/model/providers/{id}/probe" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/system/status" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/system/doctor" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/system/bootstrap" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/system/service/status" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/system/service/start" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/chat" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/chat/stream" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/chat/sessions" for e in manifest["endpoints"])
@@ -184,7 +229,14 @@ def test_service_health_shape_without_socket(ivyea_home):
     assert any(e["path"] == "/v1/skills" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/skills/search" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/knowledge/cards" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/knowledge/files" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/knowledge/upload" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/knowledge/uploads/apply" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/knowledge/watchlist" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/knowledge/update/draft" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/knowledge/update/apply" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/knowledge/audit" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/knowledge/sources" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/knowledge/conflicts" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/knowledge/rebuild" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/knowledge/cards/{id}" for e in manifest["endpoints"])
@@ -194,6 +246,8 @@ def test_service_health_shape_without_socket(ivyea_home):
     assert any(e["path"] == "/v1/retrieval/search" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/retrieval/index" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/tasks" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/tasks/{id}/resume" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/tasks/{id}/continue" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/traces" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/traces/stats" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/workspace/index" for e in manifest["endpoints"])
@@ -201,6 +255,7 @@ def test_service_health_shape_without_socket(ivyea_home):
     assert any(e["path"] == "/v1/workspace/impact" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/code/plan" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/code/context" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/code/bundle" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/code/repair" for e in manifest["endpoints"])
 
     spec = service.openapi_spec()
@@ -208,22 +263,53 @@ def test_service_health_shape_without_socket(ivyea_home):
     assert spec["info"]["title"] == "Ivyea Agent Local API"
     assert "/v1/chat" in spec["paths"]
     assert "/v1/chat/stream" in spec["paths"]
+    assert "/v1/model/providers" in spec["paths"]
+    assert "/v1/model/providers/{id}/models" in spec["paths"]
+    assert "/v1/model/providers/{id}/probe" in spec["paths"]
     assert "/v1/mcp/self-config" in spec["paths"]
+    assert "/v1/system/bootstrap" in spec["paths"]
+    assert "/v1/system/service/status" in spec["paths"]
+    assert "/v1/system/service/start" in spec["paths"]
     assert "/v1/skills/search" in spec["paths"]
     assert "/v1/knowledge/audit" in spec["paths"]
+    assert "/v1/knowledge/sources" in spec["paths"]
+    assert "/v1/knowledge/import-directory" in spec["paths"]
     assert "/v1/knowledge/rebuild" in spec["paths"]
     assert "/v1/workspace/index" in spec["paths"]
     assert "/v1/code/plan" in spec["paths"]
+    assert "/v1/code/bundle" in spec["paths"]
     assert "/v1/traces/stats" in spec["paths"]
+    assert "/v1/tasks/{id}/resume" in spec["paths"]
+    assert "/v1/tasks/{id}/continue" in spec["paths"]
 
 
-def test_service_task_api_helpers(ivyea_home):
+def test_service_task_api_helpers(ivyea_home, monkeypatch):
     from ivyea_agent import service
 
     mcp = service.mcp_self_config()
     assert mcp["ok"] is True
     assert mcp["mcp"]["transport"] == "stdio"
     assert mcp["mcp"]["read_only"] is True
+
+    matrix = service.model_providers()
+    assert matrix["ok"] is True
+    assert any(row["id"] == "openai-codex" for row in matrix["providers"])
+    assert any("capabilities" in row for row in matrix["providers"])
+
+    monkeypatch.setattr(service.models, "provider_model_catalog", lambda provider, **kwargs: {
+        "ok": True,
+        "provider_id": provider["id"],
+        "models": ["live-or-cache"],
+        "source": "cache",
+    })
+    catalog = service.model_provider_catalog("deepseek", refresh=False)
+    assert catalog["ok"] is True
+    assert catalog["catalog"]["models"]
+
+    monkeypatch.setattr(service, "_provider_secret", lambda provider, payload_key="": "")
+    missing_probe = service.model_provider_probe("deepseek", {"model": "deepseek-chat", "api_key": ""})
+    assert missing_probe["ok"] is False
+    assert missing_probe["probe"]["error"] == "credential_missing"
 
     created = service.task_create({"title": "Embed task", "steps": ["inspect", "patch"], "notes": "local"})
     task_id = created["task"]["id"]
@@ -243,6 +329,10 @@ def test_service_task_api_helpers(ivyea_home):
 
     detail = service.task_detail(task_id)
     assert detail["task"]["id"] == task_id
+
+    resume = service.task_resume(task_id)
+    assert resume["ok"] is True
+    assert "Embed task" in resume["resume"]["prompt"]
 
 
 def test_service_trace_api_helpers(ivyea_home):
@@ -271,6 +361,19 @@ def test_service_system_helpers(ivyea_home):
     doctor = service.system_doctor()
     assert "checks" in doctor
     assert any(check["name"] == "retrieval embeddings" for check in doctor["checks"])
+
+    bootstrap = service.system_bootstrap()
+    assert bootstrap["name"] == "ivyea-agent"
+    assert bootstrap["urls"]["manifest"].endswith("/v1/manifest")
+    assert bootstrap["mcp"]["args"] == ["mcp", "serve"]
+
+    svc_status = service.system_service_status({"probe": False})
+    assert svc_status["ok"] is True
+    assert "log_file" in svc_status["service"]
+
+    svc_logs = service.system_service_logs(lines=5)
+    assert svc_logs["ok"] is True
+    assert "logs" in svc_logs
 
 
 def test_service_skill_and_knowledge_helpers(ivyea_home):
@@ -308,6 +411,83 @@ def test_service_skill_and_knowledge_helpers(ivyea_home):
     assert audit["ok"] is True
     assert audit["summary"]["user_cards"] >= 1
     assert any(row["id"] == "user.service-note" for row in audit["cards"])
+
+    sources = service.knowledge_sources()
+    assert sources["ok"] is True
+    assert sources["summary"]["sources"] >= 1
+    assert any(row["source_type"] == "user" for row in sources["sources"])
+
+    watchlist = service.knowledge_watchlist()
+    assert watchlist["ok"] is True
+    assert watchlist["summary"]["official_sources"] >= 1
+    assert any(row["id"] == "zhiwubuyan" and row["review_required"] for row in watchlist["sources"])
+
+    draft = service.knowledge_update_draft({
+        "id": "user.service-update",
+        "title": "服务知识更新",
+        "body": "服务层知识更新先生成 diff，再确认应用；广告预算判断要结合搜索词、位置、库存和 Listing 承接。",
+        "source_url": "https://advertising.amazon.com/solutions/products/sponsored-products",
+        "source_type": "official",
+        "tags": ["budget", "listing"],
+    })
+    assert draft["ok"] is True
+    assert draft["draft"]["action"] == "create"
+    assert "body" not in draft["draft"]
+    assert "+服务层知识更新" in draft["draft"]["diff"]
+
+    blocked = service.knowledge_update_apply({
+        "id": "user.service-update",
+        "title": "服务知识更新",
+        "body": "服务层知识更新先生成 diff，再确认应用；广告预算判断要结合搜索词、位置、库存和 Listing 承接。",
+        "source_url": "https://advertising.amazon.com/solutions/products/sponsored-products",
+        "source_type": "official",
+        "tags": ["budget", "listing"],
+    })
+    assert blocked["ok"] is False
+    assert blocked["result"]["error"] == "confirmation_required"
+
+    applied = service.knowledge_update_apply({
+        "id": "user.service-update",
+        "title": "服务知识更新",
+        "body": "服务层知识更新先生成 diff，再确认应用；广告预算判断要结合搜索词、位置、库存和 Listing 承接。",
+        "source_url": "https://advertising.amazon.com/solutions/products/sponsored-products",
+        "source_type": "official",
+        "tags": ["budget", "listing"],
+        "confirm": True,
+        "rebuild": False,
+    })
+    assert applied["ok"] is True
+    assert applied["result"]["card"]["id"] == "user.service-update"
+
+    uploaded = service.knowledge_upload({
+        "filename": "ops-upload.md",
+        "content_base64": base64.b64encode("Ops 上传知识：广告动作要先看库存、Listing 和搜索词质量。".encode("utf-8")).decode("ascii"),
+        "title": "Ops 上传知识",
+        "id": "user.ops-upload",
+        "tags": ["ops", "ads"],
+        "rebuild": False,
+    })
+    assert uploaded["ok"] is True
+    assert uploaded["upload"]["id"]
+    assert uploaded["draft"]["card_id"] == "user.ops-upload"
+    assert "body" not in uploaded["draft"]
+
+    upload_list = service.knowledge_uploads()
+    assert any(row["id"] == uploaded["upload"]["id"] for row in upload_list["uploads"])
+
+    files = service.knowledge_files()
+    assert any(row["path"] == uploaded["upload"]["extracted_path"] for row in files["uploads"])
+
+    read = service.knowledge_file_read(uploaded["upload"]["extracted_path"])
+    assert "Ops 上传知识" in read["file"]["content"]
+
+    upload_blocked = service.knowledge_upload_apply({"upload_id": uploaded["upload"]["id"]})
+    assert upload_blocked["ok"] is False
+    assert upload_blocked["result"]["error"] == "confirmation_required"
+
+    upload_applied = service.knowledge_upload_apply({"upload_id": uploaded["upload"]["id"], "confirm": True, "rebuild": False})
+    assert upload_applied["ok"] is True
+    assert upload_applied["result"]["card"]["id"] == "user.ops-upload"
 
     conflicts = service.knowledge_conflicts()
     assert conflicts["ok"] is True
@@ -363,6 +543,32 @@ class _ServiceStreamProvider:
         yield {"type": "final", "content": "流式完成", "tool_calls": [], "usage": {"prompt_tokens": 3}}
 
 
+class _ServiceTaskContinueProvider:
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages, tools=None, temperature=0.3, timeout=120.0):
+        self.calls += 1
+        if self.calls == 1:
+            assert "继续 Ivyea 长任务" in messages[-1]["content"]
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "task-read", "name": "task_read", "arguments": {}}],
+            }
+        if self.calls == 2:
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "task-step",
+                    "name": "task_step",
+                    "arguments": {"index": 1, "status": "completed", "notes": "continued"},
+                }],
+            }
+        return {"role": "assistant", "content": "任务已继续并更新步骤", "tool_calls": []}
+
+
 def test_service_chat_run_with_fake_provider(ivyea_home):
     from ivyea_agent import service
 
@@ -386,6 +592,32 @@ def test_service_chat_run_with_tool_event(ivyea_home):
     assert any(m["role"] == "tool" for m in result["messages"])
 
 
+def test_service_model_configure_from_ops_slot(ivyea_home):
+    from ivyea_agent import config, service
+
+    result = service.model_configure({
+        "provider": "openrouter",
+        "model": "anthropic/claude-sonnet-4.6",
+        "api_key": "sk-router",
+    })
+
+    assert result["ok"] is True
+    model = config.get_model_config()
+    assert model["provider_id"] == "openrouter"
+    assert model["model"] == "anthropic/claude-sonnet-4.6"
+    assert config.get_active_key() == "sk-router"
+    assert "sk-router" not in str(result)
+
+
+def test_ops_bridge_tools_fail_closed_without_context(ivyea_home):
+    from ivyea_agent import agent_tools
+
+    names = {t["function"]["name"] for t in agent_tools.TOOL_SCHEMAS}
+    assert "ivyea_ops_list_tools" in names
+    out = agent_tools.dispatch("ivyea_ops_list_tools", {}, agent_tools.ToolContext())
+    assert "ops_bridge_unavailable" in out
+
+
 def test_service_chat_stream_with_fake_provider(ivyea_home):
     from ivyea_agent import service
 
@@ -401,6 +633,48 @@ def test_service_chat_stream_with_fake_provider(ivyea_home):
     assert events[0][0] == "start"
     assert [e for e, _ in events].count("token") >= 2
     assert events[-1][0] == "final"
+
+
+def test_service_task_continue_runs_agent_and_updates_task(ivyea_home):
+    from ivyea_agent import service, task_runner
+
+    task = task_runner.create("Continue via service", steps=["inspect", "finish"])
+    task_runner.start_next(task["id"])
+    task_runner.record_interruption(
+        task["id"],
+        "tool_step_limit",
+        "stop",
+        state={"session_id": "svc-resume", "max_steps": 1, "tool_calls": 1},
+    )
+
+    result = service.task_continue(
+        task["id"],
+        {"max_steps": 5, "persist": False},
+        provider=_ServiceTaskContinueProvider(),
+    )
+
+    assert result["ok"] is True
+    assert result["chat"]["text"] == "任务已继续并更新步骤"
+    assert result["task"]["steps"][0]["status"] == "completed"
+    assert any(m["role"] == "tool" for m in result["chat"]["messages"])
+
+
+def test_service_task_continue_does_not_unblock_without_model(ivyea_home, monkeypatch):
+    from ivyea_agent import service, task_runner
+
+    monkeypatch.setattr(service, "_model_requires_key", lambda settings: True)
+    monkeypatch.setattr(service.config, "get_active_key", lambda: "")
+    task = task_runner.create("No model task", steps=["inspect"])
+    task_runner.start_next(task["id"])
+    task_runner.record_interruption(task["id"], "tool_step_limit", "stop")
+
+    result = service.task_continue(task["id"], {"persist": False})
+
+    assert result["ok"] is False
+    assert result["error"] == "model_not_configured"
+    saved = task_runner.load(task["id"])
+    assert saved["status"] == "blocked"
+    assert saved["steps"][0]["status"] == "blocked"
 
 
 def test_service_chat_sessions_persist_and_resume(ivyea_home):
@@ -447,6 +721,21 @@ def test_local_service_health_and_retrieval(ivyea_home, monkeypatch):
             spec = json.loads(resp.read().decode("utf-8"))
         assert spec["openapi"] == "3.1.0"
         assert "/v1/chat/stream" in spec["paths"]
+        assert "/v1/model/providers" in spec["paths"]
+
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/model/providers", timeout=5) as resp:
+            provider_matrix = json.loads(resp.read().decode("utf-8"))
+        assert provider_matrix["ok"] is True
+        assert any(row["id"] == "openai-codex" for row in provider_matrix["providers"])
+
+        monkeypatch.setattr(service, "model_provider_catalog", lambda provider_id, refresh=False: {
+            "ok": True,
+            "catalog": {"provider_id": provider_id, "models": ["cached-model"], "source": "cache"},
+        })
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/model/providers/deepseek/models", timeout=5) as resp:
+            provider_catalog = json.loads(resp.read().decode("utf-8"))
+        assert provider_catalog["ok"] is True
+        assert provider_catalog["catalog"]["models"] == ["cached-model"]
 
         with urllib.request.urlopen(f"http://{host}:{port}/v1/mcp/self-config", timeout=5) as resp:
             mcp_config = json.loads(resp.read().decode("utf-8"))
@@ -499,6 +788,21 @@ def test_local_service_health_and_retrieval(ivyea_home, monkeypatch):
             system_doctor = json.loads(resp.read().decode("utf-8"))
         assert "checks" in system_doctor
 
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/system/bootstrap", timeout=5) as resp:
+            bootstrap = json.loads(resp.read().decode("utf-8"))
+        assert bootstrap["ok"] is True
+        assert bootstrap["urls"]["manifest"].endswith("/v1/manifest")
+
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/system/service/status?host={host}&port={port}", timeout=5) as resp:
+            service_status = json.loads(resp.read().decode("utf-8"))
+        assert service_status["ok"] is True
+        assert service_status["service"]["health_running"] is True
+
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/system/service/logs?lines=5", timeout=5) as resp:
+            service_logs = json.loads(resp.read().decode("utf-8"))
+        assert service_logs["ok"] is True
+        assert "logs" in service_logs
+
         req = urllib.request.Request(
             f"http://{host}:{port}/v1/chat/sessions",
             data=json.dumps({"title": "http session"}).encode("utf-8"),
@@ -550,6 +854,11 @@ def test_local_service_health_and_retrieval(ivyea_home, monkeypatch):
         assert audit["ok"] is True
         assert any(row["id"] == "user.http-note" for row in audit["cards"])
 
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/knowledge/sources", timeout=5) as resp:
+            sources = json.loads(resp.read().decode("utf-8"))
+        assert sources["ok"] is True
+        assert sources["summary"]["sources"] >= 1
+
         with urllib.request.urlopen(f"http://{host}:{port}/v1/knowledge/conflicts", timeout=5) as resp:
             conflicts = json.loads(resp.read().decode("utf-8"))
         assert conflicts["ok"] is True
@@ -578,6 +887,79 @@ def test_local_service_health_and_retrieval(ivyea_home, monkeypatch):
         assert trace_stats["ok"] is True
         assert trace_stats["stats"]["events"] >= 1
 
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/knowledge/watchlist", timeout=5) as resp:
+            watchlist = json.loads(resp.read().decode("utf-8"))
+        assert watchlist["ok"] is True
+        assert watchlist["summary"]["official_sources"] >= 1
+
+        req = urllib.request.Request(
+            f"http://{host}:{port}/v1/knowledge/update/draft",
+            data=json.dumps({
+                "id": "user.http-knowledge-update",
+                "title": "HTTP knowledge update",
+                "body": "HTTP 服务知识更新先走 draft，再走 confirm apply，避免社区和官方知识未经审核直接污染索引。",
+                "source_url": "https://advertising.amazon.com/solutions/products/sponsored-products",
+                "source_type": "official",
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            draft = json.loads(resp.read().decode("utf-8"))
+        assert draft["ok"] is True
+        assert draft["draft"]["action"] == "create"
+
+        req = urllib.request.Request(
+            f"http://{host}:{port}/v1/knowledge/update/apply",
+            data=json.dumps({
+                "id": "user.http-knowledge-update",
+                "title": "HTTP knowledge update",
+                "body": "HTTP 服务知识更新先走 draft，再走 confirm apply，避免社区和官方知识未经审核直接污染索引。",
+                "source_url": "https://advertising.amazon.com/solutions/products/sponsored-products",
+                "source_type": "official",
+                "confirm": True,
+                "rebuild": False,
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            applied = json.loads(resp.read().decode("utf-8"))
+        assert applied["ok"] is True
+        assert applied["result"]["card"]["id"] == "user.http-knowledge-update"
+
+        req = urllib.request.Request(
+            f"http://{host}:{port}/v1/tasks",
+            data=json.dumps({"title": "HTTP task", "steps": ["inspect", "patch"]}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            task_created = json.loads(resp.read().decode("utf-8"))
+        assert task_created["ok"] is True
+        task_id = task_created["task"]["id"]
+
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/tasks/{task_id}/resume", timeout=5) as resp:
+            task_resume = json.loads(resp.read().decode("utf-8"))
+        assert task_resume["ok"] is True
+        assert "HTTP task" in task_resume["resume"]["prompt"]
+
+        monkeypatch.setattr(
+            service,
+            "task_continue",
+            lambda task_id, body: {"ok": True, "task": {"id": task_id}, "chat": {"text": body.get("message")}},
+        )
+        req = urllib.request.Request(
+            f"http://{host}:{port}/v1/tasks/{task_id}/continue",
+            data=json.dumps({"message": "go"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            continued = json.loads(resp.read().decode("utf-8"))
+        assert continued["ok"] is True
+        assert continued["task"]["id"] == task_id
+
         req = urllib.request.Request(
             f"http://{host}:{port}/v1/retrieval/index",
             data=b"{}",
@@ -588,6 +970,17 @@ def test_local_service_health_and_retrieval(ivyea_home, monkeypatch):
             indexed = json.loads(resp.read().decode("utf-8"))
         assert indexed["ok"] is True
         assert indexed["chunks"] > 0
+
+        req = urllib.request.Request(
+            f"http://{host}:{port}/v1/retrieval/index",
+            data=json.dumps({"sync": True}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            synced = json.loads(resp.read().decode("utf-8"))
+        assert synced["ok"] is True
+        assert synced["changed"] is False
 
         with urllib.request.urlopen(f"http://{host}:{port}/v1/retrieval/embeddings", timeout=5) as resp:
             embeddings = json.loads(resp.read().decode("utf-8"))
@@ -620,6 +1013,7 @@ def test_local_service_health_and_retrieval(ivyea_home, monkeypatch):
             status = json.loads(resp.read().decode("utf-8"))
         assert status["ok"] is True
         assert status["index"]["enabled"] is True
+        assert status["index"]["needs_rebuild"] is False
     finally:
         server.shutdown()
         server.server_close()

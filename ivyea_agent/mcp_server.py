@@ -128,6 +128,15 @@ TOOL_DEFS: dict[str, dict[str, Any]] = {
             "limit": {"type": "integer", "minimum": 1, "maximum": 30},
         }, ["goal"]),
     },
+    "ivyea_code_bundle": {
+        "description": "Build a read-only multi-round code task bundle.",
+        "inputSchema": _schema({
+            "root": {"type": "string"},
+            "goal": {"type": "string"},
+            "test_output": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 30},
+        }, ["goal"]),
+    },
     "ivyea_code_repair": {
         "description": "Parse test output and generate a read-only repair plan.",
         "inputSchema": _schema({
@@ -177,6 +186,7 @@ def call_tool(name: str, arguments: JsonDict | None = None) -> JsonDict:
         "ivyea_workspace_inspect": service.workspace_inspect,
         "ivyea_code_plan": service.code_plan,
         "ivyea_code_context": service.code_context,
+        "ivyea_code_bundle": service.code_bundle,
         "ivyea_code_repair": service.code_repair,
     }
     fn = dispatch.get(name)

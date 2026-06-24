@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from argparse import Namespace
+
 from ivyea_agent import task_runner
 
 
@@ -60,8 +62,49 @@ def test_record_interruption_blocks_active_step(tmp_path, monkeypatch):
     monkeypatch.setattr(task_runner, "TASK_DIR", tmp_path / "tasks")
     task = task_runner.create("Long run", steps=["inspect", "patch"])
     task = task_runner.start_next(task["id"])
-    task = task_runner.record_interruption(task["id"], "tool_step_limit", "继续时不要重复")
+    task = task_runner.record_interruption(
+        task["id"],
+        "tool_step_limit",
+        "继续时不要重复",
+        state={"session_id": "sid-1", "turn_id": "turn-1", "max_steps": 2, "tool_calls": 2},
+    )
     assert task["status"] == "blocked"
     assert task["steps"][0]["status"] == "blocked"
     assert "不要重复" in task["steps"][0]["notes"]
+    assert task["resume"]["reason"] == "tool_step_limit"
+    assert task["resume"]["state"]["tool_calls"] == 2
+    assert "上一轮工具调用：2/2" in task["resume"]["prompt"]
+    assert "不要重复上一轮已经成功的工具调用" in task["resume"]["prompt"]
     assert task["events"][-1]["kind"] == "interrupted"
+
+
+def test_resume_payload_for_plain_task(tmp_path, monkeypatch):
+    monkeypatch.setattr(task_runner, "TASK_DIR", tmp_path / "tasks")
+    task = task_runner.create("Continue work", steps=["read", "patch"])
+
+    payload = task_runner.resume_payload(task["id"])
+    assert payload["ok"] is True
+    assert payload["resume"]["next_step"]["title"] == "read"
+    assert "Continue work" in payload["resume"]["prompt"]
+    assert "从上面“下一步”继续" in task_runner.render_resume(task)
+
+
+def test_cli_task_continue_prints_top_level_error(monkeypatch, capsys):
+    from ivyea_agent import cli, service
+
+    monkeypatch.setattr(service, "task_continue", lambda task_id, payload: {
+        "ok": False,
+        "error": "model_not_configured",
+    })
+
+    rc = cli._cmd_task(Namespace(
+        action="continue",
+        id="task-1",
+        message="",
+        notes="",
+        max_steps=2,
+        execute=False,
+    ))
+
+    assert rc == 1
+    assert "model_not_configured" in capsys.readouterr().err

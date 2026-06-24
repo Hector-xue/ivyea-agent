@@ -29,6 +29,7 @@ IvyeaAgent 后续同时承担两个角色：
 
 3. Knowledge Engine
    - 管理内置亚马逊知识、用户知识、来源、license、body hash、更新时间、冲突检测。
+   - 提供来源观察清单、更新草案 diff、确认写入和索引同步，避免论坛经验未经审核污染知识库。
    - 输出必须能带来源和可信度，区分官方、社区经验、用户自有打法。
 
 4. Local Retrieval Engine
@@ -53,6 +54,8 @@ IvyeaAgent 后续同时承担两个角色：
 
 - 扩展内置亚马逊知识包：广告报表、Listing、Review/Q&A、库存利润、竞品类目、账号节奏。
 - 强化来源治理：source manifest、license、hash、retrieved_at、source_url、可信度。
+- 新增 Amazon 来源观察清单，官方来源可作为高置信摘要入口，社区来源默认 review_required。
+- 新增知识更新草案：先生成 hash 和 unified diff，确认后再写入用户知识库并重建索引。
 - 用户知识导入支持目录、网页、Markdown、TXT、CSV 摘要。
 - 检索结果统一返回引用来源，Agent 回复重要事实时必须带来源。
 
@@ -69,9 +72,9 @@ IvyeaAgent 后续同时承担两个角色：
 - 先把现有 `task_runner` 暴露为本地 API：任务列表、详情、创建、启动、步骤更新、状态更新、日志追加。
 - 提供 `/v1/chat` 只读嵌入式 Agent 入口，默认计划模式，返回工具事件和脱敏消息；写操作仍保持禁用。
 - 多轮任务循环：计划 -> 执行 -> 测试/验证 -> 修复 -> 总结。
-- 工具调用预算和中断恢复，避免“工具满了任务跑不完”。
+- 工具调用预算和中断恢复：接近上限提前提示，达到上限时写入会话续跑上下文；绑定 task 时记录结构化 `resume`，包含暂停原因、下一步、工具调用数量和可注入下一轮的续跑 prompt；`task continue` / `/v1/tasks/{id}/continue` 可直接从续跑点跑一轮。
 - 对话压缩摘要写入长期记忆，恢复时可追溯。
-- IvyeaOps 可以显示任务步骤、日志、工具调用、审批记录。
+- IvyeaOps 可以显示任务步骤、日志、工具调用、审批记录，并通过 `/v1/tasks/{id}/resume` 读取续跑点。
 
 ### 阶段 5：部署和运维
 
@@ -82,14 +85,19 @@ IvyeaAgent 后续同时承担两个角色：
 - IvyeaOps 启动时自动检测本地 agent 服务，不存在则引导安装或启动。
 - 发版流程强制同步 README、门户、版本号、离线包。
 
-## 当前第一轮落地点
+## 当前已落地点
 
-本轮先交付：
+本轮已经交付：
 
 - `ivyea_agent.retrieval`：统一本地检索入口。
 - `ivyea_agent.retrieval_index`：持久化本地 chunk 索引，默认不依赖外部模型。
-- `ivyea_agent.retrieval_embeddings`：检索向量后端选择，默认 hash，可选本地 dense embedding。
-- `ivyea serve`：本地 HTTP JSON API。
-- API 测试和检索测试。
+- `ivyea_agent.retrieval_embeddings`：检索向量后端选择，默认 hash，可选本地 dense embedding；离线包可预置 `sentence-transformers` 依赖和模型目录。
+- `ivyea_agent.knowledge`：来源登记、审计、冲突检测、来源观察清单、更新草案 diff、确认写入和索引同步。
+- `ivyea_agent.self_manage`：本地服务 status/start/stop/logs/autostart 模板，给 IvyeaOps 安装页和设置页调用。
+- `ivyea_agent.models`：provider 能力矩阵、实时模型清单、探活诊断，避免“假装切换成功”。
+- `ivyea_agent.code_agent`：代码任务 plan/context/bundle、受控 apply/test/repair loop 和审计记录。
+- `ivyea serve`：本地 HTTP JSON API，manifest/openapi 自动暴露上述能力。
+- IvyeaOps 代理层：bootstrap、manifest、service 管理、模型目录/probe、retrieval、code bundle/apply-loop、knowledge watchlist/draft/apply。
+- API、检索、知识库、离线包、代码闭环和 IvyeaOps 代理测试。
 
 后续所有语义检索、知识库增强、IvyeaOps 集成都挂在这层接口上，避免后面改 IvyeaOps 调用协议。

@@ -83,11 +83,47 @@ exec "$venv_python" -m ivyea_agent.cli "\$@"
 EOF
   chmod +x "$launcher"
 
+  local semantic_info=""
+  if [ -f "$SCRIPT_DIR/semantic-manifest.json" ]; then
+    semantic_info="$("$venv_python" - "$SCRIPT_DIR" <<'PY'
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+manifest = json.loads((root / "semantic-manifest.json").read_text(encoding="utf-8"))
+src = root / manifest["model_dir"]
+dst_root = Path(os.environ.get("IVYEA_EMBEDDING_MODEL_DIR", str(Path.home() / ".ivyea" / "models" / "embedding")))
+dst = dst_root / manifest["name"]
+if not src.is_dir():
+    raise SystemExit(f"bundled embedding model missing: {src}")
+if dst.exists():
+    shutil.rmtree(dst)
+dst.parent.mkdir(parents=True, exist_ok=True)
+shutil.copytree(src, dst)
+print(manifest.get("model") or manifest["name"])
+print(dst)
+PY
+)"
+    local semantic_model
+    local semantic_path
+    semantic_model="$(printf '%s\n' "$semantic_info" | sed -n '1p')"
+    semantic_path="$(printf '%s\n' "$semantic_info" | sed -n '2p')"
+    if [ -n "$semantic_path" ]; then
+      say "配置离线本地语义检索模型：$semantic_model -> $semantic_path"
+      "$launcher" retrieval embeddings --backend sentence-transformers --model "$semantic_model" --model-path "$semantic_path" --no-download --json >/dev/null || true
+    fi
+  fi
+
   say "✓ 离线安装完成。"
   if ! command -v ivyea >/dev/null 2>&1; then
     say "提示：重开终端，或先执行  export PATH=\"$bin_dir:\$PATH\""
   fi
   "$launcher" self doctor || true
+  say "初始化本地检索索引…"
+  "$launcher" retrieval sync --json >/dev/null || true
   say "下一步：  ivyea config   （配置主脑模型/密钥），然后  ivyea chat"
 }
 
@@ -181,4 +217,5 @@ if ! command -v ivyea >/dev/null 2>&1; then
 else
   ivyea self doctor || true
 fi
+ivyea retrieval sync --json >/dev/null 2>&1 || true
 say "下一步：  ivyea config   （配置主脑模型/密钥），然后  ivyea chat"

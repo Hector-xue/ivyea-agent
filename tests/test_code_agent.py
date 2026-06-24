@@ -143,6 +143,31 @@ FAILED tests/test_calc.py::test_add - AssertionError: expected sum
     assert "Focused Tests" in code_agent.render_repair(repair)
 
 
+def test_patch_apply_loop_dry_run_and_execute(tmp_path, monkeypatch):
+    root = _make_project(tmp_path, monkeypatch)
+    spec = {
+        "ops": [{
+            "path": "pkg/calc.py",
+            "old": "    return left + right\n",
+            "new": "    return left + right + 0\n",
+        }]
+    }
+
+    dry = code_agent.patch_apply_loop(spec, root=root, test_command="python -m pytest tests/test_calc.py", execute=False)
+    assert dry["mode"] == "dry-run"
+    assert dry["patch"]["status"] == "valid"
+    assert dry["patch"]["apply"]["applied"] is False
+    assert dry["test_result"] is None
+    assert (root / "pkg" / "calc.py").read_text(encoding="utf-8").endswith("return left + right\n")
+
+    run = code_agent.patch_apply_loop(spec, root=root, test_command="python -m pytest tests/test_calc.py", execute=True)
+    assert run["mode"] == "execute"
+    assert run["patch"]["status"] == "applied"
+    assert run["test_result"]["ok"] is True
+    assert "return left + right + 0" in (root / "pkg" / "calc.py").read_text(encoding="utf-8")
+    assert "Code Run" in code_agent.render_run(run)
+
+
 def test_repair_plan_classifies_import_and_syntax_failures(tmp_path, monkeypatch):
     root = _make_project(tmp_path, monkeypatch)
     output = """
@@ -194,6 +219,22 @@ def test_code_run_loop_dry_run(tmp_path, monkeypatch):
     rows = code_agent.list_runs()
     assert rows and rows[0]["id"] == data["id"]
     assert "Code Runs" in code_agent.render_run_list(rows)
+
+
+def test_code_task_bundle_packages_multiround_context(tmp_path, monkeypatch):
+    root = _make_project(tmp_path, monkeypatch)
+    output = "FAILED tests/test_calc.py::test_add - AssertionError: expected sum"
+
+    data = code_agent.task_bundle("change add behavior", root=root, test_output=output)
+
+    assert data["mode"] == "read-only-task-bundle"
+    assert "pkg/calc.py" in data["plan"]["relevant_files"]
+    assert any(item["name"] == "repair" and item["status"] == "ready" for item in data["phases"])
+    assert data["repair"]["failure_summary"][0]["kind"] == "assertion"
+    assert "继续 Ivyea 代码任务" in data["resume_prompt"]
+    rendered = code_agent.render_bundle(data)
+    assert "Code Task Bundle" in rendered
+    assert "Resume Prompt" in rendered
 
 
 def test_patch_candidate_template_and_validation(tmp_path, monkeypatch):
@@ -298,6 +339,19 @@ def test_review_ready_and_cli_smoke(tmp_path, monkeypatch):
     )
     assert quality.returncode == 0
     assert "Code Quality" in quality.stdout
+
+    bundle = subprocess.run(
+        [sys.executable, "-m", "ivyea_agent", "code", "bundle", "change add behavior", "--root", str(root)],
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "IVYEA_HOME": str(root / ".ivyea-cli")},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert bundle.returncode == 0
+    assert "Code Task Bundle" in bundle.stdout
 
     refs = subprocess.run(
         [sys.executable, "-m", "ivyea_agent", "code", "refs", "add", "--root", str(root)],

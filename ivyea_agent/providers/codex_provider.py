@@ -301,26 +301,24 @@ class CodexProvider(LLMProvider):
 
     def chat(self, messages: list, tools: list | None = None,
              temperature: float = 0.3, timeout: float = 120.0) -> dict:
-        instructions, input_items = self._input(messages)
-        converted_tools = self._tools(tools)
-        last_error: LLMError | None = None
-        for model in _model_candidates(self.model):
-            payload: dict[str, Any] = {"model": model, "input": input_items, "stream": False}
-            if instructions:
-                payload["instructions"] = instructions
-            if converted_tools:
-                payload["tools"] = converted_tools
-                payload["tool_choice"] = "auto"
-            try:
-                data = self._post(payload, timeout)
-            except LLMError as exc:
-                if _unsupported_model_error(exc):
-                    last_error = exc
-                    continue
-                raise
-            self.model = model
-            return self._normalize(data)
-        raise last_error or LLMError("Codex Responses 没有可用模型")
+        text_parts: list[str] = []
+        final: dict[str, Any] | None = None
+        for event in self.stream_chat(messages, tools=tools, temperature=temperature, timeout=timeout):
+            if event.get("type") == "text":
+                text = event.get("text")
+                if isinstance(text, str):
+                    text_parts.append(text)
+            elif event.get("type") == "final":
+                final = event
+        content = str(final.get("content") or "") if final else ""
+        if not content and text_parts:
+            content = "".join(text_parts)
+        return {
+            "role": "assistant",
+            "content": content,
+            "tool_calls": (final or {}).get("tool_calls") or [],
+            "usage": (final or {}).get("usage") or {},
+        }
 
     def stream_chat(self, messages: list, tools: list | None = None,
                     temperature: float = 0.3, timeout: float = 120.0):
@@ -330,7 +328,12 @@ class CodexProvider(LLMProvider):
         converted_tools = self._tools(tools)
         last_error: LLMError | None = None
         for model in _model_candidates(self.model):
-            payload: dict[str, Any] = {"model": model, "input": input_items, "stream": True}
+            payload: dict[str, Any] = {
+                "model": model,
+                "input": input_items,
+                "stream": True,
+                "store": False,
+            }
             if instructions:
                 payload["instructions"] = instructions
             if converted_tools:

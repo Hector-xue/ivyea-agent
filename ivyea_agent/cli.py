@@ -246,12 +246,14 @@ def _render_model_providers() -> str:
         for p in items:
             status = p.get("status", "usable")
             state = models.key_status(p)
+            badges = ",".join(models.capability_badges(p))
             models_preview = ", ".join((p.get("models") or [])[:4]) or "(自填)"
             lines.append(
                 f"  {p['id']:<18} {status:<8} {p.get('auth_type', '-'):<18} "
-                f"{state:<24} {models_preview}"
+                f"{state:<24} {badges:<28} {models_preview}"
             )
         lines.append("")
+    lines.append("能力标签：tools=工具调用，stream=流式，vision=视觉，models=可刷新模型清单，probe=可真实探测，local=本地端点。")
     lines.append("提示：API key / OpenAI-compatible / Claude API / Gemini API / Gemini Code Assist / Bedrock / Copilot / Codex Responses / 本地端点已可用；Qwen OAuth 支持 Qwen CLI 登录导入；Gemini Code Assist 支持 OAuth 登录和 project 保存。")
     return "\n".join(lines).rstrip()
 
@@ -269,6 +271,7 @@ def _render_model_doctor() -> str:
         ("kind", s.get("kind", "-")),
         ("api_mode", s.get("api_mode", "-")),
         ("auth_type", s.get("auth_type", "-")),
+        ("capabilities", ",".join(models.capability_badges(p or s))),
         ("base_url", s.get("base_url", "-")),
         ("key", _model_key_label(s)),
     ]
@@ -1666,6 +1669,45 @@ def _cmd_knowledge(args: argparse.Namespace) -> int:
     if args.action == "audit":
         print(knowledge.render_audit())
         return 0
+    if args.action == "sources":
+        print(knowledge.render_source_registry())
+        return 0
+    if args.action == "watchlist":
+        print(knowledge.render_source_watchlist())
+        return 0
+    if args.action == "plan":
+        if not args.query:
+            print("用法: ivyea knowledge plan <本地Markdown/TXT路径>", file=sys.stderr)
+            return 2
+        draft = knowledge.draft_update_from_file(
+            args.query,
+            title=args.title or "",
+            source_url=args.source_url or "",
+            source_type=args.source_type or "user",
+            confidence=args.confidence or "",
+            tags=args.tags or "",
+            card_id=args.id or "",
+            license=args.license or "user_supplied",
+        )
+        print(knowledge.render_update_draft(draft))
+        return 0
+    if args.action == "apply":
+        if not args.query:
+            print("用法: ivyea knowledge apply <本地Markdown/TXT路径> --confirm", file=sys.stderr)
+            return 2
+        draft = knowledge.draft_update_from_file(
+            args.query,
+            title=args.title or "",
+            source_url=args.source_url or "",
+            source_type=args.source_type or "user",
+            confidence=args.confidence or "",
+            tags=args.tags or "",
+            card_id=args.id or "",
+            license=args.license or "user_supplied",
+        )
+        result = knowledge.apply_update(draft, confirm=bool(args.confirm), rebuild_indexes=not bool(args.no_rebuild))
+        print(knowledge.render_update_apply(result))
+        return 0 if result.get("ok") else 2
     if args.action == "rebuild":
         res = knowledge.rebuild()
         print(f"已重建用户知识索引：{res['user_cards']} 张用户知识卡；清理缺失 {len(res['missing_pruned'])} 张")
@@ -1800,6 +1842,39 @@ def _cmd_self(args: argparse.Namespace) -> int:
         return 0
     if args.action == "doctor":
         print(self_manage.render_doctor(self_manage.install_doctor()))
+        return 0
+    if args.action == "ops-bootstrap":
+        print(self_manage.render_ops_bootstrap(self_manage.ops_bootstrap(host=args.host or "127.0.0.1", port=args.port)))
+        return 0
+    if args.action == "service-status":
+        print(self_manage.render_service_status(self_manage.service_status(host=args.host or "127.0.0.1", port=args.port)))
+        return 0
+    if args.action == "service-start":
+        result = self_manage.service_start(
+            host=args.host or "127.0.0.1",
+            port=args.port,
+            allow_remote=args.allow_remote,
+            api_token=args.api_token or "",
+            wait=not args.no_wait,
+            timeout=args.timeout,
+        )
+        if not result.get("ok"):
+            print(self_manage.render_service_status(result.get("service") or self_manage.service_status(args.host, args.port, probe=False)))
+            print(f"\n启动失败：{result.get('detail') or result.get('error')}")
+            if result.get("logs"):
+                print("\n" + self_manage.render_service_logs(result["logs"]))
+            return 1
+        print(self_manage.render_service_status(result.get("service") or self_manage.service_status(args.host, args.port)))
+        return 0
+    if args.action == "service-stop":
+        result = self_manage.service_stop(timeout=args.timeout, force=args.force)
+        print(self_manage.render_service_status(result.get("service") or self_manage.service_status(probe=False)))
+        return 0 if result.get("ok") else 1
+    if args.action == "service-logs":
+        print(self_manage.render_service_logs(self_manage.service_log_tail(lines=args.lines)))
+        return 0
+    if args.action == "service-autostart":
+        print(self_manage.render_autostart(self_manage.write_autostart(host=args.host or "127.0.0.1", port=args.port)))
         return 0
     if args.action == "backup":
         path = self_manage.backup(args.output)
@@ -2367,6 +2442,31 @@ def _cmd_task(args: argparse.Namespace) -> int:
         if args.action == "resume":
             print(task_runner.render_resume(task_runner.load(args.id)))
             return 0
+        if args.action == "continue":
+            from . import service
+            result = service.task_continue(args.id, {
+                "message": args.message or args.notes or "",
+                "max_steps": args.max_steps,
+                "plan_mode": not bool(args.execute),
+                "inject_retrieval": False,
+            })
+            if not result.get("ok"):
+                chat_error = result.get("chat", {}) if isinstance(result.get("chat"), dict) else {}
+                print(
+                    result.get("detail")
+                    or result.get("error")
+                    or chat_error.get("detail")
+                    or chat_error.get("error")
+                    or "task continue 失败",
+                    file=sys.stderr,
+                )
+                return 1
+            chat = result.get("chat") or {}
+            if chat.get("text"):
+                print(chat["text"])
+            print()
+            print(task_runner.render(result["task"]))
+            return 0
     except Exception as e:  # noqa: BLE001
         print(f"task 失败：{e}", file=sys.stderr)
         return 1
@@ -2507,6 +2607,13 @@ def _cmd_code(args: argparse.Namespace) -> int:
         if args.action == "quality":
             print(code_agent.render_quality(code_agent.quality(root=root)))
             return 0
+        if args.action == "bundle":
+            if args.output_file:
+                test_output = Path(args.output_file).expanduser().read_text(encoding="utf-8", errors="replace")
+            else:
+                test_output = args.text or ""
+            print(code_agent.render_bundle(code_agent.task_bundle(args.goal or "", root=root, test_output=test_output, limit=args.limit)))
+            return 0
         if args.action == "diff-brief":
             print(code_agent.render_diff_brief(code_agent.diff_brief(root=root, staged=args.staged)))
             return 0
@@ -2537,6 +2644,28 @@ def _cmd_code(args: argparse.Namespace) -> int:
             )
             print(code_agent.render_run(result))
             return 0 if not result.get("test_result") or result["test_result"].get("ok") else 1
+        if args.action == "apply-loop":
+            from . import patcher, permission
+            spec = patcher.load_spec(args.patch_spec or args.goal or "")
+            execute = bool(args.execute)
+            if execute and not args.yes:
+                validation = patcher.validate_spec(spec, root=root)
+                state = permission.PermissionState()
+                decision = permission.request_intent({"op_type": "code.apply_loop"}, patcher.render_validation(validation), state)
+                execute = decision == permission.APPROVE
+                if decision == permission.ABORT:
+                    print("用户终止。")
+                    return 1
+            result = code_agent.patch_apply_loop(
+                spec,
+                root=root,
+                test_command=args.test_command or "",
+                execute=execute,
+                timeout=args.timeout,
+                persist=True,
+            )
+            print(code_agent.render_run(result))
+            return 0 if result.get("patch", {}).get("apply", {}).get("ok") and (not result.get("test_result") or result["test_result"].get("ok")) else 1
         if args.action == "runs":
             print(code_agent.render_run_list(code_agent.list_runs(limit=args.limit)))
             return 0
@@ -2705,8 +2834,24 @@ def _cmd_retrieval(args: argparse.Namespace) -> int:
             print(f"- enabled: {idx.get('enabled')}")
             print(f"- chunks: {idx.get('chunks')}")
             print(f"- knowledge_cards: {idx.get('knowledge_cards')}")
+            print(f"- memory_chunks: {idx.get('memory_chunks')}")
+            print(f"- needs_rebuild: {idx.get('needs_rebuild')}")
             print(f"- updated_at: {idx.get('updated_at') or '-'}")
             print(f"- db: {idx.get('db')}")
+        return 0
+    if args.action == "sync":
+        data = retrieval.sync_index()
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            changed = "已重建" if data.get("changed") else "无需重建"
+            print(f"Ivyea 本地检索索引同步：{changed}")
+            print("")
+            print(f"- backend: {data.get('backend')}")
+            print(f"- chunks: {data.get('chunks')}")
+            print(f"- knowledge_cards: {data.get('knowledge_cards')}")
+            print(f"- memory_chunks: {data.get('memory_chunks')}")
+            print(f"- db: {data.get('db')}")
         return 0
     if args.action == "index":
         data = retrieval.rebuild_index()
@@ -2718,6 +2863,7 @@ def _cmd_retrieval(args: argparse.Namespace) -> int:
             print(f"- backend: {data.get('backend')}")
             print(f"- chunks: {data.get('chunks')}")
             print(f"- knowledge_cards: {data.get('knowledge_cards')}")
+            print(f"- memory_chunks: {data.get('memory_chunks')}")
             print(f"- db: {data.get('db')}")
         return 0
     if args.action == "embeddings":
@@ -2754,6 +2900,11 @@ def _cmd_retrieval(args: argparse.Namespace) -> int:
             print(f"- vector_kind: {emb.get('vector_kind')}")
             print(f"- model: {emb.get('model')}")
             print(f"- model_path: {emb.get('model_path') or '-'}")
+            candidates = emb.get("local_model_candidates") or []
+            if candidates:
+                print("- local_model_candidates:")
+                for row in candidates[:8]:
+                    print(f"  - {row.get('name')}: {row.get('path')}")
             print(f"- allow_download: {emb.get('allow_download')}")
             print(f"- package_available: {emb.get('package_available')}")
             if emb.get("fallback_reason"):
@@ -2861,9 +3012,20 @@ def build_parser() -> argparse.ArgumentParser:
     psrv.add_argument("--api-token", help="HTTP Bearer token；远程监听时必填，也可用 IVYEA_API_TOKEN")
     psrv.set_defaults(func=_cmd_serve)
 
-    pself = sub.add_parser("self", help="安装生命周期：status/doctor/backup/upgrade/uninstall")
-    pself.add_argument("action", choices=["status", "doctor", "backup", "upgrade", "uninstall"])
+    pself = sub.add_parser("self", help="安装生命周期：status/doctor/ops-bootstrap/service-*/backup/upgrade/uninstall")
+    pself.add_argument("action", choices=[
+        "status", "doctor", "ops-bootstrap",
+        "service-status", "service-start", "service-stop", "service-logs", "service-autostart",
+        "backup", "upgrade", "uninstall",
+    ])
     pself.add_argument("--output", help="backup 输出路径")
+    pself.add_argument("--host", default="127.0.0.1", help="ops-bootstrap 建议服务监听地址")
+    pself.add_argument("--port", type=int, default=8765, help="ops-bootstrap 建议服务端口")
+    pself.add_argument("--allow-remote", action="store_true", help="service-start 允许监听非 localhost 地址")
+    pself.add_argument("--api-token", help="service-start 的 HTTP Bearer token；也可用 IVYEA_API_TOKEN")
+    pself.add_argument("--no-wait", action="store_true", help="service-start 启动后不等待 /health")
+    pself.add_argument("--force", action="store_true", help="service-stop 超时时强制结束进程")
+    pself.add_argument("--lines", type=int, default=80, help="service-logs 显示行数")
     pself.add_argument("--version", help="upgrade 固定版本，如 v0.5.5")
     pself.add_argument("--ref", help="upgrade 指定 git ref")
     pself.add_argument("--method", choices=["pipx", "ivyea-runtime", "venv", "unknown"], help="覆盖自动识别的安装方式")
@@ -3030,15 +3192,18 @@ def build_parser() -> argparse.ArgumentParser:
     pws.add_argument("--refresh", action="store_true", help="map/explain 前强制重建索引")
     pws.set_defaults(func=_cmd_workspace)
 
-    ptask = sub.add_parser("task", help="通用长任务：create/list/show/start/step/status/log/resume")
-    ptask.add_argument("action", choices=["create", "list", "show", "start", "step", "status", "log", "resume"])
-    ptask.add_argument("id", nargs="?", help="任务 ID（show/start/step/status/log/resume）")
+    ptask = sub.add_parser("task", help="通用长任务：create/list/show/start/step/status/log/resume/continue")
+    ptask.add_argument("action", choices=["create", "list", "show", "start", "step", "status", "log", "resume", "continue"])
+    ptask.add_argument("id", nargs="?", help="任务 ID（show/start/step/status/log/resume/continue）")
     ptask.add_argument("--title", help="create 的任务标题")
     ptask.add_argument("--step", action="append", help="create 的步骤，可重复")
     ptask.add_argument("--steps", help="create 的步骤，用 | 分隔")
     ptask.add_argument("--index", type=int, default=1, help="step 的步骤序号")
     ptask.add_argument("--status", help="list 过滤任务状态；step/status 设置状态")
     ptask.add_argument("--notes", help="备注/日志")
+    ptask.add_argument("--message", help="continue 时追加给 Agent 的补充要求")
+    ptask.add_argument("--max-steps", type=int, default=12, help="continue 单轮最大工具步数")
+    ptask.add_argument("--execute", action="store_true", help="continue 时退出只读计划模式；写/执行工具仍会走审批")
     ptask.add_argument("--workspace", help="关联工作区路径")
     ptask.add_argument("--limit", type=int, default=20)
     ptask.set_defaults(func=_cmd_task)
@@ -3063,9 +3228,9 @@ def build_parser() -> argparse.ArgumentParser:
     pcoderev.add_argument("--staged", action="store_true", help="审查 staged diff")
     pcoderev.set_defaults(func=_cmd_codereview)
 
-    pcode = sub.add_parser("code", help="代码 Agent 闭环：plan/context/brief/quality/refs/rename-plan/diff-brief/release-check/run/runs/show/sandbox/impact/patch/test/repair/review")
-    pcode.add_argument("action", choices=["plan", "context", "brief", "quality", "refs", "rename-plan", "diff-brief", "release-check", "run", "runs", "show", "sandbox", "impact", "patch", "test", "repair", "review"])
-    pcode.add_argument("goal", nargs="?", help="plan/context/run 的自然语言目标；refs/rename-plan 的符号；show 的 run id")
+    pcode = sub.add_parser("code", help="代码 Agent 闭环：plan/context/brief/quality/bundle/refs/rename-plan/diff-brief/release-check/run/apply-loop/runs/show/sandbox/impact/patch/test/repair/review")
+    pcode.add_argument("action", choices=["plan", "context", "brief", "quality", "bundle", "refs", "rename-plan", "diff-brief", "release-check", "run", "apply-loop", "runs", "show", "sandbox", "impact", "patch", "test", "repair", "review"])
+    pcode.add_argument("goal", nargs="?", help="plan/context/bundle/run 的自然语言目标；refs/rename-plan 的符号；show 的 run id")
     pcode.add_argument("--target", help="impact 的符号、模块或文件目标")
     pcode.add_argument("--path", help="patch 候选目标文件")
     pcode.add_argument("--old", help="patch 候选原文；必须在目标文件中唯一匹配")
@@ -3073,6 +3238,9 @@ def build_parser() -> argparse.ArgumentParser:
     pcode.add_argument("--llm", action="store_true", help="patch 时生成 LLM 请求包；默认不调用模型")
     pcode.add_argument("--llm-patch", action="store_true", help="code run 时在 patch 阶段生成 LLM patch 请求包")
     pcode.add_argument("--call", action="store_true", help="与 --llm 配合，真实调用当前模型生成 patch 并 dry-run validate")
+    pcode.add_argument("--patch-spec", help="apply-loop 的 patch JSON；也可作为 goal 位置参数传入")
+    pcode.add_argument("--execute", action="store_true", help="apply-loop 真实写入 patch；默认 dry-run")
+    pcode.add_argument("--yes", action="store_true", help="apply-loop --execute 时跳过交互审批")
     pcode.add_argument("--root", default=".")
     pcode.add_argument("--limit", type=int, default=8, help="context 输出文件数量")
     pcode.add_argument("--budget", type=int, default=6000, help="brief 字符预算")
@@ -3163,7 +3331,7 @@ def build_parser() -> argparse.ArgumentParser:
     pmem.set_defaults(func=_cmd_memory)
 
     pret = sub.add_parser("retrieval", help="本地统一检索：knowledge + memory + 本地索引")
-    pret.add_argument("action", choices=["search", "capabilities", "index", "status", "embeddings"])
+    pret.add_argument("action", choices=["search", "capabilities", "index", "sync", "status", "embeddings"])
     pret.add_argument("query", nargs="?")
     pret.add_argument("--limit", type=int, default=8)
     pret.add_argument("--source", action="append", choices=["knowledge", "memory"], help="限定来源，可重复")
@@ -3176,16 +3344,22 @@ def build_parser() -> argparse.ArgumentParser:
     pret.add_argument("--json", action="store_true", help="输出 JSON，便于 IvyeaOps/脚本消费")
     pret.set_defaults(func=_cmd_retrieval)
 
-    pk = sub.add_parser("knowledge", help="亚马逊知识库：list/search/show/audit/import/url/rebuild/index/conflicts")
-    pk.add_argument("action", choices=["list", "search", "show", "audit", "import", "url", "rebuild", "index", "conflicts"])
+    pk = sub.add_parser("knowledge", help="亚马逊知识库：list/search/show/audit/sources/watchlist/plan/apply/import/url/rebuild/index/conflicts")
+    pk.add_argument("action", choices=[
+        "list", "search", "show", "audit", "sources", "watchlist", "plan", "apply",
+        "import", "url", "rebuild", "index", "conflicts",
+    ])
     pk.add_argument("query", nargs="?")
     pk.add_argument("--limit", type=int, default=5)
     pk.add_argument("--id", help="导入时指定知识 ID，如 user.my-playbook")
     pk.add_argument("--title", help="导入时指定标题")
     pk.add_argument("--source-type", dest="source_type", help="来源类型：official/community/user 等")
+    pk.add_argument("--source-url", help="知识更新来源 URL；plan/apply 时用于审计")
     pk.add_argument("--confidence", help="可信度：high/medium/user_supplied 等")
     pk.add_argument("--license", help="来源许可/授权说明，如 user_supplied/public_summary")
     pk.add_argument("--tags", help="标签，逗号分隔")
+    pk.add_argument("--confirm", action="store_true", help="确认应用 knowledge apply 生成的知识更新")
+    pk.add_argument("--no-rebuild", action="store_true", help="应用知识更新后不自动重建知识/检索索引")
     pk.set_defaults(func=_cmd_knowledge)
 
     pski = sub.add_parser("skill", help="可复用 Skill：list/search/show/run/create/audit/status/export-lock")
