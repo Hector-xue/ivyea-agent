@@ -11,6 +11,10 @@
 #   $env:IVYEA_WITH_SEMANTIC = "1"，同时安装本地语义检索依赖 sentence-transformers
 $ErrorActionPreference = "Stop"
 
+# 让中文提示在 GBK 控制台也不乱码；并在老 PowerShell 上启用 TLS 1.2，否则 GitHub 连接会失败。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+
 $ownerRepo = if ($env:IVYEA_GITHUB_REPO) { $env:IVYEA_GITHUB_REPO } else { "Hector-xue/ivyea-agent" }
 $repo = if ($env:IVYEA_REPO) { $env:IVYEA_REPO } else { "https://github.com/$ownerRepo.git" }
 $version = if ($env:IVYEA_VERSION) { $env:IVYEA_VERSION } else { "latest" }
@@ -102,7 +106,24 @@ if (-not (Get-Command pipx -ErrorAction SilentlyContinue)) {
   $env:Path = "$env:APPDATA\Python\Scripts;$env:LOCALAPPDATA\Programs\Python\Scripts;$env:Path"
 }
 
-function Get-ReleaseWheel($ownerRepo, $version) {
+# 通过 github.com 的 releases/latest 跳转解析最新 tag —— 不走限流严重的 api.github.com，
+# 国内/共享出口 IP 常因 API 限流拿到 403，这条路几乎不会。
+function Resolve-LatestTag($ownerRepo) {
+  try {
+    $req = [System.Net.HttpWebRequest]::Create("https://github.com/$ownerRepo/releases/latest")
+    $req.AllowAutoRedirect = $false
+    $req.UserAgent = "ivyea-install"
+    $req.Timeout = 30000
+    $resp = $req.GetResponse()
+    $loc = $resp.Headers["Location"]
+    $resp.Close()
+    if ($loc -and ($loc -match "/tag/([^/?#]+)")) { return $Matches[1] }
+  } catch {}
+  return $null
+}
+
+# API 发现（私有仓库带 token、或资产命名不符约定时的兜底）。
+function Get-ReleaseWheelUrl($ownerRepo, $version) {
   $api = "https://api.github.com/repos/$ownerRepo/releases"
   $url = if (($version -eq "") -or ($version -eq "latest")) { "$api/latest" } else { "$api/tags/$version" }
   $headers = @{ "Accept" = "application/vnd.github+json"; "User-Agent" = "ivyea-install" }
@@ -113,39 +134,57 @@ function Get-ReleaseWheel($ownerRepo, $version) {
   return $asset.browser_download_url
 }
 
-# 3) 安装 / 升级
-$pipxArgs = @("install", "--force")
-if ($env:IVYEA_LOCAL) {
-  $spec = $env:IVYEA_LOCAL
-} elseif ($ref) {
-  $spec = "git+$repo@$ref"
-} else {
-  Info "查找 GitHub Release wheel（$ownerRepo@$version）…"
-  try {
-    $spec = Get-ReleaseWheel $ownerRepo $version
-  } catch {
-    Info "Release wheel 不可用：$($_.Exception.Message)"
-    Info "回退到 git main 安装。私有仓库请先配置 GitHub 凭据，或设置 GITHUB_TOKEN/IVYEA_REF。"
-    $spec = "git+$repo@main"
+function Get-InstallSpec($ownerRepo, $repo, $version, $ref) {
+  if ($env:IVYEA_LOCAL) { return $env:IVYEA_LOCAL }
+  if ($ref) { return "git+$repo@$ref" }
+
+  $tag = if ($version -and ($version -ne "latest")) { $version } else { Resolve-LatestTag $ownerRepo }
+
+  # 1) 直接从 releases/download 下载 wheel —— 不依赖 api.github.com，规避 403。
+  if ($tag) {
+    $ver = $tag -replace '^v', ''
+    $wheelName = "ivyea_agent-$ver-py3-none-any.whl"
+    $wheelUrl = "https://github.com/$ownerRepo/releases/download/$tag/$wheelName"
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) $wheelName
+    try {
+      Info "下载 Release wheel：$tag …"
+      $iwr = @{ Uri = $wheelUrl; OutFile = $tmp; UseBasicParsing = $true; TimeoutSec = 180 }
+      if ($env:GITHUB_TOKEN) { $iwr["Headers"] = @{ Authorization = "Bearer $env:GITHUB_TOKEN" } }
+      Invoke-WebRequest @iwr
+      return $tmp
+    } catch {
+      Info "直接下载 wheel 失败（$($_.Exception.Message)），改用 GitHub API…"
+    }
   }
+
+  # 2) API 兜底
+  try { return (Get-ReleaseWheelUrl $ownerRepo $version) } catch {
+    Info "Release API 不可用：$($_.Exception.Message)"
+  }
+
+  # 3) git 兜底：优先用解析到的 tag（uv 对 tag 解析正确；用分支名 main 在 uv 下会被当成 tag 而失败）。
+  if ($tag) { Info "回退到 git tag 安装：$tag"; return "git+$repo@$tag" }
+  Info "回退到 git main 分支安装。私有仓库请配置 GitHub 凭据或 GITHUB_TOKEN/IVYEA_REF。"
+  return "git+$repo@refs/heads/main"
 }
+
+# 3) 安装 / 升级
+Info "查找安装来源（$ownerRepo@$version）…"
+$spec = Get-InstallSpec $ownerRepo $repo $version $ref
 Info "安装 ivyea-agent（来源：$spec）…"
-$pipxArgs += $spec
-& $py -m pipx @pipxArgs
+& $py -m pipx install --force $spec
 if ($env:IVYEA_WITH_SEMANTIC -eq "1") {
   Info "安装本地语义检索依赖（sentence-transformers）…"
   & $py -m pipx inject ivyea-agent "sentence-transformers>=3.0"
 }
 
-Info "✓ 安装完成。重开 PowerShell 后："
-try {
-  & $py -m ivyea_agent.cli self doctor
-} catch {
-  Info "安装后诊断未运行：$($_.Exception.Message)"
-}
-try {
-  & $py -m ivyea_agent.cli retrieval sync --json | Out-Null
-} catch {
-  Info "检索索引初始化未运行：$($_.Exception.Message)"
-}
+# pipx 把 ivyea 装进隔离 venv，并放一个启动器到 bin 目录；用它做安装后自检，
+# 不要用系统 python -m ivyea_agent.cli（那个 venv 之外没有这个模块）。
+$pipxBin = if ($env:PIPX_BIN_DIR) { $env:PIPX_BIN_DIR } else { Join-Path $HOME ".local\bin" }
+$ivyeaExe = Join-Path $pipxBin "ivyea.exe"
+if (-not (Test-Path $ivyeaExe)) { $ivyeaExe = "ivyea" }
+
+Info "✓ 安装完成。若 ivyea 不能直接执行，请重开 PowerShell（PATH 已加入 $pipxBin）。"
+try { & $ivyeaExe self doctor } catch { Info "安装后诊断未运行：$($_.Exception.Message)" }
+try { & $ivyeaExe retrieval sync --json | Out-Null } catch { Info "检索索引初始化未运行：$($_.Exception.Message)" }
 Info "  ivyea config   然后  ivyea chat"

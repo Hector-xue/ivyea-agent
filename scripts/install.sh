@@ -161,57 +161,100 @@ fi
 command -v pipx >/dev/null 2>&1 || { export PATH="$HOME/.local/bin:$PATH"; }
 command -v pipx >/dev/null 2>&1 || die "pipx 安装失败，请手动 'python3 -m pip install --user pipx'。"
 
-release_spec() {
-  "$PY" - "$OWNER_REPO" "$VERSION" <<'PY'
-import json
-import os
-import sys
-import urllib.request
+# 解析安装来源：优先「从 releases/download 直链下载 wheel」——不走限流严重的
+# api.github.com（国内/共享出口 IP 常因 API 限流拿到 403）。失败再退 API，最后退 git。
+install_spec() {
+  "$PY" - "$OWNER_REPO" "$VERSION" "$REPO" <<'PY'
+import json, os, sys, urllib.request, urllib.error
 
-repo, version = sys.argv[1], sys.argv[2]
-api = f"https://api.github.com/repos/{repo}/releases"
-url = f"{api}/latest" if version in ("", "latest") else f"{api}/tags/{version}"
-req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "ivyea-install"})
+repo, version, repo_url = sys.argv[1], sys.argv[2], sys.argv[3]
 token = os.environ.get("GITHUB_TOKEN", "")
-if token:
-    req.add_header("Authorization", f"Bearer {token}")
-with urllib.request.urlopen(req, timeout=30) as resp:
-    data = json.load(resp)
-assets = data.get("assets") or []
-for asset in assets:
-    name = asset.get("name", "")
-    if name.endswith(".whl"):
-        print(asset["browser_download_url"])
-        break
-else:
-    raise SystemExit("release 中没有 wheel 资产")
+UA = {"User-Agent": "ivyea-install"}
+
+def head_ok(url):
+    req = urllib.request.Request(url, method="HEAD", headers=dict(UA))
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status < 400
+    except Exception:
+        return False
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+def latest_tag():
+    # 用 github.com 的 releases/latest 跳转拿到最新 tag，绕开 api 限流。
+    op = urllib.request.build_opener(_NoRedirect)
+    try:
+        op.open(urllib.request.Request(f"https://github.com/{repo}/releases/latest", headers=dict(UA)), timeout=30)
+    except urllib.error.HTTPError as e:
+        loc = e.headers.get("Location", "") or ""
+        if "/tag/" in loc:
+            return loc.split("/tag/", 1)[1].strip()
+    except Exception:
+        pass
+    return ""
+
+tag = version if version and version not in ("", "latest") else latest_tag()
+
+# 1) 直链 wheel（约定命名 ivyea_agent-<ver>-py3-none-any.whl）
+if tag:
+    ver = tag[1:] if tag.startswith("v") else tag
+    url = f"https://github.com/{repo}/releases/download/{tag}/ivyea_agent-{ver}-py3-none-any.whl"
+    if head_ok(url):
+        print(url)
+        raise SystemExit(0)
+
+# 2) API 兜底（资产命名不符约定 / 私有仓库带 token）
+try:
+    api = f"https://api.github.com/repos/{repo}/releases"
+    u = f"{api}/latest" if version in ("", "latest") else f"{api}/tags/{version}"
+    req = urllib.request.Request(u, headers={**UA, "Accept": "application/vnd.github+json"})
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.load(resp)
+    for a in (data.get("assets") or []):
+        if a.get("name", "").endswith(".whl"):
+            print(a["browser_download_url"])
+            raise SystemExit(0)
+except SystemExit:
+    raise
+except Exception:
+    pass
+
+# 3) git 兜底：优先用解析到的 tag（部分解析器会把分支名 main 误当 tag）。
+print(f"git+{repo_url}@{tag}" if tag else f"git+{repo_url}@refs/heads/main")
 PY
 }
 
 # 4) 安装 / 升级 ivyea-agent
-PIPX_ARGS=()
 if [ -n "${IVYEA_LOCAL:-}" ]; then
   SPEC="$IVYEA_LOCAL"
 elif [ -n "$REF" ]; then
   SPEC="git+${REPO}@${REF}"
 else
-  say "查找 GitHub Release wheel（${OWNER_REPO}@${VERSION}）…"
-  if SPEC="$(release_spec 2>/tmp/ivyea-install-release.err)"; then
-    :
-  else
-    say "Release wheel 不可用：$(cat /tmp/ivyea-install-release.err 2>/dev/null || true)"
+  say "查找安装来源（${OWNER_REPO}@${VERSION}）…"
+  SPEC="$(install_spec 2>/tmp/ivyea-install-release.err || true)"
+  if [ -z "$SPEC" ]; then
+    say "解析安装来源失败：$(cat /tmp/ivyea-install-release.err 2>/dev/null || true)"
     say "回退到 git main 安装。私有仓库请先配置 GitHub 凭据，或设置 GITHUB_TOKEN/IVYEA_REF。"
-    SPEC="git+${REPO}@main"
+    SPEC="git+${REPO}@refs/heads/main"
   fi
 fi
 say "安装 ivyea-agent（来源：$SPEC）…"
-pipx install --force "${PIPX_ARGS[@]}" "$SPEC"
+pipx install --force "$SPEC"
 if [ "${IVYEA_WITH_SEMANTIC:-0}" = "1" ]; then
   say "安装本地语义检索依赖（sentence-transformers）…"
   pipx inject ivyea-agent "sentence-transformers>=3.0"
 fi
 
 say "✓ 安装完成。"
+# pipx 把 ivyea 装进 ~/.local/bin；当前 shell 可能还没更新 PATH，先临时加上再自检。
+export PATH="$HOME/.local/bin:$PATH"
 if ! command -v ivyea >/dev/null 2>&1; then
   say "提示：重开终端，或先执行  export PATH=\"\$HOME/.local/bin:\$PATH\""
 else
