@@ -1,6 +1,8 @@
 """Custom slash commands + user hooks."""
 from __future__ import annotations
 
+import json
+
 from ivyea_agent import commands, config, hooks
 
 
@@ -49,12 +51,13 @@ def test_hooks_zero_overhead_when_unconfigured(tmp_path, monkeypatch):
 def test_hooks_fire_runs_configured_command(tmp_path, monkeypatch):
     home = _use_home(tmp_path, monkeypatch)
     marker = home / "fired.txt"
+    # `echo` + redirection works on both bash and cmd; json.dumps escapes the path safely.
     (home / "hooks.json").write_text(
-        '{"user_prompt": ["echo $IVYEA_HOOK_EVENT > %s"]}' % marker, encoding="utf-8")
+        json.dumps({"user_prompt": [f"echo fired > {marker}"]}), encoding="utf-8")
     hooks.reload()
     assert hooks.enabled() is True
     hooks.fire("user_prompt", {"prompt": "hi"})
-    assert marker.exists() and "user_prompt" in marker.read_text()
+    assert marker.exists()
 
 
 def test_hooks_invalid_event_ignored(tmp_path, monkeypatch):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
@@ -20,7 +21,20 @@ def test_make_preexec_callable_on_posix():
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX rlimit only")
-def test_run_python_child_gets_memory_limit(monkeypatch):
+def test_run_python_child_gets_cpu_limit(monkeypatch):
+    # RLIMIT_CPU is enforced on both Linux and macOS, so it deterministically
+    # proves the preexec limits were applied to the child (default timeout 30 -> 35).
+    monkeypatch.setattr(tg.permission, "request_intent", lambda *a, **k: tg.permission.APPROVE)
+    monkeypatch.setattr(tg.config, "get_setting",
+                        lambda k, d=None: {"exec_memory_limit_mb": 0, "exec_file_limit_mb": 0}.get(k, d))
+    ctx = ToolContext(workspace="/tmp")
+    out = dispatch("run_python",
+                   {"code": "import resource; print(resource.getrlimit(resource.RLIMIT_CPU)[0])"}, ctx)
+    assert "35" in out
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="RLIMIT_AS is only enforced on Linux")
+def test_run_python_child_gets_memory_limit_linux(monkeypatch):
     monkeypatch.setattr(tg.permission, "request_intent", lambda *a, **k: tg.permission.APPROVE)
     monkeypatch.setattr(tg.config, "get_setting",
                         lambda k, d=None: {"exec_memory_limit_mb": 1024, "exec_file_limit_mb": 0}.get(k, d))

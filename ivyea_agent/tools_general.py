@@ -336,7 +336,7 @@ def _make_preexec(timeout: int):
         limits = [(resource.RLIMIT_CPU, cpu_s, cpu_s + 5), (resource.RLIMIT_CORE, 0, 0)]
         if mem_mb > 0:
             b = mem_mb * 1024 * 1024
-            limits.append((resource.RLIMIT_AS, b, b))
+            limits.append((resource.RLIMIT_AS, b, b))  # 内存上限：Linux 强制；macOS 忽略 RLIMIT_AS
         if fsize_mb > 0:
             b = fsize_mb * 1024 * 1024
             limits.append((resource.RLIMIT_FSIZE, b, b))
