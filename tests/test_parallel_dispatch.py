@@ -12,24 +12,27 @@ def _silent(_s):
 
 
 def test_parallel_readonly_preserves_order_and_runs_concurrently(monkeypatch):
+    sleep_s, n = 0.3, 4
+
     def fake(name, args, ctx):
-        time.sleep(0.12)
+        time.sleep(sleep_s)
         return ToolResult(True, f"got-{args['k']}")
 
     monkeypatch.setattr(agent_loop, "dispatch_result", fake)
     ctx, messages = ToolContext(), []
     status = agent_loop.TurnStatus(max_steps=10)
-    calls = [{"id": f"c{i}", "name": "read_file", "arguments": {"k": i}} for i in range(4)]
+    calls = [{"id": f"c{i}", "name": "read_file", "arguments": {"k": i}} for i in range(n)]
 
     t0 = time.time()
     agent_loop._dispatch_tool_calls(ctx, messages, status, calls, 0, 10, _silent)
     elapsed = time.time() - t0
 
-    assert [m["tool_call_id"] for m in messages] == ["c0", "c1", "c2", "c3"]
-    assert [m["content"] for m in messages] == [f"got-{i}" for i in range(4)]
-    assert status.tool_calls == 4
-    # 4 × 0.12 = 0.48s sequential; concurrent should be well under
-    assert elapsed < 0.3, f"not concurrent: {elapsed:.2f}s"
+    assert [m["tool_call_id"] for m in messages] == [f"c{i}" for i in range(n)]
+    assert [m["content"] for m in messages] == [f"got-{i}" for i in range(n)]
+    assert status.tool_calls == n
+    # sequential would be n*sleep; concurrent must be well under (generous margin
+    # for thread-startup overhead on slow CI runners — proves real concurrency).
+    assert elapsed < sleep_s * n * 0.6, f"not concurrent: {elapsed:.2f}s"
 
 
 def test_mixed_batch_runs_sequentially(monkeypatch):
