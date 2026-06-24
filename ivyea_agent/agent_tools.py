@@ -495,7 +495,8 @@ def _t_ivyea_ops_call_tool(args: dict, ctx: ToolContext) -> str:
         "name": name,
         "arguments": args.get("arguments") if isinstance(args.get("arguments"), dict) else {},
     }
-    data = _ops_bridge_request(ctx, "/call", payload)
+    # 板块工具里有长任务（如生成市场调研/打法报告，要采集+AI合成），给宽限超时。
+    data = _ops_bridge_request(ctx, "/call", payload, timeout=300.0)
     return _compact_json_text(data)
 
 
