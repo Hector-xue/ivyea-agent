@@ -1231,6 +1231,13 @@ def _help_text() -> str:
     lines = [f"{_C['b']}斜杠命令{_C['x']}（输入 / 后按 Tab 可补全）："]
     for cmd, desc in SLASH_COMMANDS:
         lines.append(f"  {_C['c']}{cmd:<9}{_C['x']} {desc}")
+    from . import commands as _cmds
+    custom = _cmds.list_commands()
+    if custom:
+        lines.append("")
+        lines.append(f"{_C['b']}自定义命令{_C['x']}（~/.ivyea/commands/*.md）：")
+        for name, summary in custom.items():
+            lines.append(f"  {_C['c']}/{name:<8}{_C['x']} {summary}")
     lines.append("")
     lines.append(f"{_C['b']}直接说人话就行{_C['x']}，例如：")
     lines.append(f"  {_C['d']}· 看下 B0XXXXXXXX 这周广告，数据用 sample CSV{_C['x']}")
@@ -1376,6 +1383,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 f"{'真实写' if args.execute else 'dry-run'} · {cx}{cost}/help 命令、Tab 补全 ")
 
     ci = chat_input.ChatInput(SLASH_COMMANDS, _status)
+    from . import hooks as _hooks
+    _hooks.fire("session_start", {"session_id": sid or "", "cwd": os.getcwd()})
 
     while True:
         line = ci.read("❯ ")
@@ -1507,9 +1516,16 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 print(ui.message("warn", f"未知模型 id：{mid}。用 /model 看清单。"))
             continue
         if line.startswith("/"):
-            hits = [c for c, _ in SLASH_COMMANDS if c.startswith(line.split()[0])]
-            tip = ("，你是否想用：" + " ".join(hits)) if hits else "，输入 /help 看全部"
-            print(ui.message("warn", f"未知命令 {line.split()[0]}{tip}")); continue
+            from . import commands as _cmds
+            _head = line.split()[0]
+            _expanded = _cmds.expand(_head[1:], line[len(_head):].strip())
+            if _expanded is not None:
+                print(ui.message("muted", f"已展开自定义命令 {_head}"))
+                line = _expanded
+            else:
+                hits = [c for c, _ in SLASH_COMMANDS if c.startswith(_head)]
+                tip = ("，你是否想用：" + " ".join(hits)) if hits else "，输入 /help 看全部"
+                print(ui.message("warn", f"未知命令 {_head}{tip}")); continue
 
         # 自然语言 → Agent 循环
         api_key = cfg.get_active_key()
@@ -1548,6 +1564,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             print(ui.message("muted", "已注入知识卡: " + ", ".join(kids)))
         import time as _turn_time
         ctx.turn_id = _turn_time.strftime("%Y%m%d-%H%M%S")
+        from . import hooks as _hooks
+        _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
         messages.append({"role": "user", "content": user_content})
         try:
             mcfg = cfg.get_model_config()
