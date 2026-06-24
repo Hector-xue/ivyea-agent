@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import config, traces, ui
-from .agent_tools import TOOL_SCHEMAS, ToolContext, dispatch
+from .agent_tools import TOOL_SCHEMAS, ToolContext, dispatch_result
 from .providers import LLMProvider
 
 SYSTEM_PROMPT = """你是 Ivyea Agent，一个亚马逊运营助手。专长是广告巡检，也能处理日常运营杂活。
@@ -113,13 +113,17 @@ def _dispatch_tool_calls(ctx: ToolContext, messages: list, status: TurnStatus, t
         narrate(ui.tool_call(tc["name"], tc.get("arguments") or {},
                              step=f"{step_idx + 1}/{max_steps}.{call_idx}"))
         started = time.time()
-        result = dispatch(tc["name"], tc["arguments"], ctx)
+        res = dispatch_result(tc["name"], tc["arguments"], ctx)
+        result = res.text
+        payload = {"arguments": tc.get("arguments") or {}}
+        if res.error:
+            payload["traceback"] = res.error[:2000]
         traces.record(
             getattr(ctx, "session_id", ""), getattr(ctx, "turn_id", ""),
             "tool_call", tc["name"],
-            ok=not result.startswith("工具 ") and "执行出错" not in result,
+            ok=res.ok,
             duration_ms=int((time.time() - started) * 1000),
-            summary=result[:300], payload={"arguments": tc.get("arguments") or {}})
+            summary=result[:300], payload=payload)
         narrate(ui.tool_result(result))
         messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
 

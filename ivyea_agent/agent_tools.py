@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import socket
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -512,11 +513,25 @@ _DISPATCH = {
 }
 
 
-def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
+@dataclass
+class ToolResult:
+    ok: bool
+    text: str
+    error: str = ""   # 完整 traceback，仅用于 trace/调试，不回灌给模型
+
+
+def dispatch_result(name: str, args: dict, ctx: ToolContext) -> ToolResult:
+    """派发工具并返回结构化结果：ok 反映是否抛异常（而非靠字符串猜），
+    异常时 text 是给模型看的简短信息、error 保留 traceback 供排障。"""
     fn = _DISPATCH.get(name)
     if not fn:
-        return f"未知工具：{name}"
+        return ToolResult(False, f"未知工具：{name}")
     try:
-        return fn(args or {}, ctx)
+        return ToolResult(True, fn(args or {}, ctx))
     except Exception as e:  # noqa: BLE001
-        return f"工具 {name} 执行出错：{e}"
+        return ToolResult(False, f"工具 {name} 执行出错：{e}", error=traceback.format_exc())
+
+
+def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
+    """字符串兼容入口（测试/只需文本的调用方用）。"""
+    return dispatch_result(name, args, ctx).text
