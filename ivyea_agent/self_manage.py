@@ -577,10 +577,14 @@ def _startup_templates(host: str, port: int) -> dict[str, str]:
 
 
 def _path_fix(info: dict[str, Any]) -> str:
-    if sys.platform.startswith("win"):
+    # 入口所在的 bin 目录因安装方式而异：pipx 默认放 ~/.local/bin，
+    # 离线 wheelhouse（ivyea-runtime）放 ~/.ivyea/bin。别一律指向 ~/.ivyea/bin。
+    if info.get("method") == "ivyea-runtime":
         candidate = str(Path.home() / ".ivyea" / "bin")
-        return f"重开 PowerShell；仍不可用时把 {candidate} 加入用户 PATH。"
-    candidate = str(Path.home() / ".local" / "bin")
+    else:
+        candidate = str(Path.home() / ".local" / "bin")
+    if sys.platform.startswith("win"):
+        return f"重开 PowerShell（安装时已把该目录加入用户 PATH）；仍不可用时把 {candidate} 加入用户 PATH。"
     return f"重开终端，或先执行：export PATH=\"{candidate}:$PATH\""
 
 
