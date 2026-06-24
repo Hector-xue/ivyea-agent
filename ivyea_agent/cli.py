@@ -1365,12 +1365,20 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
     keyst = _model_key_label(cfg.load_settings())
     mode = "真实写" if args.execute else "dry-run"
+    from . import skills as _skills_mod
+    try:
+        _n_tools = len(agent_tools.TOOL_SCHEMAS)
+        _n_skills = len(_skills_mod.list_skills())
+        _n_mcp = len(cfg.load_mcp().get("mcpServers", {}))
+    except Exception:
+        _n_tools = _n_skills = _n_mcp = 0
     print(f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}")
     _print_welcome_box([
         f"{_C['c']}✻{_C['x']} {_C['b']}亚马逊运营 Agent{_C['x']} · 规则引擎+LLM复核+审核制执行 · 自托管",
         f"{_C['d']}主脑 {_label()}（{keyst}）· 执行 {mode}{_C['x']}",
-        f"{_C['d']}/help 看命令 · 直接说需求 · /exit 退出{_C['x']}",
-    ])
+        f"{_C['d']}{_n_tools} 工具 · {_n_skills} skills · {_n_mcp} MCP · 会话 {(sid or '新')[:8]}{_C['x']}",
+        f"{_C['d']}/ 弹命令菜单 · ↑↓+Enter 选择 · 直接说需求 · /exit 退出{_C['x']}",
+    ], width=64)
     print()
 
     from . import chat_input
@@ -1379,8 +1387,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         plan = "计划模式 · " if ctx.plan_mode else ""
         cost = f"¥{meter.cost:.4f} · " if meter.turns else ""
         cx = f"ctx ~{_ui['ctx'] // 1000}k · " if _ui["ctx"] else ""
+        turns = f"{meter.turns} 轮 · " if meter.turns else ""
         return (f" ivyea · {_label()} · {plan}"
-                f"{'真实写' if args.execute else 'dry-run'} · {cx}{cost}/help 命令、Tab 补全 ")
+                f"{'真实写' if args.execute else 'dry-run'} · {turns}{cx}{cost}输入 / 看命令 ")
 
     ci = chat_input.ChatInput(SLASH_COMMANDS, _status)
     from . import hooks as _hooks

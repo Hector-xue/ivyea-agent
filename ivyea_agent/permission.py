@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import ui
+from . import tui, ui
 from .actions import Action
 
 APPROVE, DENY, ABORT = "approve", "deny", "abort"
@@ -46,25 +46,24 @@ def request(a: Action, state: PermissionState,
     if a.kind in state.session_allow:
         return APPROVE
 
-    print()
-    print(ui.panel("需要确认写操作", preview(a), kind="warn"))
+    options = [("approve", "批准本次"), ("session", "本会话同类都批准"),
+               ("deny", "拒绝"), ("edit", "修改"), ("abort", "全部停止")]
     while True:
-        choice = input_fn("选择 [1]批准  [2]本会话同类都批准  [3]拒绝  [4]修改  [5]全部停止: ")
-        if choice in ("1", "y", "yes"):
+        choice = tui.select("需要确认写操作", preview(a), options, kind="warn", input_fn=input_fn)
+        if choice == "approve":
             return APPROVE
-        if choice == "2":
+        if choice == "session":
             state.session_allow.add(a.kind)
             return APPROVE
-        if choice in ("3", "n", "no"):
+        if choice == "deny":
             return DENY
-        if choice in ("5", "q"):
+        if choice == "abort":
             state.aborted = True
             return ABORT
-        if choice == "4":
+        if choice == "edit":
             _edit(a, input_fn)
             print(ui.message("info", "已修改为：" + a.summary()))
             continue   # 改完重新确认
-        print(ui.message("warn", "请输入 1-5。"))
 
 
 def request_intent(intent: dict, preview_text: str, state: PermissionState,
@@ -77,27 +76,27 @@ def request_intent(intent: dict, preview_text: str, state: PermissionState,
     op_type = intent.get("op_type", "")
     if op_type in state.session_allow:
         return APPROVE
-    print()
-    print(ui.panel("需要确认写操作", preview_text, kind="warn"))
     has_edit = edit_fn is not None
-    opts = "选择 [1]批准  [2]本会话同类都批准  [3]拒绝  " + ("[4]修改  " if has_edit else "") + "[5]全部停止: "
-    while True:
-        choice = input_fn(opts)
-        if choice in ("1", "y", "yes"):
-            return APPROVE
-        if choice == "2":
-            state.session_allow.add(op_type)
-            return APPROVE
-        if choice in ("3", "n", "no"):
-            return DENY
-        if choice in ("5", "q"):
-            state.aborted = True
-            return ABORT
-        if choice == "4" and has_edit:
-            edit_fn(intent, input_fn)
-            print(ui.message("info", "已修改，请重新确认。"))
-            return "recheck"
-        print(ui.message("warn", "请输入选项编号。"))
+    options = [("approve", "批准本次"), ("session", "本会话同类都批准"), ("deny", "拒绝")]
+    if has_edit:
+        options.append(("edit", "修改"))
+    options.append(("abort", "全部停止"))
+    choice = tui.select("需要确认写操作", preview_text, options, kind="warn", input_fn=input_fn)
+    if choice == "approve":
+        return APPROVE
+    if choice == "session":
+        state.session_allow.add(op_type)
+        return APPROVE
+    if choice == "deny":
+        return DENY
+    if choice == "abort":
+        state.aborted = True
+        return ABORT
+    if choice == "edit" and has_edit:
+        edit_fn(intent, input_fn)
+        print(ui.message("info", "已修改，请重新确认。"))
+        return "recheck"
+    return DENY
 
 
 def _edit(a: Action, input_fn: Callable[[str], str]) -> None:
