@@ -64,9 +64,22 @@ def t_read_file(args: dict, ctx) -> str:
     if p.is_dir():
         return f"{p} 是目录，请用 list_dir。"
     try:
-        return _truncate(p.read_text(encoding="utf-8", errors="replace"))
+        text = p.read_text(encoding="utf-8", errors="replace")
     except Exception as e:  # noqa: BLE001
         return f"读取失败：{e}"
+    offset = args.get("offset")
+    limit = args.get("limit")
+    if offset is None and limit is None:
+        return _truncate(text)
+    # 行区间读取：offset 从 1 开始；大文件只取一段，避免被迫用 run_command 分段读。
+    lines = text.splitlines()
+    total = len(lines)
+    start = max(1, int(offset or 1))
+    if start > total:
+        return f"（{p.name} 共 {total} 行，offset={start} 超出范围）"
+    end = total if limit is None else min(total, start + max(1, int(limit)) - 1)
+    body = "\n".join(lines[start - 1:end])
+    return f"（{p.name} 第 {start}–{end} 行，共 {total} 行）\n" + _truncate(body)
 
 
 def t_list_dir(args: dict, ctx) -> str:
@@ -632,8 +645,10 @@ def _fn(name, desc, props, required=()):
 
 
 GENERAL_TOOL_SCHEMAS = [
-    _fn("read_file", "读取本地文本文件内容（只读，自动放行）。",
-        {"path": {"type": "string", "description": "文件路径，支持 ~"}}, ["path"]),
+    _fn("read_file", "读取本地文本文件内容（只读，自动放行）。大文件用 offset/limit 读行区间，别用 run_command 分段读。",
+        {"path": {"type": "string", "description": "文件路径，支持 ~"},
+         "offset": {"type": "integer", "description": "起始行号（从 1 开始）；读大文件某段时填"},
+         "limit": {"type": "integer", "description": "最多读多少行；配合 offset 读区间"}}, ["path"]),
     _fn("list_dir", "列出目录内容（只读）。",
         {"path": {"type": "string", "description": "目录路径，默认当前目录"}}),
     _fn("write_file", "写入/覆盖本地文件（写操作，会弹人工审批）。",

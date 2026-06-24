@@ -27,17 +27,28 @@ class ChatInput:
 
     def _completer(self):
         from prompt_toolkit.completion import Completer, Completion
+        slash = self.slash
 
         class _C(Completer):
-            def __init__(s, cmds): s.cmds = cmds
             def get_completions(s, document, complete_event):
                 t = document.text_before_cursor
                 if not t.startswith("/"):
                     return
-                for cmd, desc in s.cmds:
+                seen = set()
+                for cmd, desc in slash:
                     if cmd.startswith(t):
+                        seen.add(cmd)
                         yield Completion(cmd, start_position=-len(t), display=cmd, display_meta=desc)
-        return _C(self.slash)
+                try:   # 用户自定义命令 ~/.ivyea/commands/*.md
+                    from . import commands as _cmds
+                    for name, summary in _cmds.list_commands().items():
+                        cmd = "/" + name
+                        if cmd.startswith(t) and cmd not in seen:
+                            yield Completion(cmd, start_position=-len(t), display=cmd,
+                                             display_meta=summary or "自定义命令")
+                except Exception:
+                    pass
+        return _C()
 
     def _try_setup(self):
         try:
@@ -64,7 +75,8 @@ class ChatInput:
         self._session = PromptSession(
             history=self._history,
             completer=self._completer(), complete_while_typing=True,
-            complete_style=CompleteStyle.READLINE_LIKE,
+            complete_style=CompleteStyle.MULTI_COLUMN,   # 输入 / 即弹下拉菜单（带描述）
+            bottom_toolbar=lambda: self.status_fn(),     # 常驻底部状态栏
             style=Style.from_dict(self._style_dict()))
         self._mode = "session"
 
@@ -78,8 +90,11 @@ class ChatInput:
             "completion-menu.completion": "#d1d5db",
             "completion-menu.completion.current": "ansicyan bold",
             "completion-menu.meta.completion": "ansibrightblack",
+            "completion-menu.meta.completion.current": "ansicyan",
             "scrollbar.background": "ansibrightblack",
             "scrollbar.button": "ansicyan",
+            "bottom-toolbar": "noreverse ansibrightblack",
+            "bottom-toolbar.text": "ansibrightblack",
         }
 
     def _read_boxed(self) -> object:
