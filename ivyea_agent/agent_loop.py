@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable
 
-from . import config, traces, ui
+from . import config, context, traces, ui
 from .agent_tools import PARALLEL_SAFE, TOOL_SCHEMAS, ToolContext, dispatch_result
 from .providers import LLMProvider
 
@@ -163,12 +163,27 @@ def _finalize_limit(ctx: ToolContext, messages: list, status: TurnStatus, max_st
     return text
 
 
+def _maybe_compact(messages: list, provider, step_idx: int, narrate: Callable[[str], None]) -> None:
+    """步边界上的轮内压缩守卫：此处 tool_call↔tool 已配对完整，整段替换安全。
+    仅在估算 token 越过硬上限（防溢出）或开了自动压缩到软阈值时触发。"""
+    if step_idx == 0:
+        return
+    est = context.estimate_tokens(messages)
+    if not context.should_compact_midturn(est):
+        return
+    new, summary = context.compact(messages, provider)
+    if summary:
+        messages[:] = new
+        narrate(ui.message("info", f"上下文已自动压缩（约 {est} tok）以防溢出，继续。"))
+
+
 def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
              max_steps: int | None = None, narrate: Callable[[str], None] = print) -> str:
     """跑一轮对话（messages 含 system+历史+本次 user）。就地追加消息，返回最终回答。"""
     max_steps = _resolve_max_steps(max_steps, "chat_max_tool_steps")
     status = TurnStatus(max_steps=max_steps)
     for step_idx in range(max_steps):
+        _maybe_compact(messages, provider, step_idx, narrate)
         status.before_model_step(step_idx, narrate)
         msg = provider.chat(messages, tools=TOOL_SCHEMAS)
         tool_calls = msg.get("tool_calls") or []
@@ -200,6 +215,7 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
     max_steps = _resolve_max_steps(max_steps, "chat_max_tool_steps")
     status = TurnStatus(max_steps=max_steps)
     for step_idx in range(max_steps):
+        _maybe_compact(messages, provider, step_idx, narrate)
         status.before_model_step(step_idx, narrate)
         final = {"content": "", "tool_calls": [], "usage": {}}
         printed_any = False

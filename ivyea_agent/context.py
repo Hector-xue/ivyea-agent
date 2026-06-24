@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from . import config
@@ -13,6 +14,9 @@ from . import config
 # 对支持更长上下文的模型，96K 仍保留一定余量；小上下文模型可自行 config set compact_at_tokens。
 DEFAULT_COMPACT_AT = 96000
 DEFAULT_AUTO_COMPACT = False
+# 轮内硬上限：无论是否开自动压缩，估算 token 越过它就强制压缩以防请求溢出报错。
+# 这是“防崩”而非“省钱”，所以默认开启、阈值取得很高，正常长任务不会触发。
+DEFAULT_HARD_CEILING = 200000
 
 _SUMMARY_SYS = "你是对话压缩器。把给定的多轮对话压缩成简洁要点，必须保留：关键事实、已做的决策、ASIN/店铺SID/具体数字、用户偏好与未完成事项。用中文分条，不要寒暄。"
 
@@ -45,6 +49,25 @@ def should_warn_compact(last_prompt_tokens: int, threshold: Optional[int] = None
     """Return True when history is long enough to suggest manual /compact."""
     th = threshold if threshold is not None else int(config.get_setting("compact_at_tokens", DEFAULT_COMPACT_AT))
     return last_prompt_tokens > th
+
+
+def estimate_tokens(messages: list[dict]) -> int:
+    """轮内粗略 token 估算（无需 provider 用量回报）。中英混排偏保守取 ~3 字/token。"""
+    chars = 0
+    for m in messages:
+        chars += len(m.get("content") or "")
+        for tc in m.get("tool_calls") or []:
+            args = (tc.get("function") or {}).get("arguments") or ""
+            chars += len(args if isinstance(args, str) else json.dumps(args, ensure_ascii=False))
+    return chars // 3
+
+
+def should_compact_midturn(est_tokens: int, threshold: Optional[int] = None) -> bool:
+    """轮内是否该压缩：越过硬上限一律压（防溢出崩溃）；开了自动压缩则到软阈值也压。"""
+    ceiling = int(config.get_setting("compact_hard_ceiling_tokens", DEFAULT_HARD_CEILING))
+    if est_tokens > ceiling:
+        return True
+    return should_compact(est_tokens, threshold)
 
 
 def compact(messages: list[dict], provider, *, keep_system: bool = True) -> tuple[list[dict], str]:
