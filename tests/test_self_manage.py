@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import types
 import zipfile
 from pathlib import Path
 
@@ -115,10 +117,16 @@ def test_service_start_stop_with_fake_process(ivyea_home, monkeypatch):
     calls = []
     states = iter([True, False])
     monkeypatch.setattr(self_manage, "_pid_running", lambda pid: next(states, False))
-    monkeypatch.setattr(self_manage.os, "kill", lambda pid, sig: calls.append((pid, sig)))
+    if os.name == "nt":
+        # Windows stops via `taskkill` (subprocess.run), not os.kill.
+        monkeypatch.setattr(self_manage.subprocess, "run",
+                            lambda cmd, *a, **k: types.SimpleNamespace(returncode=0))
+    else:
+        monkeypatch.setattr(self_manage.os, "kill", lambda pid, sig: calls.append((pid, sig)))
     stopped = self_manage.service_stop(timeout=1)
     assert stopped["ok"] is True
-    assert calls and calls[0][0] == 4321
+    if os.name != "nt":
+        assert calls and calls[0][0] == 4321
     assert not (ivyea_home / "run" / "ivyea-agent.pid").exists()
 
 
