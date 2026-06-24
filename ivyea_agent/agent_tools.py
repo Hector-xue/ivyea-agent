@@ -37,6 +37,7 @@ class ToolContext:
     task_id: str = ""                                      # 绑定长任务，用于自动记录续跑/阻塞点
     ops_bridge: dict[str, Any] = field(default_factory=dict)  # IvyeaOps 嵌入模式工具桥接
     ops_context: dict[str, Any] = field(default_factory=dict)  # 当前 Ops 页面/板块上下文
+    provider: Any = None                                       # 当前主脑 provider（供 dispatch_subagent）
 
 
 # OpenAI function-calling schema
@@ -175,6 +176,13 @@ TOOL_SCHEMAS = [
             "name": {"type": "string", "description": "工具名，先用 ivyea_ops_list_tools 查看"},
             "arguments": {"type": "object", "description": "传给工具的 JSON 参数"}},
             "required": ["name"]}}},
+    {"type": "function", "function": {
+        "name": "dispatch_subagent",
+        "description": "派一个只读子 agent 做聚焦调研/探索，返回其结论摘要。子 agent 只能用只读工具(grep/code_search/read_file/web_fetch/knowledge_search 等)、不能写、不能再派子 agent、步数受限。需要并行铺开多角度调研、或把一段独立的查证任务委派出去时用它，避免主线上下文被探索细节塞满。",
+        "parameters": {"type": "object", "properties": {
+            "task": {"type": "string", "description": "交给子 agent 的具体问题/调研目标，越聚焦越好"},
+            "max_steps": {"type": "integer", "description": "子 agent 工具步数上限，默认 12，最大 20"}},
+            "required": ["task"]}}},
 ] + tools_general.GENERAL_TOOL_SCHEMAS
 
 
@@ -541,3 +549,47 @@ def dispatch_result(name: str, args: dict, ctx: ToolContext) -> ToolResult:
 def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
     """字符串兼容入口（测试/只需文本的调用方用）。"""
     return dispatch_result(name, args, ctx).text
+
+
+# 只读工具集：纯读/检索/审计/诊断，绝不写。供只读子 agent 使用。
+READONLY_TOOLS = PARALLEL_SAFE | {
+    "code_search", "code_symbols", "code_impact", "code_repair",
+    "knowledge_search", "skill_search", "recall",
+    "run_patrol", "run_account_diagnosis", "propose_actions",
+    "run_listing_audit", "run_review_audit", "run_offer_audit",
+    "run_competitor_audit", "run_image_audit", "run_image_ocr",
+    "task_read", "task_resume",
+}
+
+
+def _subagent_schemas() -> list:
+    # dispatch_subagent 本身不在 READONLY_TOOLS 里 → 子 agent 不能再派子 agent。
+    return [t for t in TOOL_SCHEMAS if t["function"]["name"] in READONLY_TOOLS]
+
+
+def t_dispatch_subagent(args: dict, ctx: ToolContext) -> str:
+    """跑一个只读子 agent 做聚焦调研，返回结论摘要（自带独立上下文，不污染主线）。"""
+    task = (args.get("task") or "").strip()
+    if not task:
+        return "task 为空：描述要子 agent 查清的问题。"
+    provider = getattr(ctx, "provider", None)
+    if provider is None:
+        return "当前环境无可用主脑 provider，无法派子 agent。"
+    from . import agent_loop  # 延迟导入避免循环依赖
+    max_steps = min(int(args.get("max_steps") or 12), 20)
+    sub_sys = ("你是只读调研子 agent。用只读工具(grep/code_search/read_file/web_fetch/knowledge_search 等)"
+               "把交给你的问题查清楚，最后用简洁中文给出结论与依据(文件:行/来源)。"
+               "你不能写文件、不能执行命令、不能改广告，也不要再派子 agent。")
+    sub_ctx = ToolContext(workspace=getattr(ctx, "workspace", ""), plan_mode=True,
+                          provider=provider, perm=permission.PermissionState())
+    sub_messages = [{"role": "system", "content": sub_sys},
+                    {"role": "user", "content": task}]
+    try:
+        result = agent_loop.run_turn(provider, sub_ctx, sub_messages, max_steps=max_steps,
+                                     narrate=lambda s: None, tools=_subagent_schemas())
+    except Exception as e:  # noqa: BLE001
+        return f"子 agent 执行出错：{e}"
+    return "【子 agent 结论】\n" + (result or "（无结论）")
+
+
+_DISPATCH["dispatch_subagent"] = t_dispatch_subagent

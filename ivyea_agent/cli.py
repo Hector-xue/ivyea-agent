@@ -1552,6 +1552,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         try:
             mcfg = cfg.get_model_config()
             provider = build_chain(mcfg, api_key, narrate=lambda s: print(s))
+            ctx.provider = provider   # 供 dispatch_subagent 跑只读子 agent 用
             if render_md:
                 # 缓冲 + spinner，收尾渲染 markdown
                 spin = _LiveSpinner()
