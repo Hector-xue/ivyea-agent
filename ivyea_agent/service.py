@@ -1433,10 +1433,16 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext) -> t
     if ctx.ops_bridge:
         current_board = str((ctx.ops_context or {}).get("board") or (ctx.ops_context or {}).get("pathname") or "").strip()
         system += (
-            "\n\n[IvyeaOps 板块工具桥]\n"
-            "你可以通过 `ivyea_ops_list_tools` 查看当前用户有权限调用的 IvyeaOps 板块工具，"
-            "再用 `ivyea_ops_call_tool` 操作对应板块。优先选择与用户当前页面相关的工具；"
-            "如果工具会启动长任务，调用后把 job_id 和下一步查询方式告诉用户。"
+            "\n\n[IvyeaOps 板块工具桥 — 重要]\n"
+            "你嵌在 IvyeaOps 工作台里。用户让你做下列事情时，**必须**用 IvyeaOps 板块工具完成，"
+            "不要凭自己的知识直接写报告，也不要只用你自己的 MCP——板块工具会用 IvyeaOps 已接好的"
+            "真实数据源（Sorftime 等）采集 + 合成，并把结果存进对应板块历史，用户能在板块里看到：\n"
+            "- 市场调研报告 → 先 `ivyea_ops_list_tools`，再 `ivyea_ops_call_tool` 调 `market_generate_report`\n"
+            "- 打法 / Launch 方案 → `playbook_generate_report`\n"
+            "- 关键词竞争 / 竞品反查 / 流量诊断 → `deep_generate_report`\n"
+            "- Listing 相关 → 对应 listing 工具\n"
+            "只有用户明确要求换别的方式时才不走板块工具。其它操作也优先用与当前页面相关的板块工具；"
+            "工具是长任务时，调用后把 id 和下一步查询方式告诉用户。"
         )
         if current_board:
             system += f"\n当前页面/板块：{current_board}"
