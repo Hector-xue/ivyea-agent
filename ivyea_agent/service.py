@@ -1433,16 +1433,19 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext) -> t
     if ctx.ops_bridge:
         current_board = str((ctx.ops_context or {}).get("board") or (ctx.ops_context or {}).get("pathname") or "").strip()
         system += (
-            "\n\n[IvyeaOps 板块工具桥 — 重要]\n"
-            "你嵌在 IvyeaOps 工作台里。用户让你做下列事情时，**必须**用 IvyeaOps 板块工具完成，"
-            "不要凭自己的知识直接写报告，也不要只用你自己的 MCP——板块工具会用 IvyeaOps 已接好的"
-            "真实数据源（Sorftime 等）采集 + 合成，并把结果存进对应板块历史，用户能在板块里看到：\n"
-            "- 市场调研报告 → 先 `ivyea_ops_list_tools`，再 `ivyea_ops_call_tool` 调 `market_generate_report`\n"
-            "- 打法 / Launch 方案 → `playbook_generate_report`\n"
+            "\n\n[IvyeaOps 板块工具桥 — 最高优先级，必须遵守]\n"
+            "你嵌在 IvyeaOps 工作台。当用户的请求属于下面这些板块任务时，你**唯一正确的做法是调用对应板块工具**。"
+            "**严禁自己撰写报告正文、严禁仅凭知识库检索或常识拼凑答案**——只有板块工具才会用 IvyeaOps 接好的"
+            "真实数据源（Sorftime / 卖家精灵）采集 + 合成，并把报告存进对应板块历史（用户要的就是这个结果）。"
+            "你自己手写的报告不算数、不会进历史，等于没做。\n"
+            "收到这类请求时，**第一步就直接调用工具，不要先长篇分析或解释**：\n"
+            "- 市场调研 / 出市场调研报告 → `ivyea_ops_call_tool`，name=`market_generate_report`，"
+            "arguments={\"query\": 关键词或ASIN, \"mode\": \"keyword\" 或 \"asin\", \"marketplace\": 站点如\"US\"}\n"
+            "- 打法 / Launch 方案 → `playbook_generate_report`（同样 query/mode/marketplace）\n"
             "- 关键词竞争 / 竞品反查 / 流量诊断 → `deep_generate_report`\n"
             "- Listing 相关 → 对应 listing 工具\n"
-            "只有用户明确要求换别的方式时才不走板块工具。其它操作也优先用与当前页面相关的板块工具；"
-            "工具是长任务时，调用后把 id 和下一步查询方式告诉用户。"
+            "不确定工具确切名字/参数时，先 `ivyea_ops_list_tools` 查再调。工具是长任务，调用后把结果与"
+            "「已存入对应板块历史」告诉用户。只有当用户明确说「别用板块、你自己分析就行」时，才可以不调工具。"
         )
         if current_board:
             system += f"\n当前页面/板块：{current_board}"
