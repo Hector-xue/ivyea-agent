@@ -38,8 +38,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _service_python() -> str:
+    """Interpreter for the background serve. On Windows prefer pythonw.exe (GUI
+    subsystem → never allocates a console), so the embedded service doesn't show
+    a black console window in the taskbar when launched by IvyeaOps."""
+    exe = sys.executable
+    if os.name == "nt":
+        pyw = Path(exe).with_name("pythonw.exe")
+        if pyw.exists():
+            return str(pyw)
+    return exe
+
+
 def _service_command(host: str = "127.0.0.1", port: int = 8765, allow_remote: bool = False) -> list[str]:
-    cmd = [sys.executable, "-m", "ivyea_agent.cli", "serve", "--host", host, "--port", str(int(port))]
+    cmd = [_service_python(), "-m", "ivyea_agent.cli", "serve", "--host", host, "--port", str(int(port))]
     if allow_remote:
         cmd.append("--allow-remote")
     return cmd
