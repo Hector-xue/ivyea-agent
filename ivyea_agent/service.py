@@ -982,6 +982,12 @@ def chat_session_detail(session_id: str) -> dict[str, Any]:
     return {"ok": True, "session": _public_session_detail(data)}
 
 
+def chat_session_delete(session_id: str) -> dict[str, Any]:
+    if not sessions.delete(session_id):
+        raise FileNotFoundError(f"会话不存在：{session_id}")
+    return {"ok": True, "deleted": session_id}
+
+
 def chat_session_create(payload: dict[str, Any]) -> dict[str, Any]:
     session_id = str(payload.get("id") or "") or sessions.new_id()
     initial = str(payload.get("message") or payload.get("title") or "").strip()
@@ -1335,6 +1341,13 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 self._json(200, knowledge_file_delete(_first(qs, "path")))
             except (FileNotFoundError, ValueError) as exc:
+                self._json(404, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path.startswith("/v1/chat/sessions/"):
+            session_id = parsed.path.rsplit("/", 1)[-1]
+            try:
+                self._json(200, chat_session_delete(session_id))
+            except FileNotFoundError as exc:
                 self._json(404, {"ok": False, "error": str(exc)})
             return
         self._json(404, {"ok": False, "error": "not_found", "path": parsed.path})

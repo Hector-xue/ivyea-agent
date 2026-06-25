@@ -58,6 +58,23 @@ def latest_id() -> Optional[str]:
     return files[0].stem if files else None
 
 
+def delete(sid: str) -> bool:
+    """Delete one persisted session file. Returns True if a file was removed.
+    Guards against path traversal — only deletes inside the sessions dir."""
+    if not sid:
+        return False
+    p = path_for(sid)
+    try:
+        if p.resolve().parent != _dir().resolve():
+            return False
+        if p.exists():
+            p.unlink()
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def listing(limit: int = 20) -> list[dict[str, Any]]:
     out = []
     files = sorted(_dir().glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
