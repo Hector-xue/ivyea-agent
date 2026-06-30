@@ -11,6 +11,7 @@ import argparse
 import getpass
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -1205,24 +1206,65 @@ SLASH_COMMANDS = [
 ]
 
 
+# 亚马逊广告域信号：命中任一则本轮按广告任务处理，注入内置知识/skill。
+_AMAZON_TERMS = (
+    "广告", "否词", "否定", "竞价", "出价", "bid", "预算", "budget", "acos", "acoas", "roas",
+    "tacos", "asin", "listing", "关键词", "搜索词", "投放", "活动", "campaign", "浪费词",
+    "转化", "点击", "曝光", "ctr", "cpc", "cvr", "店铺", "销量", "库存", "类目", "竞品",
+    "sp广告", "sb广告", "sd广告", "亚马逊", "amazon", "运营", "领星", "lingxing",
+    "sku", "review", "qa", "offer",
+)
+
+
+def _is_amazon_domain(query: str) -> bool:
+    """本轮是否带亚马逊广告/运营域信号。无信号的工程任务据此跳过内置知识注入。"""
+    q = (query or "").lower()
+    return any(t in q for t in _AMAZON_TERMS)
+
+
+# 代码/工程任务信号：源码文件后缀 + 代码语义词。比 engineering_context 的术语表更宽，
+# 用来兜住「给 calc.py 加 docstring」这类不含'优化/bug'但分明是写代码的请求。
+_CODE_HINTS = re.compile(
+    r"\.(py|js|ts|tsx|jsx|go|rs|java|kt|rb|php|cs|cpp|cc|hpp|sh|sql|ya?ml|toml|ini|css|html?|vue)\b"
+    r"|docstring|traceback|stack ?trace|函数|方法|变量|类型|形参|参数列表|报错|异常|栈|仓库|repo\b"
+    r"|分支|commit|merge|pull ?request|\bdef \b|\bclass \b|\bimport \b|编译|断点|单元测试|代码|脚本",
+    re.I,
+)
+
+
+def _looks_like_code_task(query: str) -> bool:
+    """本轮是否是写代码/工程任务（用于决定是否跳过亚马逊知识注入）。"""
+    from . import engineering_context
+    return engineering_context.should_include(query) or bool(_CODE_HINTS.search(query or ""))
+
+
 class _LiveSpinner:
-    """生成时的轻量转圈反馈（不打印 token；收尾渲染 markdown）。"""
+    """生成时的轻量转圈反馈：转圈 + 已耗时 + 估算输出 token + 中断提示（不打印正文，收尾渲染 markdown）。"""
     _F = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     def __init__(self):
         self.i = 0
         self.on = False
+        self.start = None
+        self.chars = 0
 
-    def tick(self, _text: str = "") -> None:
+    def tick(self, text: str = "") -> None:
+        if self.start is None:
+            self.start = time.time()
+        self.chars += len(text or "")
         self.i += 1
         frame = self._F[self.i % len(self._F)]
-        sys.stdout.write(f"\r{_C['c']}{frame}{_C['x']} {_C['d']}生成中…{_C['x']}")
+        elapsed = int(time.time() - self.start)
+        toks = self.chars // 3   # 中英混排粗估 ~3 字符/token，仅作进度感
+        tok_s = f" · ~{toks / 1000:.1f}k tok" if toks >= 1000 else (f" · ~{toks} tok" if toks else "")
+        # \033[K 清到行尾，避免上一帧更长状态残留
+        sys.stdout.write(f"\r\033[K{_C['c']}{frame}{_C['x']} {_C['d']}生成中 · {elapsed}s{tok_s} · Ctrl-C 中断{_C['x']}")
         sys.stdout.flush()
         self.on = True
 
     def clear(self) -> None:
         if self.on:
-            sys.stdout.write("\r" + " " * 20 + "\r")
+            sys.stdout.write("\r\033[K")
             sys.stdout.flush()
             self.on = False
 
@@ -1553,9 +1595,15 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 print(ui.message("info", "已暂停。调整上限：ivyea config set daily_cost_limit_cny <元>"))
                 continue
         from . import engineering_context, knowledge, skills
-        kctx, kids = knowledge.context_for_query(line, limit=3)
-        sctx, sids = skills.context_for_query(line, limit=2)
         ectx = engineering_context.build(os.getcwd(), line)
+        # 门控：工程/代码任务且无广告域信号(也无 ASIN) → 不注入亚马逊知识/skill，
+        # 避免污染上下文、烧 token、把模型往运营方向带偏。广告/通用/模糊任务一律照常注入。
+        _inject_domain = (
+            bool(getattr(ctx, "asin", "")) or _is_amazon_domain(line)
+            or not _looks_like_code_task(line)
+        )
+        kctx, kids = knowledge.context_for_query(line, limit=3) if _inject_domain else ("", [])
+        sctx, sids = skills.context_for_query(line, limit=2) if _inject_domain else ("", [])
         user_content = line
         if ectx:
             user_content += "\n\n[工程上下文]\n" + ectx

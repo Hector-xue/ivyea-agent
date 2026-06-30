@@ -38,6 +38,7 @@ class ToolContext:
     ops_bridge: dict[str, Any] = field(default_factory=dict)  # IvyeaOps 嵌入模式工具桥接
     ops_context: dict[str, Any] = field(default_factory=dict)  # 当前 Ops 页面/板块上下文
     provider: Any = None                                       # 当前主脑 provider（供 dispatch_subagent）
+    read_paths: set = field(default_factory=set)               # 本会话已 read_file 过的绝对路径（改前必读软护栏）
 
 
 # OpenAI function-calling schema
