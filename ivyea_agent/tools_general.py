@@ -50,14 +50,16 @@ def _disp(p) -> str:
         return str(p)
 
 
-def _read_nudge(ctx, paths) -> str:
-    """改前必读软护栏：列出本会话未 read_file 过的目标文件，返回温和提示行（不阻断）。"""
+def _require_read(ctx, paths) -> str:
+    """改前必读硬护栏（对标 Claude Code）：本会话未 read_file 过的已存在目标文件，
+    直接挡回让模型先读。返回空串=放行；非空=应直接 return 的错误信息。"""
     read = getattr(ctx, "read_paths", None) or set()
     unread = [p for p in paths if str(p) not in read and Path(p).exists()]
     if not unread:
         return ""
     names = "、".join(_disp(p) for p in unread)
-    return f"⚠ 本会话未读过 {names}，建议先 read_file 核对再改\n"
+    return (f"已拦截：本会话还没 read_file 过 {names}，不能盲改。"
+            f"请先 read_file 看真实内容、确认 old 唯一匹配，再重试本次编辑。")
 
 
 def _gate(ctx, kind: str, preview: str) -> tuple[bool, str]:
@@ -268,8 +270,11 @@ def t_code_apply_patch(args: dict, ctx) -> str:
     validation = patcher.validate_spec(spec, root=root)
     if not validation.get("ok"):
         return _truncate(patcher.render_validation(validation))
-    # 2) 构造彩色 diff 预览 + 改前必读提示
+    # 2) 改前必读硬护栏 + 构造彩色 diff 预览
     abs_paths = [str((Path(root) / o.get("path", "")).resolve()) for o in ops if isinstance(o, dict) and o.get("path")]
+    blocked = _require_read(ctx, abs_paths)
+    if blocked:
+        return blocked
     n = len([o for o in ops if isinstance(o, dict)])
     lines = [f"应用结构化补丁（{n} 处）并跑测试："]
     for o in ops:
@@ -280,7 +285,7 @@ def t_code_apply_patch(args: dict, ctx) -> str:
             lines.append(panels.render_diff(o.get("old", ""), o.get("new", ""), str(o.get("path", ""))))
         except Exception:
             pass
-    preview = _read_nudge(ctx, abs_paths) + "\n".join(lines)
+    preview = "\n".join(lines)
     # 3) 一次审批
     ok, msg = _gate(ctx, "code_apply_patch", preview)
     if not ok:
@@ -518,7 +523,10 @@ def t_edit_file(args: dict, ctx) -> str:
         return "未找到要替换的原文（old 不匹配）。"
     if cnt > 1:
         return f"原文出现 {cnt} 次，不唯一；请提供更长的 old 以唯一定位。"
-    preview = _read_nudge(ctx, [str(p)]) + f"编辑 {_disp(p)}：替换 1 处\n" + panels.render_diff(old, new, p.name)
+    blocked = _require_read(ctx, [str(p)])
+    if blocked:
+        return blocked
+    preview = f"编辑 {_disp(p)}：替换 1 处\n" + panels.render_diff(old, new, p.name)
     ok, msg = _gate(ctx, "edit_file", preview)
     if not ok:
         return msg

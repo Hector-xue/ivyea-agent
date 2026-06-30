@@ -53,8 +53,17 @@ def test_edit_unique(tmp_path):
     f = tmp_path / "e.txt"
     f.write_text("bid 1.00 done", encoding="utf-8")
     ctx = _ctx(tmp_path, allow=["edit_file"])
+    tg.t_read_file({"path": str(f)}, ctx)   # 改前必读硬护栏：先读再编辑
     r = tg.t_edit_file({"path": str(f), "old": "1.00", "new": "0.85"}, ctx)
     assert "已编辑" in r and f.read_text() == "bid 0.85 done"
+
+
+def test_edit_blocked_without_prior_read(tmp_path):
+    f = tmp_path / "e.txt"
+    f.write_text("bid 1.00 done", encoding="utf-8")
+    ctx = _ctx(tmp_path, allow=["edit_file"])
+    r = tg.t_edit_file({"path": str(f), "old": "1.00", "new": "0.85"}, ctx)
+    assert "已拦截" in r and "read_file" in r and f.read_text() == "bid 1.00 done"  # 未读→挡回，未改
 
 
 def test_edit_nonunique_refused(tmp_path):

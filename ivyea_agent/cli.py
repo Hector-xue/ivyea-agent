@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -1194,6 +1195,7 @@ SLASH_COMMANDS = [
     ("/workspace", "项目理解：/workspace map|search|explain"),
     ("/patch", "结构化补丁：/patch make|validate|apply|tests"),
     ("/gitops", "Git 工作流：/gitops status|diff|stage|commit|tag"),
+    ("/diff", "看工作区改动的彩色 diff（/diff staged 看暂存区）"),
     ("/memory", "记忆：状态/最近巡检；/memory <词> 检索"),
     ("/plan", "进入/退出计划模式（只读，不写入）"),
     ("/approve", "批准并退出计划模式，继续执行"),
@@ -1238,8 +1240,14 @@ def _looks_like_code_task(query: str) -> bool:
     return engineering_context.should_include(query) or bool(_CODE_HINTS.search(query or ""))
 
 
+def _dwidth(s: str) -> int:
+    """终端显示宽度（CJK 全角算 2 格），用于状态行不换行截断。"""
+    return sum(2 if ord(c) > 0x2E7F else 1 for c in s)
+
+
 class _LiveSpinner:
-    """生成时的轻量转圈反馈：转圈 + 已耗时 + 估算输出 token + 中断提示（不打印正文，收尾渲染 markdown）。"""
+    """生成时的实时反馈：转圈 + 耗时 + 估算 token + **正在生成的正文末尾预览**（单行 \\r 覆盖，零闪烁）。
+    不打印完整正文，收尾仍统一渲染 markdown。"""
     _F = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     def __init__(self):
@@ -1247,18 +1255,34 @@ class _LiveSpinner:
         self.on = False
         self.start = None
         self.chars = 0
+        self.tail = ""   # 当前行尾的正文预览
 
     def tick(self, text: str = "") -> None:
         if self.start is None:
             self.start = time.time()
-        self.chars += len(text or "")
+        if text:
+            self.chars += len(text)
+            combined = self.tail + text
+            if "\n" in combined:
+                combined = combined.rsplit("\n", 1)[1]   # 只留最后一行
+            self.tail = combined
         self.i += 1
         frame = self._F[self.i % len(self._F)]
         elapsed = int(time.time() - self.start)
         toks = self.chars // 3   # 中英混排粗估 ~3 字符/token，仅作进度感
-        tok_s = f" · ~{toks / 1000:.1f}k tok" if toks >= 1000 else (f" · ~{toks} tok" if toks else "")
-        # \033[K 清到行尾，避免上一帧更长状态残留
-        sys.stdout.write(f"\r\033[K{_C['c']}{frame}{_C['x']} {_C['d']}生成中 · {elapsed}s{tok_s} · Ctrl-C 中断{_C['x']}")
+        tok_s = f"~{toks / 1000:.1f}k tok" if toks >= 1000 else f"~{toks} tok"
+        head = f"生成中 {elapsed}s · {tok_s} · "
+        width = shutil.get_terminal_size((80, 24)).columns
+        avail = width - 2 - _dwidth(head) - 1   # 2=frame+空格，1=余量
+        preview = self.tail.strip()
+        if preview and avail > 6:
+            clipped = False
+            while _dwidth(preview) > avail - 1 and len(preview) > 1:
+                preview = preview[1:]; clipped = True   # 从左裁，保留最新文字
+            body = head + ("…" + preview if clipped else preview)
+        else:
+            body = head + "Ctrl-C 中断"
+        sys.stdout.write(f"\r\033[K{_C['c']}{frame}{_C['x']} {_C['d']}{body}{_C['x']}")
         sys.stdout.flush()
         self.on = True
 
@@ -1267,6 +1291,7 @@ class _LiveSpinner:
             sys.stdout.write("\r\033[K")
             sys.stdout.flush()
             self.on = False
+            self.tail = ""   # 一段叙述/工具行后重置预览
 
 
 def _help_text() -> str:
@@ -1495,6 +1520,19 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             enabled = line.endswith(" on")
             cfg.set_setting("auto_compact", enabled)
             print(ui.message("success", f"自动压缩已{'开启' if enabled else '关闭'}。手动压缩仍可用 /compact。"))
+            continue
+        if line == "/diff" or line == "/diff staged":
+            from . import git_workflow, panels as _panels
+            staged = line.endswith(" staged")
+            data = git_workflow.unified_diff(os.getcwd(), staged=staged)
+            if not data.get("ok"):
+                print(ui.message("warn", data.get("error", "无法取得 diff")))
+            elif not (data.get("patch") or "").strip():
+                print(ui.message("info", f"{'暂存区' if staged else '工作区'}没有改动。"))
+            else:
+                print(_panels.colorize_patch(data["patch"], color=sys.stdout.isatty()))
+                if data.get("truncated"):
+                    print(ui.message("muted", "（diff 较长已截断，完整看 git diff）"))
             continue
         if line == "/init":
             p = memory.init_agents(str(cfg.IVYEA_DIR / "AGENTS.md"))

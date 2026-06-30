@@ -43,6 +43,27 @@ def render_todos(todos: list, *, color: bool = True) -> str:
     return "\n".join(lines)
 
 
+def colorize_patch(patch: str, *, color: bool = True) -> str:
+    """给一段 git 统一 diff 文本上色（绿增/红删/dim hunk头/青文件头）。用于 /diff 等。"""
+    if not patch.strip():
+        return ""
+    out = []
+    for ln in patch.splitlines():
+        if not color:
+            out.append(ln)
+        elif ln.startswith("diff --git") or ln.startswith(("+++", "---")):
+            out.append(f"{_CYAN}{ln}{_X}")
+        elif ln.startswith("@@"):
+            out.append(f"{_DIM}{ln}{_X}")
+        elif ln.startswith("+"):
+            out.append(f"{_GREEN}{ln}{_X}")
+        elif ln.startswith("-"):
+            out.append(f"{_RED}{ln}{_X}")
+        else:
+            out.append(ln)
+    return "\n".join(out)
+
+
 def render_diff(old: str, new: str, path: str = "", *, color: bool = True, context: int = 2) -> str:
     """old→new 的彩色统一 diff（红删/绿增）。"""
     if old == new:
