@@ -19,6 +19,7 @@ class PermissionState:
     """一次会话/一次 apply 内的审批状态。"""
     session_allow: set = field(default_factory=set)   # 本会话已"允许此类"的动作 kind
     aborted: bool = False
+    accept_edits: bool = False                         # opt-in：本会话所有写操作自动放行（/auto-edit on）
 
 
 def preview(a: Action) -> str:
@@ -43,7 +44,7 @@ def request(a: Action, state: PermissionState,
     会就地处理「本会话都允许此类」与「改一下」(改幅度/否定匹配)。"""
     if state.aborted:
         return ABORT
-    if a.kind in state.session_allow:
+    if state.accept_edits or a.kind in state.session_allow:
         return APPROVE
 
     options = [("approve", "批准本次"), ("session", "本会话同类都批准"),
@@ -74,7 +75,7 @@ def request_intent(intent: dict, preview_text: str, state: PermissionState,
     if state.aborted:
         return ABORT
     op_type = intent.get("op_type", "")
-    if op_type in state.session_allow:
+    if state.accept_edits or op_type in state.session_allow:
         return APPROVE
     has_edit = edit_fn is not None
     options = [("approve", "批准本次"), ("session", "本会话同类都批准"), ("deny", "拒绝")]

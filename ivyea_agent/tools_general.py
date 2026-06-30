@@ -41,6 +41,21 @@ def _dangerous_command(command: str) -> str:
     return ""
 
 
+def _with_line_numbers(text: str, start: int = 1) -> str:
+    """cat -n 式给每行加行号（仅供模型定位/引用；edit 的 old 不要带行号）。"""
+    lines = text.split("\n")
+    width = max(4, len(str(start + len(lines) - 1)))
+    return "\n".join(f"{start + i:>{width}}\t{ln}" for i, ln in enumerate(lines))
+
+
+_LINE_NO_RE = re.compile(r"^\s*\d+\t", re.M)
+
+
+def _strip_line_no(text: str) -> str:
+    """去掉每行前导的 `行号\\t`（兜底模型误把 read_file 的行号粘进 old）。"""
+    return _LINE_NO_RE.sub("", text)
+
+
 def _disp(p) -> str:
     """审批预览用的友好路径：在 cwd 下显示相对路径，否则原样。仅展示用，写入仍用绝对路径。"""
     try:
@@ -95,7 +110,7 @@ def t_read_file(args: dict, ctx) -> str:
     offset = args.get("offset")
     limit = args.get("limit")
     if offset is None and limit is None:
-        return _truncate(text)
+        return _truncate(_with_line_numbers(text, 1))
     # 行区间读取：offset 从 1 开始；大文件只取一段，避免被迫用 run_command 分段读。
     lines = text.splitlines()
     total = len(lines)
@@ -103,7 +118,7 @@ def t_read_file(args: dict, ctx) -> str:
     if start > total:
         return f"（{p.name} 共 {total} 行，offset={start} 超出范围）"
     end = total if limit is None else min(total, start + max(1, int(limit)) - 1)
-    body = "\n".join(lines[start - 1:end])
+    body = _with_line_numbers("\n".join(lines[start - 1:end]), start)
     return f"（{p.name} 第 {start}–{end} 行，共 {total} 行）\n" + _truncate(body)
 
 
@@ -225,6 +240,36 @@ def t_grep(args: dict, ctx) -> str:
     if not hits:
         return f"无匹配（扫描 {scanned} 文件）：{pattern}"
     return f"命中 {len(hits)} 处（扫描 {scanned} 文件）：\n" + _truncate("\n".join(hits))
+
+
+def t_glob(args: dict, ctx) -> str:
+    """按文件名 glob 模式找文件（如 **/*.py）。只读、ignore-aware（复用 workspace.iter_files）。"""
+    import fnmatch
+    from . import workspace
+    pattern = (args.get("pattern") or "").strip()
+    if not pattern:
+        return "pattern 为空。"
+    base = args.get("path")
+    root = Path(os.path.expanduser(base)).resolve() if base else Path(_ws_root(ctx))
+    ok, msg = policy.check_path(root, "read")
+    if not ok:
+        return msg
+    max_n = min(int(args.get("max_results") or 100), 500)
+    # fnmatch 的 * 本就跨 /，把 **/ 归一为空、** 归一为 * 即可正确支持 **/*.py 这类（含根目录）。
+    norm = pattern.replace("**/", "").replace("**", "*")
+    hits: list[str] = []
+    for path in workspace.iter_files(root):
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            rel = path.name
+        if fnmatch.fnmatch(rel, norm) or fnmatch.fnmatch(path.name, pattern):
+            hits.append(rel)
+            if len(hits) >= max_n:
+                break
+    if not hits:
+        return f"没有匹配 {pattern} 的文件。"
+    return f"匹配 {len(hits)} 个文件：\n" + _truncate("\n".join(sorted(hits)))
 
 
 def t_code_search(args: dict, ctx) -> str:
@@ -519,8 +564,11 @@ def t_edit_file(args: dict, ctx) -> str:
     except Exception as e:  # noqa: BLE001
         return f"读取失败：{e}"
     cnt = text.count(old)
+    if cnt == 0 and _LINE_NO_RE.search(old):
+        old = _strip_line_no(old)   # 容错：模型把 read_file 的行号粘进了 old
+        cnt = text.count(old)
     if cnt == 0:
-        return "未找到要替换的原文（old 不匹配）。"
+        return "未找到要替换的原文（old 不匹配）。注意 old 用文件真实内容，不要带 read_file 的行号。"
     if cnt > 1:
         return f"原文出现 {cnt} 次，不唯一；请提供更长的 old 以唯一定位。"
     blocked = _require_read(ctx, [str(p)])
@@ -567,10 +615,11 @@ def _make_preexec(timeout: int):
     return _apply
 
 
-def _run(cmd, args, ctx, kind: str, preview: str) -> str:
-    ok, msg = _gate(ctx, kind, preview)
-    if not ok:
-        return msg
+def _run(cmd, args, ctx, kind: str, preview: str, *, auto_ok: bool = False) -> str:
+    if not auto_ok:   # 只读命令(auto_ok)免审批，也可在计划模式下跑（本就只读）
+        ok, msg = _gate(ctx, kind, preview)
+        if not ok:
+            return msg
     workdir = getattr(ctx, "workspace", "") or os.getcwd()
     timeout = int(args.get("timeout") or _EXEC_TIMEOUT)
     try:
@@ -608,7 +657,8 @@ def t_run_command(args: dict, ctx) -> str:
         return f"安全策略拒绝高风险命令：{blocked}"
     import os as _os
     shell = ["cmd", "/c", command] if _os.name == "nt" else ["bash", "-lc", command]
-    return _run(shell, args, ctx, "run_command", "运行命令：" + _truncate(command, 400))
+    auto_ok = policy.is_readonly_command(command)   # 只读命令自动放行，省去逐次审批
+    return _run(shell, args, ctx, "run_command", "运行命令：" + _truncate(command, 400), auto_ok=auto_ok)
 
 
 def t_todo_write(args: dict, ctx) -> str:
@@ -694,7 +744,8 @@ def _fn(name, desc, props, required=()):
 
 
 GENERAL_TOOL_SCHEMAS = [
-    _fn("read_file", "读取本地文本文件内容（只读，自动放行）。大文件用 offset/limit 读行区间，别用 run_command 分段读。",
+    _fn("read_file", "读取本地文本文件内容（只读，自动放行）。返回带行号（行号\\t内容，仅供定位/引用，"
+        "edit_file 的 old 用真实内容不要带行号）。大文件用 offset/limit 读行区间，别用 run_command 分段读。",
         {"path": {"type": "string", "description": "文件路径，支持 ~"},
          "offset": {"type": "integer", "description": "起始行号（从 1 开始）；读大文件某段时填"},
          "limit": {"type": "integer", "description": "最多读多少行；配合 offset 读区间"}}, ["path"]),
@@ -703,7 +754,8 @@ GENERAL_TOOL_SCHEMAS = [
     _fn("write_file", "新建或整体重写文件（写操作，一次调用即审批落盘）。改已有文件的某一处别用它，用 edit_file。",
         {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
     _fn("edit_file", "改单个文件的某一处：唯一字符串替换 old→new（写操作，一次调用即审批落盘）。"
-        "old 必须在文件中唯一出现。单处改动首选它；跨多文件/多处或要顺带跑测试用 code_apply_patch。",
+        "old 用文件真实内容（不要带 read_file 的行号前缀）且必须唯一出现。"
+        "单处改动首选它；跨多文件/多处或要顺带跑测试用 code_apply_patch。",
         {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}},
         ["path", "old", "new"]),
     _fn("run_python", "在沙箱(限工作目录/超时)运行 Python 代码取 stdout（执行，会弹审批）。可用 pandas/openpyxl 等。",
@@ -718,6 +770,11 @@ GENERAL_TOOL_SCHEMAS = [
         {"pattern": {"type": "string", "description": "正则表达式"},
          "glob": {"type": "string", "description": "可选：只搜匹配此 glob 的文件，如 *.py"},
          "max_results": {"type": "integer", "description": "最多命中条数，默认 80"}}, ["pattern"]),
+    _fn("glob", "按文件名 glob 模式找文件（如 **/*.py、src/**/*.ts）。只读，自动放行。"
+        "想按文件名/路径定位文件用它；想按内容搜用 grep。",
+        {"pattern": {"type": "string", "description": "glob 模式，如 **/*.py"},
+         "path": {"type": "string", "description": "起始目录，默认工作目录"},
+         "max_results": {"type": "integer", "description": "最多返回条数，默认 100"}}, ["pattern"]),
     _fn("code_search", "按符号/路径/预览检索代码库里最相关的文件（索引搜索）。只读。适合“这功能在哪实现的”。",
         {"query": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]),
     _fn("code_symbols", "列出/搜索代码库里的函数/类等符号定义位置。只读。",
@@ -779,7 +836,7 @@ GENERAL_DISPATCH = {
     "write_file": t_write_file, "edit_file": t_edit_file,
     "run_python": t_run_python, "run_command": t_run_command,
     "web_fetch": t_web_fetch, "web_search": t_web_search,
-    "grep": t_grep, "code_search": t_code_search,
+    "grep": t_grep, "glob": t_glob, "code_search": t_code_search,
     "code_symbols": t_code_symbols, "code_impact": t_code_impact,
     "code_apply_patch": t_code_apply_patch, "run_tests": t_run_tests, "code_repair": t_code_repair,
     "mcp_list_tools": t_mcp_list_tools, "mcp_call_tool": t_mcp_call_tool,

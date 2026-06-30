@@ -1203,6 +1203,7 @@ SLASH_COMMANDS = [
     ("/compact", "压缩上下文；/compact auto on|off 控制自动压缩"),
     ("/init", "生成账户指令模板 AGENTS.md（长期打法/边界，自动注入）"),
     ("/raw", "切换 Markdown 渲染 / 原始流式输出"),
+    ("/auto-edit", "开关写操作自动放行（/auto-edit on|off；默认逐次审批）"),
     ("/clear", "清空当前对话上下文"),
     ("/exit", "退出 (亦可 /quit)"),
 ]
@@ -1452,10 +1453,11 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
     def _status() -> str:
         plan = "计划模式 · " if ctx.plan_mode else ""
+        auto = "⚡自动放行 · " if ctx.perm.accept_edits else ""
         cost = f"¥{meter.cost:.4f} · " if meter.turns else ""
         cx = f"ctx ~{_ui['ctx'] // 1000}k · " if _ui["ctx"] else ""
         turns = f"{meter.turns} 轮 · " if meter.turns else ""
-        return (f" ivyea · {_label()} · {plan}"
+        return (f" ivyea · {_label()} · {plan}{auto}"
                 f"{'真实写' if args.execute else 'dry-run'} · {turns}{cx}{cost}输入 / 看命令 ")
 
     ci = chat_input.ChatInput(SLASH_COMMANDS, _status)
@@ -1497,6 +1499,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if line == "/raw":
             render_md = not render_md
             print(ui.message("success", f"已切换为 {'原始流式' if not render_md else 'Markdown 渲染'} 输出。")); continue
+        if line in ("/auto-edit", "/auto-edit on", "/auto-edit off"):
+            if line == "/auto-edit":
+                ctx.perm.accept_edits = not ctx.perm.accept_edits
+            else:
+                ctx.perm.accept_edits = line.endswith(" on")
+            if ctx.perm.accept_edits:
+                print(ui.message("warn", "⚡ 自动放行已开：本会话所有写操作不再逐次审批"
+                                         "（计划模式拦截、改前必读仍生效）。/auto-edit off 关闭。"))
+            else:
+                print(ui.message("success", "已关闭自动放行，恢复逐次人工审批。"))
+            continue
         if line == "/compact":
             ak = cfg.get_active_key()
             if not ak:
