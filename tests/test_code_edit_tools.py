@@ -12,11 +12,16 @@ def _repo(tmp_path):
     return tmp_path
 
 
+def _read_first(ctx, root):
+    dispatch("read_file", {"path": str(root / "pkg" / "calc.py")}, ctx)  # 满足改前必读硬护栏
+
+
 def test_apply_patch_denied_does_not_write(tmp_path, monkeypatch):
     # 一次性语义：先校验通过 → 弹审批；用户拒绝则不落盘。
     root = _repo(tmp_path)
     monkeypatch.setattr(permission, "request_intent", lambda *a, **k: permission.DENY)
     ctx = ToolContext(workspace=str(root))
+    _read_first(ctx, root)
     out = dispatch("code_apply_patch", {"ops": [
         {"path": "pkg/calc.py", "old": "return a + b\n", "new": "return a + b + 0\n"}]}, ctx)
     assert "跳过" in out or "deny" in out.lower()
@@ -28,10 +33,21 @@ def test_apply_patch_approve_writes(tmp_path, monkeypatch):
     root = _repo(tmp_path)
     monkeypatch.setattr(permission, "request_intent", lambda *a, **k: permission.APPROVE)
     ctx = ToolContext(workspace=str(root), execute=True)
+    _read_first(ctx, root)
     out = dispatch("code_apply_patch", {"ops": [
         {"path": "pkg/calc.py", "old": "return a + b\n", "new": "return a + b + 0\n"}]}, ctx)
     assert "应用" in out or "applied" in out.lower() or "execute" in out.lower()
     assert (root / "pkg" / "calc.py").read_text(encoding="utf-8").endswith("return a + b + 0\n")
+
+
+def test_apply_patch_blocked_without_prior_read(tmp_path):
+    # 改前必读硬护栏：未读过目标文件 → 挡回，不落盘、不弹审批。
+    root = _repo(tmp_path)
+    ctx = ToolContext(workspace=str(root))
+    out = dispatch("code_apply_patch", {"ops": [
+        {"path": "pkg/calc.py", "old": "return a + b\n", "new": "return a + b + 0\n"}]}, ctx)
+    assert "已拦截" in out and "read_file" in out
+    assert (root / "pkg" / "calc.py").read_text(encoding="utf-8").endswith("return a + b\n")
 
 
 def test_apply_patch_invalid_returns_without_approval(tmp_path, monkeypatch):
@@ -50,6 +66,7 @@ def test_apply_patch_invalid_returns_without_approval(tmp_path, monkeypatch):
 def test_apply_patch_blocked_in_plan_mode(tmp_path):
     root = _repo(tmp_path)
     ctx = ToolContext(workspace=str(root), plan_mode=True)
+    _read_first(ctx, root)
     out = dispatch("code_apply_patch", {"ops": [
         {"path": "pkg/calc.py", "old": "return a + b\n", "new": "x\n"}]}, ctx)
     assert "计划模式" in out

@@ -192,8 +192,9 @@ def load_instructions(cwd: str = "", limit: int = 6000) -> str:
                 t = p.read_text(encoding="utf-8").strip()
                 if t:
                     parts.append(f"# {p.name}\n{t}")
-        except Exception:
-            pass
+        except Exception as e:
+            from . import log
+            log.dbg("memory.instructions", f"读取 {p} 失败: {e!r}")
     return "\n\n".join(parts)[:limit]
 
 

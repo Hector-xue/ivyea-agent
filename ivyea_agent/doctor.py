@@ -67,11 +67,11 @@ def _data_dir() -> Check:
 def _model() -> Check:
     s = config.get_model_config()
     key_env = s.get("key_env") or ""
-    has_key = bool(config.get_active_key())
     detail = f"{s.get('label')} · {s.get('model')} · {key_env}"
-    if not has_key:
-        return Check("模型配置", "warn", detail + "，key 未配置", "运行 `ivyea model` 配置 API key")
-    return Check("模型配置", "ok", detail + "，key 已配置")
+    health = config.main_brain_health()   # 含 oauth 凭据过期判断
+    if not health.get("ok"):
+        return Check("模型配置", "warn", detail + f"，{health.get('status')}", health.get("hint", "运行 `ivyea model` 配置/切换"))
+    return Check("模型配置", "ok", detail + "，主脑可用")
 
 
 def _knowledge() -> Check:

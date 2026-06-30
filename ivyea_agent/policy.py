@@ -129,6 +129,33 @@ def check_command(command: str) -> tuple[bool, str]:
     return True, ""
 
 
+# 明确只读、无副作用的命令头（用于自动放行，省去逐次审批）。
+_READONLY_HEADS = {
+    "ls", "cat", "pwd", "head", "tail", "wc", "which", "echo", "printf", "date", "tree",
+    "stat", "file", "du", "df", "whoami", "hostname", "uname", "basename", "dirname",
+    "realpath", "nl", "sort", "uniq", "cut", "grep", "rg", "env", "printenv",
+}
+# git 的恒只读子命令（branch/tag/remote/stash/config 有写形式，故排除）。
+_READONLY_GIT = {
+    "status", "diff", "log", "show", "ls-files", "rev-parse", "describe",
+    "blame", "shortlog", "cat-file", "name-rev", "whatchanged",
+}
+# 任一写/链式元字符出现就不自动放行（重定向/管道/串联/命令替换）。
+_WRITE_META_RE = re.compile(r"[>|;&`<]|\$\(")
+
+
+def is_readonly_command(command: str) -> bool:
+    """是否为明确只读、可自动放行的 shell 命令（保守：含任何写/链式元字符即否）。"""
+    cmd = _norm_cmd(command)
+    if not cmd or _WRITE_META_RE.search(cmd):
+        return False
+    parts = cmd.split()
+    head = parts[0]
+    if head == "git":
+        return len(parts) >= 2 and parts[1] in _READONLY_GIT
+    return head in _READONLY_HEADS
+
+
 def assess_command(command: str) -> dict[str, Any]:
     """Return allow/deny and a coarse risk level for a shell command."""
     cmd = _norm_cmd(command)

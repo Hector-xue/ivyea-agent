@@ -22,9 +22,12 @@ def should_include(query: str) -> bool:
     return bool(re.search(r"\b(test|release|deploy|install|upgrade|bug|fix|refactor|workspace|skill|patch)\b", q))
 
 
-def build(root: str | Path = ".", query: str = "", max_chars: int = 2200) -> str:
-    if not should_include(query):
-        return ""
+# 昂贵的 [workspace]+[skills] 段按 (root, git head, clean) 缓存——结构在同一提交/工作树
+# 状态下不变，避免每个代码轮都重跑 project_inspect 的文件遍历。[git] 段始终新鲜重算。
+_STATIC_CACHE: dict = {}
+
+
+def _static_sections(root: str | Path) -> list[str]:
     parts: list[str] = []
     try:
         inspected = workspace.project_inspect(root)
@@ -43,18 +46,6 @@ def build(root: str | Path = ".", query: str = "", max_chars: int = 2200) -> str
             parts.append("suggested_commands: " + ", ".join(str(c) for c in commands[:6]))
     except (OSError, ValueError, RuntimeError, KeyError, TypeError) as e:
         parts.append(f"[workspace] unavailable: {e}")
-
-    try:
-        st = git_workflow.status(root)
-        if st.get("ok"):
-            changes = st.get("changes") or []
-            parts.append("[git]")
-            parts.append(f"branch={st.get('branch')} head={st.get('head')} clean={st.get('clean')}")
-            if changes:
-                parts.append("changes: " + ", ".join(str(c) for c in changes[:10]))
-    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as e:
-        parts.append(f"[git] unavailable: {e}")
-
     try:
         rows = skills.status()
         warn = [r for r in rows if not r.get("ok")]
@@ -64,6 +55,33 @@ def build(root: str | Path = ".", query: str = "", max_chars: int = 2200) -> str
             parts.append("warnings: " + ", ".join(f"{r['id']}:{','.join(r['issues'][:2])}" for r in warn[:6]))
     except (OSError, ValueError, RuntimeError, KeyError, TypeError) as e:
         parts.append(f"[skills] unavailable: {e}")
+    return parts
+
+
+def build(root: str | Path = ".", query: str = "", max_chars: int = 2200) -> str:
+    if not should_include(query):
+        return ""
+    try:
+        st = git_workflow.status(root)
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+        st = {}
+
+    key = (str(Path(root).resolve()), st.get("head"), st.get("clean")) if st.get("ok") else None
+    if key is not None and key in _STATIC_CACHE:
+        parts = list(_STATIC_CACHE[key])
+    else:
+        parts = _static_sections(root)
+        if key is not None:
+            if len(_STATIC_CACHE) > 32:
+                _STATIC_CACHE.clear()
+            _STATIC_CACHE[key] = list(parts)
+
+    if st.get("ok"):   # [git] 段始终新鲜
+        changes = st.get("changes") or []
+        parts.append("[git]")
+        parts.append(f"branch={st.get('branch')} head={st.get('head')} clean={st.get('clean')}")
+        if changes:
+            parts.append("changes: " + ", ".join(str(c) for c in changes[:10]))
 
     text = "\n".join(parts).strip()
     if len(text) > max_chars:

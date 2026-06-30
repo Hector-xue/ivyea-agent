@@ -76,6 +76,20 @@ def diff_summary(root: str | Path = ".", staged: bool = False, max_files: int = 
     return {"ok": True, "root": str(r), "staged": staged, "stat": stat, "files": files}
 
 
+def unified_diff(root: str | Path = ".", staged: bool = False, max_lines: int = 500) -> dict[str, Any]:
+    """工作区(或 staged)的统一 diff 原文，供 /diff 上色展示。"""
+    r = repo_root(root)
+    if not r:
+        return {"ok": False, "error": "不是 Git 仓库"}
+    args = ["diff"] + (["--cached"] if staged else [])
+    _, patch = _run_git(r, args)
+    lines = patch.splitlines()
+    truncated = len(lines) > max_lines
+    if truncated:
+        patch = "\n".join(lines[:max_lines])
+    return {"ok": True, "root": str(r), "staged": staged, "patch": patch, "truncated": truncated}
+
+
 def workflows(root: str | Path = ".") -> list[dict[str, str]]:
     r = repo_root(root) or Path(root).expanduser().resolve()
     wf_dir = r / ".github" / "workflows"
