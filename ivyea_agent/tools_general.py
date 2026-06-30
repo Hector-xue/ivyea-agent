@@ -50,6 +50,16 @@ def _disp(p) -> str:
         return str(p)
 
 
+def _read_nudge(ctx, paths) -> str:
+    """改前必读软护栏：列出本会话未 read_file 过的目标文件，返回温和提示行（不阻断）。"""
+    read = getattr(ctx, "read_paths", None) or set()
+    unread = [p for p in paths if str(p) not in read and Path(p).exists()]
+    if not unread:
+        return ""
+    names = "、".join(_disp(p) for p in unread)
+    return f"⚠ 本会话未读过 {names}，建议先 read_file 核对再改\n"
+
+
 def _gate(ctx, kind: str, preview: str) -> tuple[bool, str]:
     """写/执行前门控：计划模式拒绝；否则人工审批。返回 (放行?, 拒绝消息)。"""
     if getattr(ctx, "plan_mode", False):
@@ -76,6 +86,10 @@ def t_read_file(args: dict, ctx) -> str:
         text = p.read_text(encoding="utf-8", errors="replace")
     except Exception as e:  # noqa: BLE001
         return f"读取失败：{e}"
+    try:
+        ctx.read_paths.add(str(p))   # 记录已读，供 edit_file/code_apply_patch 的改前必读软护栏
+    except AttributeError:
+        pass
     offset = args.get("offset")
     limit = args.get("limit")
     if offset is None and limit is None:
@@ -241,23 +255,41 @@ def t_code_impact(args: dict, ctx) -> str:
 
 # ── 代码闭环（结构化补丁 / 测试 / 修复计划）──────────────────────────────────
 def t_code_apply_patch(args: dict, ctx) -> str:
-    """校验/应用结构化补丁并跑测试。默认 dry-run（只校验、不写）；execute=true 才真写，
-    且经人工审批。补丁 ops=[{path, old, new}]，old 必须在文件中唯一出现。"""
+    """一次性应用结构化补丁并跑测试（多文件/多处关联改动优先用它）。
+    内部固定流程：先校验(不写)→失败直接返回；通过则给彩色 diff 预览→一次人工审批→落盘+跑测试。
+    补丁 ops=[{path, old, new}]，old 必须在文件中唯一出现。"""
+    from . import code_agent, patcher
     ops = args.get("ops")
     if not isinstance(ops, list) or not ops:
         return "ops 为空：需要 [{path, old, new}, ...]，old 必须在文件中唯一出现。"
-    execute = bool(args.get("execute"))
-    if execute:
-        preview = "应用结构化补丁并执行测试：\n" + "\n".join(
-            f"  · {o.get('path')}" for o in ops if isinstance(o, dict))
-        ok, msg = _gate(ctx, "code_apply_patch", preview)
-        if not ok:
-            return msg
-    from . import code_agent
+    spec = {"ops": ops}
+    root = _ws_root(ctx)
+    # 1) 先校验，不写。校验失败不弹审批，直接把问题回给模型。
+    validation = patcher.validate_spec(spec, root=root)
+    if not validation.get("ok"):
+        return _truncate(patcher.render_validation(validation))
+    # 2) 构造彩色 diff 预览 + 改前必读提示
+    abs_paths = [str((Path(root) / o.get("path", "")).resolve()) for o in ops if isinstance(o, dict) and o.get("path")]
+    n = len([o for o in ops if isinstance(o, dict)])
+    lines = [f"应用结构化补丁（{n} 处）并跑测试："]
+    for o in ops:
+        if not isinstance(o, dict):
+            continue
+        lines.append(f"  · {_disp((Path(root) / o.get('path', '')).resolve())}")
+        try:
+            lines.append(panels.render_diff(o.get("old", ""), o.get("new", ""), str(o.get("path", ""))))
+        except Exception:
+            pass
+    preview = _read_nudge(ctx, abs_paths) + "\n".join(lines)
+    # 3) 一次审批
+    ok, msg = _gate(ctx, "code_apply_patch", preview)
+    if not ok:
+        return msg
+    # 4) 落盘 + 跑测试
     try:
         result = code_agent.patch_apply_loop(
-            {"ops": ops}, root=_ws_root(ctx),
-            test_command=args.get("test_command", "") or "", execute=execute)
+            spec, root=root,
+            test_command=args.get("test_command", "") or "", execute=True)
     except Exception as e:  # noqa: BLE001
         return f"补丁执行出错：{e}"
     return _truncate(code_agent.render_run(result))
@@ -486,7 +518,7 @@ def t_edit_file(args: dict, ctx) -> str:
         return "未找到要替换的原文（old 不匹配）。"
     if cnt > 1:
         return f"原文出现 {cnt} 次，不唯一；请提供更长的 old 以唯一定位。"
-    preview = f"编辑 {_disp(p)}：替换 1 处\n" + panels.render_diff(old, new, p.name)
+    preview = _read_nudge(ctx, [str(p)]) + f"编辑 {_disp(p)}：替换 1 处\n" + panels.render_diff(old, new, p.name)
     ok, msg = _gate(ctx, "edit_file", preview)
     if not ok:
         return msg
@@ -660,9 +692,10 @@ GENERAL_TOOL_SCHEMAS = [
          "limit": {"type": "integer", "description": "最多读多少行；配合 offset 读区间"}}, ["path"]),
     _fn("list_dir", "列出目录内容（只读）。",
         {"path": {"type": "string", "description": "目录路径，默认当前目录"}}),
-    _fn("write_file", "写入/覆盖本地文件（写操作，会弹人工审批）。",
+    _fn("write_file", "新建或整体重写文件（写操作，一次调用即审批落盘）。改已有文件的某一处别用它，用 edit_file。",
         {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
-    _fn("edit_file", "对文件做唯一字符串替换（写操作，会弹审批）。old 必须在文件中唯一出现。",
+    _fn("edit_file", "改单个文件的某一处：唯一字符串替换 old→new（写操作，一次调用即审批落盘）。"
+        "old 必须在文件中唯一出现。单处改动首选它；跨多文件/多处或要顺带跑测试用 code_apply_patch。",
         {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}},
         ["path", "old", "new"]),
     _fn("run_python", "在沙箱(限工作目录/超时)运行 Python 代码取 stdout（执行，会弹审批）。可用 pandas/openpyxl 等。",
@@ -683,12 +716,12 @@ GENERAL_TOOL_SCHEMAS = [
         {"query": {"type": "string", "description": "可选，过滤符号名"}, "limit": {"type": "integer"}}),
     _fn("code_impact", "查某个符号或文件的调用方、导入方与受影响测试（改动影响面）。只读。改代码前先看它。",
         {"target": {"type": "string", "description": "符号名或文件路径"}, "limit": {"type": "integer"}}, ["target"]),
-    _fn("code_apply_patch", "校验/应用结构化补丁并跑测试。默认 dry-run 只校验不写；execute=true 才真写(经人工审批)。"
-        "ops=[{path,old,new}]，old 必须在文件中唯一出现。多文件/要顺带跑测试时优先用它而非 edit_file。",
+    _fn("code_apply_patch", "一次性应用一组结构化补丁并跑测试（跨多文件/多处关联改动，或要顺带跑测试时用它）。"
+        "内部先校验→给彩色 diff 预览→一次人工审批→落盘+跑测试，不需要分 dry-run/execute 两步。"
+        "ops=[{path,old,new}]，old 必须在文件中唯一出现。单文件单处改动用 edit_file 即可。",
         {"ops": {"type": "array", "items": {"type": "object", "properties": {
             "path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}}}},
-         "test_command": {"type": "string", "description": "可选：execute 后跑的测试命令"},
-         "execute": {"type": "boolean", "description": "true=真写并测试(审批)，默认 false 只校验"}}, ["ops"]),
+         "test_command": {"type": "string", "description": "可选：落盘后跑的测试命令，默认自动挑选"}}, ["ops"]),
     _fn("run_tests", "在工作目录跑测试命令并返回结果（执行，会弹审批）。默认 python -m pytest。",
         {"command": {"type": "string"}, "timeout": {"type": "integer"}}),
     _fn("code_repair", "解析失败测试输出，生成下一轮修复计划（可疑文件/失败摘要/重跑命令）。只读。",
