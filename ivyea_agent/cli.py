@@ -1203,6 +1203,7 @@ SLASH_COMMANDS = [
     ("/compact", "压缩上下文；/compact auto on|off 控制自动压缩"),
     ("/init", "生成账户指令模板 AGENTS.md（长期打法/边界，自动注入）"),
     ("/raw", "切换 Markdown 渲染 / 原始流式输出"),
+    ("/stream", "开关完整流式（边生成边出字、收尾渲染 markdown；默认关）"),
     ("/auto-edit", "开关写操作自动放行（/auto-edit on|off；默认逐次审批）"),
     ("/clear", "清空当前对话上下文"),
     ("/exit", "退出 (亦可 /quit)"),
@@ -1293,6 +1294,47 @@ class _LiveSpinner:
             sys.stdout.flush()
             self.on = False
             self.tail = ""   # 一段叙述/工具行后重置预览
+
+
+class _StreamPrinter:
+    """完整流式：边生成边打印正文（dim），收尾按视觉行数擦除最后一段再渲染 markdown。
+    仅在 tty + /stream on 时启用；任何异常/非 tty 由调用方回退到 spinner 路径。"""
+    def __init__(self):
+        self.block = ""   # 当前连续正文段（被工具行打断即提交清零）
+        self.on = False
+
+    def render(self, text: str = "") -> None:
+        if not text:
+            return
+        sys.stdout.write(f"{_C['d']}{text}{_C['x']}")
+        sys.stdout.flush()
+        self.block += text
+        self.on = True
+
+    def commit(self) -> None:
+        """被 narrate（工具行/提示）打断：保留已打印文本，重置当前段。"""
+        self.block = ""
+
+    @staticmethod
+    def _visual_lines(s: str, width: int) -> int:
+        n = 0
+        for seg in s.split("\n"):
+            w = _dwidth(seg)
+            n += max(1, -(-w // width)) if w else 1
+        return n
+
+    def rerender(self, final_text: str) -> None:
+        """擦除最后一段流式正文，改打印 markdown 渲染版。"""
+        from . import markdown
+        if self.on and self.block:
+            width = shutil.get_terminal_size((80, 24)).columns
+            lines = self._visual_lines(self.block, width)
+            sys.stdout.write("\r")
+            if lines > 1:
+                sys.stdout.write(f"\033[{lines - 1}A")
+            sys.stdout.write("\033[J")
+            sys.stdout.flush()
+        print(f"{_C['c']}●{_C['x']} " + markdown.render(final_text))
 
 
 def _help_text() -> str:
@@ -1422,6 +1464,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         sid = sessions.new_id()
     ctx.session_id = sid
     render_md = not getattr(args, "raw", False)   # 默认 markdown 渲染
+    stream_live = bool(cfg.get_setting("stream_live", False))   # 完整流式（opt-in，/stream on）
 
     def _persist():
         try:
@@ -1506,6 +1549,14 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if line == "/raw":
             render_md = not render_md
             print(ui.message("success", f"已切换为 {'原始流式' if not render_md else 'Markdown 渲染'} 输出。")); continue
+        if line in ("/stream", "/stream on", "/stream off"):
+            stream_live = (not stream_live) if line == "/stream" else line.endswith(" on")
+            cfg.set_setting("stream_live", stream_live)
+            if stream_live and not sys.stdout.isatty():
+                print(ui.message("warn", "完整流式需要交互终端；当前非 tty，仍用收尾渲染。"))
+            else:
+                print(ui.message("success", f"完整流式已{'开启（边生成边出字，收尾渲染 markdown）' if stream_live else '关闭（用 spinner+流式预览）'}。"))
+            continue
         if line in ("/auto-edit", "/auto-edit on", "/auto-edit off"):
             if line == "/auto-edit":
                 ctx.perm.accept_edits = not ctx.perm.accept_edits
@@ -1686,8 +1737,15 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             mcfg = cfg.get_model_config()
             provider = build_chain(mcfg, api_key, narrate=lambda s: print(s))
             ctx.provider = provider   # 供 dispatch_subagent 跑只读子 agent 用
-            if render_md:
-                # 缓冲 + spinner，收尾渲染 markdown
+            if render_md and stream_live and sys.stdout.isatty():
+                # 完整流式：边生成边打印正文，收尾擦除最后一段改渲染 markdown
+                sp = _StreamPrinter()
+                out = agent_loop.run_turn_stream(
+                    provider, ctx, messages, model=mcfg.get("model", ""),
+                    render=sp.render, narrate=lambda s: (sp.commit(), print(s)))
+                sp.rerender(out["text"])
+            elif render_md:
+                # 缓冲 + spinner（含流式正文预览），收尾渲染 markdown
                 spin = _LiveSpinner()
                 out = agent_loop.run_turn_stream(
                     provider, ctx, messages, model=mcfg.get("model", ""),
