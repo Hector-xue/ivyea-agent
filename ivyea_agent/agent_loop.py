@@ -137,7 +137,7 @@ def _dispatch_tool_calls(ctx: ToolContext, messages: list, status: TurnStatus, t
         for call_idx, tc in enumerate(tool_calls, start=1):
             status.record_tool_call()
             narrate(ui.tool_call(tc["name"], tc.get("arguments") or {},
-                                 step=f"{step_idx + 1}/{max_steps}.{call_idx}∥"))
+                                 step=f"{step_idx + 1}/{max_steps} ∥{call_idx}"))
         with ThreadPoolExecutor(max_workers=min(len(tool_calls), 8)) as ex:
             outcomes = list(ex.map(lambda tc: _run_one(tc, ctx), tool_calls))
         for tc, (res, dur) in zip(tool_calls, outcomes):
@@ -146,7 +146,7 @@ def _dispatch_tool_calls(ctx: ToolContext, messages: list, status: TurnStatus, t
     for call_idx, tc in enumerate(tool_calls, start=1):
         status.record_tool_call()
         narrate(ui.tool_call(tc["name"], tc.get("arguments") or {},
-                             step=f"{step_idx + 1}/{max_steps}.{call_idx}"))
+                             step=f"{step_idx + 1}/{max_steps}"))
         res, dur = _run_one(tc, ctx)
         _record_tool_result(ctx, messages, tc, res, dur, narrate)
 

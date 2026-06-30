@@ -41,6 +41,15 @@ def _dangerous_command(command: str) -> str:
     return ""
 
 
+def _disp(p) -> str:
+    """审批预览用的友好路径：在 cwd 下显示相对路径，否则原样。仅展示用，写入仍用绝对路径。"""
+    try:
+        rel = os.path.relpath(p, os.getcwd())
+        return rel if not rel.startswith("..") else str(p)
+    except Exception:
+        return str(p)
+
+
 def _gate(ctx, kind: str, preview: str) -> tuple[bool, str]:
     """写/执行前门控：计划模式拒绝；否则人工审批。返回 (放行?, 拒绝消息)。"""
     if getattr(ctx, "plan_mode", False):
@@ -441,7 +450,7 @@ def t_write_file(args: dict, ctx) -> str:
     if not ok:
         return msg
     exists = p.exists()
-    preview = f"写文件 {p}（{'覆盖' if exists else '新建'}，{len(content)} 字）"
+    preview = f"写文件 {_disp(p)}（{'覆盖' if exists else '新建'}，{len(content)} 字）"
     if exists:
         try:
             preview += "\n" + panels.render_diff(p.read_text(encoding="utf-8"), content, p.name)
@@ -477,7 +486,7 @@ def t_edit_file(args: dict, ctx) -> str:
         return "未找到要替换的原文（old 不匹配）。"
     if cnt > 1:
         return f"原文出现 {cnt} 次，不唯一；请提供更长的 old 以唯一定位。"
-    preview = f"编辑 {p}：替换 1 处\n" + panels.render_diff(old, new, p.name)
+    preview = f"编辑 {_disp(p)}：替换 1 处\n" + panels.render_diff(old, new, p.name)
     ok, msg = _gate(ctx, "edit_file", preview)
     if not ok:
         return msg

@@ -42,6 +42,7 @@ def _fallback(title: str, body: str, options: list[tuple[str, str]],
 
 def _interactive(title: str, body: str, options: list[tuple[str, str]], kind: str) -> str:
     from prompt_toolkit.application import Application
+    from prompt_toolkit.formatted_text import ANSI, to_formatted_text
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import Layout
     from prompt_toolkit.layout.containers import HSplit, Window
@@ -54,7 +55,12 @@ def _interactive(title: str, body: str, options: list[tuple[str, str]], kind: st
     def render():
         frags = [("class:title", f"  ▌ {title}\n")]
         for line in str(body).splitlines() or [""]:
-            frags.append(("class:dim", f"    {line}\n"))
+            frags.append(("class:dim", "    "))
+            if "\x1b" in line:   # 行内带 ANSI（如 diff 的绿+/红-）→ 解析为片段以恢复配色，而非字面量
+                frags.extend(to_formatted_text(ANSI(line)))
+            else:
+                frags.append(("class:dim", line))
+            frags.append(("", "\n"))
         frags.append(("", "\n"))
         for i, (_, lbl) in enumerate(options):
             if i == state["idx"]:
