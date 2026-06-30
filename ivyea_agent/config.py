@@ -136,6 +136,27 @@ def get_active_key() -> str:
     return ""
 
 
+def main_brain_health() -> dict[str, Any]:
+    """本地判断主脑可用性（不发网络请求）。返回 {ok, status, label, hint}。"""
+    s = load_settings()
+    auth = (s.get("auth_type") or "api_key").lower()
+    pid = str(s.get("provider_id") or s.get("provider") or "")
+    label = s.get("label") or pid or "主脑"
+    if auth in ("oauth_external", "oauth_device_code"):
+        from . import oauth_auth
+        st = oauth_auth.token_status(pid)
+        if st in ("not-authenticated", "expired"):
+            how = "已过期" if st == "expired" else "未认证"
+            return {"ok": False, "status": st, "label": label,
+                    "hint": f"主脑 {label} 凭据{how}：`ivyea model {pid} --login`（或 --device-code）"
+                            f"重新登录，或 /model 切换其它主脑。"}
+        return {"ok": True, "status": st, "label": label, "hint": ""}
+    if bool(get_active_key()):
+        return {"ok": True, "status": "key", "label": label, "hint": ""}
+    return {"ok": False, "status": "no-key", "label": label,
+            "hint": f"主脑 {label} 未配 key：/model 配置或切换其它主脑。"}
+
+
 def apply_model(entry: dict[str, Any], model: str = "", base_url: str = "") -> None:
     """把 models.py 的一个条目（或自定义）写入 settings。"""
     s = load_settings()

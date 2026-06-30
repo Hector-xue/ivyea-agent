@@ -1428,8 +1428,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             sessions.save(sid, messages, model=cfg.get_model_config().get("model", ""),
                           usage={"cost": meter.cost, "turns": meter.turns,
                                  "prompt": meter.prompt, "completion": meter.completion})
-        except Exception:
-            pass
+        except Exception as e:
+            from . import log
+            log.dbg("chat.persist", f"会话保存失败 sid={sid}: {e!r}")
 
     keyst = _model_key_label(cfg.load_settings())
     mode = "真实写" if args.execute else "dry-run"
@@ -1448,6 +1449,12 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         f"{_C['d']}/ 弹命令菜单 · ↑↓+Enter 选择 · 直接说需求 · /exit 退出{_C['x']}",
     ], width=64)
     print()
+
+    # 主脑健康探测（本地，不发网络）：凭据过期/未配时醒目提示并指明出路，避免“开箱即坏”。
+    _health = cfg.main_brain_health()
+    if not _health.get("ok"):
+        print(ui.message("warn", _health.get("hint", "主脑不可用，请用 /model 切换。")))
+        print()
 
     from . import chat_input
 
