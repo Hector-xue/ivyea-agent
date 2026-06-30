@@ -11,15 +11,15 @@ import argparse
 import getpass
 import json
 import os
-import re
 import shlex
-import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 from . import __version__, config, ui
+# chat 展示层 helper 已拆到 chat_ui.py；re-export 保持 cli.X 引用与既有测试兼容。
+from .chat_ui import _is_amazon_domain, _looks_like_code_task, _LiveSpinner, _StreamPrinter
 
 
 def _ask(prompt: str, default: str = "") -> str:
@@ -1210,133 +1210,6 @@ SLASH_COMMANDS = [
 ]
 
 
-# 亚马逊广告域信号：命中任一则本轮按广告任务处理，注入内置知识/skill。
-_AMAZON_TERMS = (
-    "广告", "否词", "否定", "竞价", "出价", "bid", "预算", "budget", "acos", "acoas", "roas",
-    "tacos", "asin", "listing", "关键词", "搜索词", "投放", "活动", "campaign", "浪费词",
-    "转化", "点击", "曝光", "ctr", "cpc", "cvr", "店铺", "销量", "库存", "类目", "竞品",
-    "sp广告", "sb广告", "sd广告", "亚马逊", "amazon", "运营", "领星", "lingxing",
-    "sku", "review", "qa", "offer",
-)
-
-
-def _is_amazon_domain(query: str) -> bool:
-    """本轮是否带亚马逊广告/运营域信号。无信号的工程任务据此跳过内置知识注入。"""
-    q = (query or "").lower()
-    return any(t in q for t in _AMAZON_TERMS)
-
-
-# 代码/工程任务信号：源码文件后缀 + 代码语义词。比 engineering_context 的术语表更宽，
-# 用来兜住「给 calc.py 加 docstring」这类不含'优化/bug'但分明是写代码的请求。
-_CODE_HINTS = re.compile(
-    r"\.(py|js|ts|tsx|jsx|go|rs|java|kt|rb|php|cs|cpp|cc|hpp|sh|sql|ya?ml|toml|ini|css|html?|vue)\b"
-    r"|docstring|traceback|stack ?trace|函数|方法|变量|类型|形参|参数列表|报错|异常|栈|仓库|repo\b"
-    r"|分支|commit|merge|pull ?request|\bdef \b|\bclass \b|\bimport \b|编译|断点|单元测试|代码|脚本",
-    re.I,
-)
-
-
-def _looks_like_code_task(query: str) -> bool:
-    """本轮是否是写代码/工程任务（用于决定是否跳过亚马逊知识注入）。"""
-    from . import engineering_context
-    return engineering_context.should_include(query) or bool(_CODE_HINTS.search(query or ""))
-
-
-def _dwidth(s: str) -> int:
-    """终端显示宽度（CJK 全角算 2 格），用于状态行不换行截断。"""
-    return sum(2 if ord(c) > 0x2E7F else 1 for c in s)
-
-
-class _LiveSpinner:
-    """生成时的实时反馈：转圈 + 耗时 + 估算 token + **正在生成的正文末尾预览**（单行 \\r 覆盖，零闪烁）。
-    不打印完整正文，收尾仍统一渲染 markdown。"""
-    _F = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-
-    def __init__(self):
-        self.i = 0
-        self.on = False
-        self.start = None
-        self.chars = 0
-        self.tail = ""   # 当前行尾的正文预览
-
-    def tick(self, text: str = "") -> None:
-        if self.start is None:
-            self.start = time.time()
-        if text:
-            self.chars += len(text)
-            combined = self.tail + text
-            if "\n" in combined:
-                combined = combined.rsplit("\n", 1)[1]   # 只留最后一行
-            self.tail = combined
-        self.i += 1
-        frame = self._F[self.i % len(self._F)]
-        elapsed = int(time.time() - self.start)
-        toks = self.chars // 3   # 中英混排粗估 ~3 字符/token，仅作进度感
-        tok_s = f"~{toks / 1000:.1f}k tok" if toks >= 1000 else f"~{toks} tok"
-        head = f"生成中 {elapsed}s · {tok_s} · "
-        width = shutil.get_terminal_size((80, 24)).columns
-        avail = width - 2 - _dwidth(head) - 1   # 2=frame+空格，1=余量
-        preview = self.tail.strip()
-        if preview and avail > 6:
-            clipped = False
-            while _dwidth(preview) > avail - 1 and len(preview) > 1:
-                preview = preview[1:]; clipped = True   # 从左裁，保留最新文字
-            body = head + ("…" + preview if clipped else preview)
-        else:
-            body = head + "Ctrl-C 中断"
-        sys.stdout.write(f"\r\033[K{_C['c']}{frame}{_C['x']} {_C['d']}{body}{_C['x']}")
-        sys.stdout.flush()
-        self.on = True
-
-    def clear(self) -> None:
-        if self.on:
-            sys.stdout.write("\r\033[K")
-            sys.stdout.flush()
-            self.on = False
-            self.tail = ""   # 一段叙述/工具行后重置预览
-
-
-class _StreamPrinter:
-    """完整流式：边生成边打印正文（dim），收尾按视觉行数擦除最后一段再渲染 markdown。
-    仅在 tty + /stream on 时启用；任何异常/非 tty 由调用方回退到 spinner 路径。"""
-    def __init__(self):
-        self.block = ""   # 当前连续正文段（被工具行打断即提交清零）
-        self.on = False
-
-    def render(self, text: str = "") -> None:
-        if not text:
-            return
-        sys.stdout.write(f"{_C['d']}{text}{_C['x']}")
-        sys.stdout.flush()
-        self.block += text
-        self.on = True
-
-    def commit(self) -> None:
-        """被 narrate（工具行/提示）打断：保留已打印文本，重置当前段。"""
-        self.block = ""
-
-    @staticmethod
-    def _visual_lines(s: str, width: int) -> int:
-        n = 0
-        for seg in s.split("\n"):
-            w = _dwidth(seg)
-            n += max(1, -(-w // width)) if w else 1
-        return n
-
-    def rerender(self, final_text: str) -> None:
-        """擦除最后一段流式正文，改打印 markdown 渲染版。"""
-        from . import markdown
-        if self.on and self.block:
-            width = shutil.get_terminal_size((80, 24)).columns
-            lines = self._visual_lines(self.block, width)
-            sys.stdout.write("\r")
-            if lines > 1:
-                sys.stdout.write(f"\033[{lines - 1}A")
-            sys.stdout.write("\033[J")
-            sys.stdout.flush()
-        print(f"{_C['c']}●{_C['x']} " + markdown.render(final_text))
-
-
 _SLASH_GROUPS = [
     ("模型 / 配置", ["/model", "/config", "/status", "/mcp"]),
     ("代码 / 工程", ["/diff", "/workspace", "/patch", "/gitops", "/tools"]),
@@ -1535,6 +1408,183 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     from . import hooks as _hooks
     _hooks.fire("session_start", {"session_id": sid or "", "cwd": os.getcwd()})
 
+    # ── slash 命令注册表（替代旧的 25 分支 if 链；handler 返回 True=已处理→continue）──
+    def _sh_help(line):
+        print(_help_text()); return True
+
+    def _sh_clear(line):
+        nonlocal messages
+        messages = [_sys_msg()]
+        print(ui.message("success", "已清空对话上下文")); return True
+
+    def _sh_plan(line):
+        ctx.plan_mode = not ctx.plan_mode
+        messages[0] = _sys_msg()
+        print(ui.message("info", "已进入计划模式（只读，不写入；/approve 批准后执行）。") if ctx.plan_mode
+              else ui.message("success", "已退出计划模式。")); return True
+
+    def _sh_approve(line):
+        if ctx.plan_mode:
+            ctx.plan_mode = False
+            messages[0] = _sys_msg()
+            print(ui.message("success", "已批准，退出计划模式。说“继续/执行”让我落地计划。"))
+        else:
+            print(ui.message("warn", "当前不在计划模式。"))
+        return True
+
+    def _sh_cost(line):
+        lim = pricing.daily_limit()
+        tail = f" · 今日 ¥{pricing.today_spend():.4f}" + (f"/¥{lim:.2f} 上限" if lim > 0 else "（无上限，可 config set daily_cost_limit_cny）")
+        print((meter.summary() if meter.turns else "本会话还没有模型调用。") + tail); return True
+
+    def _sh_raw(line):
+        nonlocal render_md
+        render_md = not render_md
+        print(ui.message("success", f"已切换为 {'原始流式' if not render_md else 'Markdown 渲染'} 输出。")); return True
+
+    def _sh_stream(line):
+        nonlocal stream_live
+        stream_live = (not stream_live) if line == "/stream" else line.endswith(" on")
+        cfg.set_setting("stream_live", stream_live)
+        if stream_live and not sys.stdout.isatty():
+            print(ui.message("warn", "完整流式需要交互终端；当前非 tty，仍用收尾渲染。"))
+        else:
+            print(ui.message("success", f"完整流式已{'开启（边生成边出字，收尾渲染 markdown）' if stream_live else '关闭（用 spinner+流式预览）'}。"))
+        return True
+
+    def _sh_auto_edit(line):
+        if line == "/auto-edit":
+            ctx.perm.accept_edits = not ctx.perm.accept_edits
+        else:
+            ctx.perm.accept_edits = line.endswith(" on")
+        if ctx.perm.accept_edits:
+            print(ui.message("warn", "⚡ 自动放行已开：本会话所有写操作不再逐次审批"
+                                     "（计划模式拦截、改前必读仍生效）。/auto-edit off 关闭。"))
+        else:
+            print(ui.message("success", "已关闭自动放行，恢复逐次人工审批。"))
+        return True
+
+    def _sh_compact(line):
+        nonlocal messages
+        if line in ("/compact auto", "/compact auto status"):
+            state = "开启" if bool(cfg.get_setting("auto_compact", False)) else "关闭"
+            th = int(cfg.get_setting("compact_at_tokens", ctx_mod.DEFAULT_COMPACT_AT))
+            print(ui.message("info", f"自动压缩：{state} · 阈值 {th} prompt tokens")); return True
+        if line in ("/compact auto on", "/compact auto off"):
+            enabled = line.endswith(" on")
+            cfg.set_setting("auto_compact", enabled)
+            print(ui.message("success", f"自动压缩已{'开启' if enabled else '关闭'}。手动压缩仍可用 /compact。")); return True
+        ak = cfg.get_active_key()
+        if not ak:
+            print(ui.message("warn", "未配 key，无法压缩。")); return True
+        before = sum(len(str(m.get('content') or '')) for m in messages)
+        provider = from_settings(cfg.get_model_config(), ak)
+        messages, summary = ctx_mod.compact(messages, provider)
+        after = sum(len(str(m.get('content') or '')) for m in messages)
+        if summary:
+            memory.remember_summary(summary, sid)
+        _persist()
+        print(ui.message("success", f"已压缩上下文（约 {before}→{after} 字），摘要已入库。") if summary
+              else ui.message("info", "上下文较短，无需压缩。"))
+        return True
+
+    def _sh_diff(line):
+        from . import git_workflow, panels as _panels
+        staged = line.endswith(" staged")
+        data = git_workflow.unified_diff(os.getcwd(), staged=staged)
+        if not data.get("ok"):
+            print(ui.message("warn", data.get("error", "无法取得 diff")))
+        elif not (data.get("patch") or "").strip():
+            print(ui.message("info", f"{'暂存区' if staged else '工作区'}没有改动。"))
+        else:
+            print(_panels.colorize_patch(data["patch"], color=sys.stdout.isatty()))
+            if data.get("truncated"):
+                print(ui.message("muted", "（diff 较长已截断，完整看 git diff）"))
+        return True
+
+    def _sh_init(line):
+        nonlocal instructions
+        p = memory.init_agents(str(cfg.IVYEA_DIR / "AGENTS.md"))
+        if p[0]:
+            print(ui.message("success", f"已生成账户指令模板：{p[1]}"))
+            print(ui.message("info", "填好后重开对话即自动注入。"))
+        else:
+            print(ui.message("info", f"已存在：{p[1]}（未覆盖）。`ivyea config edit` 或直接编辑它。"))
+        instructions = memory.load_instructions(os.getcwd())
+        messages[0] = _sys_msg()
+        return True
+
+    def _sh_mcp(line):
+        servers = cfg.load_mcp().get("mcpServers", {})
+        print("MCP 服务器: " + (", ".join(servers) if servers else "(无，ivyea mcp add)")); return True
+
+    def _sh_knowledge(line):
+        from . import knowledge
+        q = line[10:].strip() if line.startswith("/knowledge ") else ""
+        if not q:
+            print("用法：/knowledge <关键词>，例如 /knowledge 否词")
+        else:
+            print(knowledge.render_search(q, limit=5))
+        return True
+
+    def _sh_skill(line):
+        from . import skills
+        q = line[7:].strip() if line.startswith("/skill ") else ""
+        print(skills.render_list() if not q else skills.render_search(q, limit=8)); return True
+
+    def _sh_embedded(line):
+        _run_embedded_cli(line); return True
+
+    def _sh_tools(line):
+        for t in agent_tools.TOOL_SCHEMAS:
+            f = t["function"]; print(f"  {f['name']} — {f['description']}")
+        return True
+
+    def _sh_memory(line):
+        from . import memory
+        q = line[7:].strip() if line.startswith("/memory ") else ""
+        if q:
+            hits = memory.search(q, limit=10)
+            print("\n".join(f"  · {h['text']}" for h in hits) or "（无匹配记忆）")
+        else:
+            st = memory.stats()
+            print(f"记忆：决策 {st['decisions']}（批准{st['approved']}/否决{st['rejected']}）· "
+                  f"巡检 {st['runs']} 次 · FTS5={'on' if st['fts'] else 'off(LIKE)'}")
+            for r in memory.recent_runs(limit=5):
+                import time as _t
+                print(f"  · {_t.strftime('%m-%d %H:%M', _t.localtime(r['ts']))} {r['asin']} "
+                      f"否{r['negatives']}/放{r['scale']}/降{r['reduce']}")
+            print(f"  {_C['d']}/memory <关键词> 检索；对话里也可让我 记住/回忆{_C['x']}")
+        return True
+
+    def _sh_status(line):
+        _print_config(); return True
+
+    def _sh_config(line):
+        _config_wizard(); return True
+
+    def _sh_model(line):
+        if line == "/model":
+            _model_picker(); return True
+        mid = line.split(None, 1)[1].strip()
+        m = __import__("ivyea_agent.models", fromlist=["by_id"]).by_id(mid)
+        if m:
+            cfg.apply_model(m)
+            print(f"已切换主脑: {m['label']}（{'已配 key' if cfg.get_active_key() else '未配 key，用 /model 配置'}）")
+        else:
+            print(ui.message("warn", f"未知模型 id：{mid}。用 /model 看清单。"))
+        return True
+
+    _SLASH_HANDLERS = {
+        "/help": _sh_help, "/": _sh_help, "/?": _sh_help,
+        "/clear": _sh_clear, "/plan": _sh_plan, "/approve": _sh_approve, "/cost": _sh_cost,
+        "/raw": _sh_raw, "/stream": _sh_stream, "/auto-edit": _sh_auto_edit, "/compact": _sh_compact,
+        "/diff": _sh_diff, "/init": _sh_init, "/mcp": _sh_mcp, "/knowledge": _sh_knowledge,
+        "/skill": _sh_skill, "/tools": _sh_tools, "/memory": _sh_memory, "/status": _sh_status,
+        "/config": _sh_config, "/model": _sh_model,
+        "/workspace": _sh_embedded, "/patch": _sh_embedded, "/gitops": _sh_embedded,
+    }
+
     while True:
         line = ci.read("❯ ")
         if line is chat_input.EXIT:
@@ -1547,158 +1597,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if line in ("/exit", "/quit"):
             print("再见。")
             return 0
-        if line in ("/help", "/", "/?"):
-            print(_help_text()); continue
-        if line == "/clear":
-            messages = [_sys_msg()]
-            print(ui.message("success", "已清空对话上下文")); continue
-        if line == "/plan":
-            ctx.plan_mode = not ctx.plan_mode
-            messages[0] = _sys_msg()
-            print(ui.message("info", "已进入计划模式（只读，不写入；/approve 批准后执行）。") if ctx.plan_mode
-                  else ui.message("success", "已退出计划模式。")); continue
-        if line == "/approve":
-            if ctx.plan_mode:
-                ctx.plan_mode = False
-                messages[0] = _sys_msg()
-                print(ui.message("success", "已批准，退出计划模式。说“继续/执行”让我落地计划。"))
-            else:
-                print(ui.message("warn", "当前不在计划模式。"))
-            continue
-        if line == "/cost":
-            lim = pricing.daily_limit()
-            tail = f" · 今日 ¥{pricing.today_spend():.4f}" + (f"/¥{lim:.2f} 上限" if lim > 0 else "（无上限，可 config set daily_cost_limit_cny）")
-            print((meter.summary() if meter.turns else "本会话还没有模型调用。") + tail); continue
-        if line == "/raw":
-            render_md = not render_md
-            print(ui.message("success", f"已切换为 {'原始流式' if not render_md else 'Markdown 渲染'} 输出。")); continue
-        if line in ("/stream", "/stream on", "/stream off"):
-            stream_live = (not stream_live) if line == "/stream" else line.endswith(" on")
-            cfg.set_setting("stream_live", stream_live)
-            if stream_live and not sys.stdout.isatty():
-                print(ui.message("warn", "完整流式需要交互终端；当前非 tty，仍用收尾渲染。"))
-            else:
-                print(ui.message("success", f"完整流式已{'开启（边生成边出字，收尾渲染 markdown）' if stream_live else '关闭（用 spinner+流式预览）'}。"))
-            continue
-        if line in ("/auto-edit", "/auto-edit on", "/auto-edit off"):
-            if line == "/auto-edit":
-                ctx.perm.accept_edits = not ctx.perm.accept_edits
-            else:
-                ctx.perm.accept_edits = line.endswith(" on")
-            if ctx.perm.accept_edits:
-                print(ui.message("warn", "⚡ 自动放行已开：本会话所有写操作不再逐次审批"
-                                         "（计划模式拦截、改前必读仍生效）。/auto-edit off 关闭。"))
-            else:
-                print(ui.message("success", "已关闭自动放行，恢复逐次人工审批。"))
-            continue
-        if line == "/compact":
-            ak = cfg.get_active_key()
-            if not ak:
-                print(ui.message("warn", "未配 key，无法压缩。")); continue
-            before = sum(len(str(m.get('content') or '')) for m in messages)
-            provider = from_settings(cfg.get_model_config(), ak)
-            messages, summary = ctx_mod.compact(messages, provider)
-            after = sum(len(str(m.get('content') or '')) for m in messages)
-            if summary:
-                memory.remember_summary(summary, sid)
-            _persist()
-            print(ui.message("success", f"已压缩上下文（约 {before}→{after} 字），摘要已入库。") if summary
-                  else ui.message("info", "上下文较短，无需压缩。"))
-            continue
-        if line in ("/compact auto", "/compact auto status"):
-            state = "开启" if bool(cfg.get_setting("auto_compact", False)) else "关闭"
-            th = int(cfg.get_setting("compact_at_tokens", ctx_mod.DEFAULT_COMPACT_AT))
-            print(ui.message("info", f"自动压缩：{state} · 阈值 {th} prompt tokens"))
-            continue
-        if line in ("/compact auto on", "/compact auto off"):
-            enabled = line.endswith(" on")
-            cfg.set_setting("auto_compact", enabled)
-            print(ui.message("success", f"自动压缩已{'开启' if enabled else '关闭'}。手动压缩仍可用 /compact。"))
-            continue
-        if line == "/diff" or line == "/diff staged":
-            from . import git_workflow, panels as _panels
-            staged = line.endswith(" staged")
-            data = git_workflow.unified_diff(os.getcwd(), staged=staged)
-            if not data.get("ok"):
-                print(ui.message("warn", data.get("error", "无法取得 diff")))
-            elif not (data.get("patch") or "").strip():
-                print(ui.message("info", f"{'暂存区' if staged else '工作区'}没有改动。"))
-            else:
-                print(_panels.colorize_patch(data["patch"], color=sys.stdout.isatty()))
-                if data.get("truncated"):
-                    print(ui.message("muted", "（diff 较长已截断，完整看 git diff）"))
-            continue
-        if line == "/init":
-            p = memory.init_agents(str(cfg.IVYEA_DIR / "AGENTS.md"))
-            if p[0]:
-                print(ui.message("success", f"已生成账户指令模板：{p[1]}"))
-                print(ui.message("info", "填好后重开对话即自动注入。"))
-            else:
-                print(ui.message("info", f"已存在：{p[1]}（未覆盖）。`ivyea config edit` 或直接编辑它。"))
-            instructions = memory.load_instructions(os.getcwd())
-            messages[0] = _sys_msg()
-            continue
-        if line == "/mcp":
-            servers = cfg.load_mcp().get("mcpServers", {})
-            print("MCP 服务器: " + (", ".join(servers) if servers else "(无，ivyea mcp add)")); continue
-        if line == "/knowledge" or line.startswith("/knowledge "):
-            from . import knowledge
-            q = line[10:].strip() if line.startswith("/knowledge ") else ""
-            if not q:
-                print("用法：/knowledge <关键词>，例如 /knowledge 否词")
-            else:
-                print(knowledge.render_search(q, limit=5))
-            continue
-        if line == "/skill" or line.startswith("/skill "):
-            from . import skills
-            q = line[7:].strip() if line.startswith("/skill ") else ""
-            if not q:
-                print(skills.render_list())
-            else:
-                print(skills.render_search(q, limit=8))
-            continue
-        if (
-            line == "/workspace" or line.startswith("/workspace ")
-            or line == "/patch" or line.startswith("/patch ")
-            or line == "/gitops" or line.startswith("/gitops ")
-        ):
-            _run_embedded_cli(line)
-            continue
-        if line == "/tools":
-            for t in agent_tools.TOOL_SCHEMAS:
-                f = t["function"]; print(f"  {f['name']} — {f['description']}")
-            continue
-        if line == "/memory" or line.startswith("/memory "):
-            from . import memory
-            q = line[7:].strip() if line.startswith("/memory ") else ""
-            if q:
-                hits = memory.search(q, limit=10)
-                print("\n".join(f"  · {h['text']}" for h in hits) or "（无匹配记忆）")
-            else:
-                st = memory.stats()
-                print(f"记忆：决策 {st['decisions']}（批准{st['approved']}/否决{st['rejected']}）· "
-                      f"巡检 {st['runs']} 次 · FTS5={'on' if st['fts'] else 'off(LIKE)'}")
-                for r in memory.recent_runs(limit=5):
-                    import time as _t
-                    print(f"  · {_t.strftime('%m-%d %H:%M', _t.localtime(r['ts']))} {r['asin']} "
-                          f"否{r['negatives']}/放{r['scale']}/降{r['reduce']}")
-                print(f"  {_C['d']}/memory <关键词> 检索；对话里也可让我 记住/回忆{_C['x']}")
-            continue
-        if line == "/status":
-            _print_config(); continue
-        if line in ("/config", "/model"):
-            _model_picker() if line == "/model" else _config_wizard()
-            continue
-        if line.startswith("/model "):  # /model <id> 直接切
-            mid = line.split(None, 1)[1].strip()
-            m = __import__("ivyea_agent.models", fromlist=["by_id"]).by_id(mid)
-            if m:
-                cfg.apply_model(m)
-                print(f"已切换主脑: {m['label']}（{'已配 key' if cfg.get_active_key() else '未配 key，用 /model 配置'}）")
-            else:
-                print(ui.message("warn", f"未知模型 id：{mid}。用 /model 看清单。"))
-            continue
-        if line.startswith("/"):
+        _handler = _SLASH_HANDLERS.get(line.split()[0])
+        if _handler is not None:
+            _handler(line); continue
+        if line.startswith("/"):   # 自定义命令展开（展开后贯穿到模型轮）/ 未知命令
             from . import commands as _cmds
             _head = line.split()[0]
             _expanded = _cmds.expand(_head[1:], line[len(_head):].strip())
