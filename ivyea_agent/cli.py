@@ -1337,10 +1337,31 @@ class _StreamPrinter:
         print(f"{_C['c']}●{_C['x']} " + markdown.render(final_text))
 
 
+_SLASH_GROUPS = [
+    ("模型 / 配置", ["/model", "/config", "/status", "/mcp"]),
+    ("代码 / 工程", ["/diff", "/workspace", "/patch", "/gitops", "/tools"]),
+    ("会话控制", ["/plan", "/approve", "/auto-edit", "/raw", "/stream", "/compact", "/cost", "/clear"]),
+    ("知识 / 记忆", ["/knowledge", "/skill", "/memory", "/init"]),
+    ("系统", ["/help", "/exit"]),
+]
+_SLASH_ALIASES = {"/h": "/help", "/?": "/help", "/q": "/exit", "/quit": "/exit"}
+
+
 def _help_text() -> str:
-    lines = [f"{_C['b']}斜杠命令{_C['x']}（输入 / 后按 Tab 可补全）："]
-    for cmd, desc in SLASH_COMMANDS:
-        lines.append(f"  {_C['c']}{cmd:<9}{_C['x']} {desc}")
+    desc = dict(SLASH_COMMANDS)
+    lines = [f"{_C['b']}斜杠命令{_C['x']}（输入 / 后按 Tab 可补全；别名 /h /q）："]
+    seen = set()
+    for title, cmds in _SLASH_GROUPS:
+        lines.append(f"{_C['d']}— {title} —{_C['x']}")
+        for cmd in cmds:
+            if cmd in desc:
+                lines.append(f"  {_C['c']}{cmd:<11}{_C['x']} {desc[cmd]}")
+                seen.add(cmd)
+    extra = [(c, d) for c, d in SLASH_COMMANDS if c not in seen]   # 兜底：未归类的也列出
+    if extra:
+        lines.append(f"{_C['d']}— 其它 —{_C['x']}")
+        for cmd, d in extra:
+            lines.append(f"  {_C['c']}{cmd:<11}{_C['x']} {d}")
     from . import commands as _cmds
     custom = _cmds.list_commands()
     if custom:
@@ -1521,6 +1542,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             return 0
         if not line:
             continue
+        if line in _SLASH_ALIASES:   # 别名归一（/h→/help、/q→/exit 等）
+            line = _SLASH_ALIASES[line]
         if line in ("/exit", "/quit"):
             print("再见。")
             return 0
@@ -2753,8 +2776,21 @@ from .cli_code import (  # noqa: E402
     _cmd_code, _cmd_codereview, _cmd_gitops, _cmd_patch, _cmd_task, _cmd_workspace)
 
 
+_CLI_GROUPS_EPILOG = """\
+常用命令分组（裸 `ivyea` 直接进对话）：
+  对话 / 模型   chat  model  config  doctor  onboard  serve
+  广告运营      patrol  diagnose  apply  lingxing  audit  action  listing  review  offer  competitor  weekly  alert
+  代码 / 工程   code  patch  codereview  workspace  gitops  task  shadow
+  知识 / 记忆   knowledge  skill  memory  retrieval  profile  scorecard  trace  eval
+  系统 / 其它   mcp  schedule  notify  policy  vision  image  self  runs
+
+`ivyea <命令> -h` 看子命令详情。"""
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="ivyea", description="Ivyea Agent — 亚马逊运营 CLI Agent")
+    p = argparse.ArgumentParser(prog="ivyea", description="Ivyea Agent — 亚马逊运营 CLI Agent",
+                                epilog=_CLI_GROUPS_EPILOG,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"ivyea-agent {__version__}")
     # 顶层便捷标志：裸 ivyea 进对话时也能用（见 main 转发）
     p.add_argument("--resume", nargs="?", const=True, help="裸 ivyea：续接会话（留空=最近）")
