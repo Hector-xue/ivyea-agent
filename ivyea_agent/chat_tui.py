@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import sys
 import threading
 import time
@@ -33,6 +35,49 @@ def tui_enabled() -> bool:
     except Exception:
         return False
     return True
+
+
+def _visual_lines(text: str, width: int) -> list[str]:
+    """按显示宽度把（含 ANSI 的）文本拆成物理行，用于精确的末屏裁剪（贴底）。"""
+    from prompt_toolkit.utils import get_cwidth
+    out: list[str] = []
+    for logical in text.split("\n"):
+        plain = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", logical)
+        if width <= 0 or get_cwidth(plain) <= width:
+            out.append(logical); continue
+        cur, w, in_esc = "", 0, False
+        for ch in logical:
+            if ch == "\x1b":
+                in_esc = True
+            if in_esc:
+                cur += ch
+                if ch.isalpha():
+                    in_esc = False
+                continue
+            cw = get_cwidth(ch)
+            if w + cw > width:
+                out.append(cur); cur, w = ch, cw
+            else:
+                cur += ch; w += cw
+        out.append(cur)
+    return out
+
+
+def _make_scroll_control(get_text, on_scroll):
+    """FormattedTextControl + 鼠标滚轮处理（末屏裁剪下内容不溢出，需自己接滚轮）。"""
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    class _C(FormattedTextControl):
+        def mouse_handler(self, mouse_event):
+            et = mouse_event.event_type
+            if et == MouseEventType.SCROLL_UP:
+                on_scroll(-3); return None
+            if et == MouseEventType.SCROLL_DOWN:
+                on_scroll(3); return None
+            return super().mouse_handler(mouse_event)
+
+    return _C(get_text)
 
 
 class ChatTUI:
@@ -58,9 +103,9 @@ class ChatTUI:
         self.running = False
         self.cancel_requested = False        # Esc/Ctrl-C 请求中断当前轮
         self.queued: list[str] = []          # 运行中回车排队的后续指令
+        self.scroll = 0                       # 距底部的物理行数；0=贴底跟随
         self.started = 0.0
         self.app = None
-        self._body_window = None             # transcript Window（原生滚动 + tail-follow）
         # 审批（P3）：工具线程投递请求→主 app 渲染内联浮层→选定回填并唤醒
         self.pending = None                  # {"title","body","options","idx"}
         self._approval_ev = None
@@ -162,6 +207,12 @@ class ChatTUI:
             return "handled"
         return "turn"
 
+    def _body_height(self) -> int:
+        """transcript 可用物理行数（终端高 - 头部/分隔/输入框/状态栏的固定占用）。"""
+        rows = shutil.get_terminal_size((100, 30)).lines
+        chrome = (2 if self.instruction else 0) + 3 + 1   # 头部+线 / 输入框上线+框+下线 / 状态栏
+        return max(3, rows - chrome)
+
     def _body_ansi(self):
         from prompt_toolkit.formatted_text import ANSI
         parts = list(self.blocks)
@@ -175,13 +226,25 @@ class ChatTUI:
         if self.pending is not None:
             parts.append("\n".join(self._approval_lines()))   # 审批面板置于末尾
         text = "\n\n".join(p for p in parts if p) or "（开始对话吧。输入 /exit 退出。）"
-        # 返回完整内容，交给 Window 原生滚动（鼠标滚轮 + PgUp/PgDn）；tail-follow 见 _scroll_to_bottom
-        return ANSI(text)
+        # 按显示宽度裁到"末屏 - scroll"：scroll=0 显示底部(贴底跟随)，PgUp/滚轮增大 scroll 看更早
+        width = shutil.get_terminal_size((100, 30)).columns
+        lines = _visual_lines(text, width)
+        avail = self._body_height()
+        self._max_scroll = max(0, len(lines) - avail)
+        self.scroll = max(0, min(self.scroll, self._max_scroll))
+        if len(lines) > avail:
+            end = len(lines) - self.scroll
+            lines = lines[end - avail:end]
+        return ANSI("\n".join(lines))
+
+    def _scroll_by(self, delta: int) -> None:
+        """滚动 transcript：delta<0 上滚(看更早)，>0 下滚(回到更新)。"""
+        self.scroll = max(0, min(getattr(self, "_max_scroll", 0), self.scroll - delta))
+        self._invalidate()
 
     def _scroll_to_bottom(self) -> None:
-        """内容更新时贴底（大值渲染时会被 clamp 到底部）。空闲时不调，保留用户的手动滚动。"""
-        if self._body_window is not None:
-            self._body_window.vertical_scroll = 10 ** 9
+        """新内容出现时贴底跟随。"""
+        self.scroll = 0
 
     def _header(self):
         instr = self.instruction or "（还没有指令）"
@@ -267,8 +330,8 @@ class ChatTUI:
                       auto_suggest=AutoSuggestFromHistory(), history=history)
         from prompt_toolkit.layout.containers import ConditionalContainer
         has_instr = Condition(lambda: bool(self.instruction))
-        # transcript：完整内容交给 Window，内容溢出时原生支持鼠标滚轮/PgUp/PgDn 滚动
-        self._body_window = Window(FormattedTextControl(self._body_ansi), wrap_lines=True)
+        # transcript：末屏裁剪(贴底) + 自定义鼠标滚轮 + 键盘键滚动
+        self._body_window = Window(_make_scroll_control(self._body_ansi, self._scroll_by), wrap_lines=True)
         root = HSplit([
             # 固定头部（当前指令置顶）：仅在有指令后显示；没指令时让图形/欢迎框在最顶
             ConditionalContainer(
@@ -338,26 +401,16 @@ class ChatTUI:
             self.blocks.append(f"\033[2m⇄ 模式：{label}\033[0m")
             self._invalidate()
 
-        # 键盘滚动 transcript（鼠标滚轮由 Window 原生处理）。除 PgUp/PgDn 外，
-        # 再绑 Ctrl-U/Ctrl-B（上）与 Ctrl-N（下）作为浏览器终端下的替代键。
-        def _scroll(delta):
-            w = self._body_window
-            if w is not None:
-                w.vertical_scroll = max(0, w.vertical_scroll + delta)
-                self._invalidate()
-
+        # 键盘滚动 transcript（鼠标滚轮由控件的 mouse_handler 处理）。PgUp/PgDn +
+        # Ctrl-U/Ctrl-B（上）、Ctrl-N（下）作为浏览器终端下 PgUp 被拦时的替代键。
         @kb.add("pageup")
-        def _(event): _scroll(-8)
-
         @kb.add("c-u")
         @kb.add("c-b")
-        def _(event): _scroll(-8)
+        def _(event): self._scroll_by(-8)     # 上滚看更早
 
         @kb.add("pagedown")
-        def _(event): _scroll(8)
-
         @kb.add("c-n")
-        def _(event): _scroll(8)
+        def _(event): self._scroll_by(8)      # 下滚回到更新
 
         # 审批中：↑/↓ 移动选择，数字直选（仅 pending 时激活，不影响正常输入）
         @kb.add("up", filter=approving)
