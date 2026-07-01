@@ -288,10 +288,10 @@ class ChatTUI:
         root = HSplit([
             Window(FormattedTextControl(self._header), height=1, style="class:hdr"),
             Window(height=1, char="─", style="class:rule"),
-            Window(FormattedTextControl(self._body_ansi), wrap_lines=True),
-            Window(height=1, char="─", style="class:rule"),
-            Window(FormattedTextControl(self._footer), height=1),
-            ta,
+            Window(FormattedTextControl(self._body_ansi), wrap_lines=True),   # transcript
+            ta,                                                              # 输入框（紧贴 transcript 下方）
+            Window(height=1, char="─", style="class:rule"),                  # 分隔线
+            Window(FormattedTextControl(self._footer), height=1),            # 状态栏（最底部）
         ])
         kb = KeyBindings()
 
