@@ -285,9 +285,17 @@ class ChatTUI:
         ta = TextArea(prompt=[("class:prompt", "❯ ")], multiline=False, height=1,
                       completer=self._completer(), complete_while_typing=True,
                       auto_suggest=AutoSuggestFromHistory(), history=history)
+        from prompt_toolkit.layout.containers import ConditionalContainer
+        has_instr = Condition(lambda: bool(self.instruction))
         root = HSplit([
-            Window(FormattedTextControl(self._header), height=1, style="class:hdr"),
-            Window(height=1, char="─", style="class:rule"),
+            # 固定头部（当前指令置顶）：仅在有指令后显示；没指令时让图形/欢迎框在最顶
+            ConditionalContainer(
+                HSplit([
+                    Window(FormattedTextControl(self._header), height=1, style="class:hdr"),
+                    Window(height=1, char="─", style="class:rule"),
+                ]),
+                filter=has_instr,
+            ),
             Window(FormattedTextControl(self._body_ansi), wrap_lines=True),   # transcript
             Window(height=1, char="─", style="class:rule"),                  # 输入框上边线
             ta,                                                              # 输入框（上下有线，像个框）
