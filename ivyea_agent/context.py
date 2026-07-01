@@ -10,10 +10,10 @@ from typing import Optional
 
 from . import config
 
-# 默认只提示，不自动压缩。真正需要节省上下文时由用户执行 /compact。
-# 对支持更长上下文的模型，96K 仍保留一定余量；小上下文模型可自行 config set compact_at_tokens。
+# 默认主动自动压缩（对标 Claude Code）：prompt tokens 越过软阈值即在轮后压缩历史，
+# 压缩时给提示。/compact auto off 可关。小上下文模型可 config set compact_at_tokens 调低。
 DEFAULT_COMPACT_AT = 96000
-DEFAULT_AUTO_COMPACT = False
+DEFAULT_AUTO_COMPACT = True
 # 轮内硬上限：无论是否开自动压缩，估算 token 越过它就强制压缩以防请求溢出报错。
 # 这是“防崩”而非“省钱”，所以默认开启、阈值取得很高，正常长任务不会触发。
 DEFAULT_HARD_CEILING = 200000
