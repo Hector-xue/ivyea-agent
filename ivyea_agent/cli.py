@@ -1288,6 +1288,27 @@ def _strip_ansi(s: str) -> str:
     return re.sub(r"\033\[[0-9;]*m", "", s)
 
 
+# 自然语言进/出计划模式：整行精确匹配这些短语（不止 /plan，对标 Claude 的「进入计划模式」）
+_PLAN_ENTER_PHRASES = {"进入计划模式", "打开计划模式", "开启计划模式", "开计划模式", "开始计划模式",
+                       "进入规划模式", "打开规划模式", "开启规划模式", "计划模式", "规划模式", "plan mode"}
+_PLAN_EXIT_PHRASES = {"退出计划模式", "关闭计划模式", "退出规划模式", "关闭规划模式",
+                      "结束计划模式", "退出规划", "退出计划", "exit plan mode"}
+
+
+def _plan_mode_intent(line: str) -> str | None:
+    """整行精确匹配 → 'enter'/'exit'/None。
+
+    只在用户**整句就是**这个命令时才命中；strip 掉首尾空白与句末标点，
+    避免把「帮我分析进入计划模式怎么实现」这类长句误判成命令。
+    """
+    s = line.strip().strip("。.!！?？ 　").lower()
+    if s in _PLAN_ENTER_PHRASES:
+        return "enter"
+    if s in _PLAN_EXIT_PHRASES:
+        return "exit"
+    return None
+
+
 def _print_welcome_box(lines: list, width: int = 58) -> None:
     """Claude Code 风格圆角欢迎框（按显示宽度对齐中英文混排）。"""
     try:
@@ -1329,7 +1350,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     profile_context = profiles.context_text(profiles.resolve(asin=getattr(args, "asin", "") or ""), label=profile_key)
 
     def _sys_msg() -> dict:
-        content = agent_loop.SYSTEM_PROMPT + (agent_loop.PLAN_NOTE if ctx.plan_mode else "")
+        content = agent_loop.SYSTEM_PROMPT + agent_loop.runtime_context_note()
+        if ctx.plan_mode:
+            content += agent_loop.PLAN_NOTE
         if profile_context:
             content += "\n\n" + profile_context
         if instructions:
@@ -1383,7 +1406,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         f"{_C['c']}✻{_C['x']} {_C['b']}亚马逊运营 Agent{_C['x']} · 规则引擎+LLM复核+审核制执行 · 自托管",
         f"{_C['d']}主脑 {_label()}（{keyst}）· 执行 {mode}{_C['x']}",
         f"{_C['d']}{_n_tools} 工具 · {_n_skills} skills · {_n_mcp} MCP · 会话 {(sid or '新')[:8]}{_C['x']}",
-        f"{_C['d']}/ 弹命令菜单 · ↑↓+Enter 选择 · 直接说需求 · /exit 退出{_C['x']}",
+        f"{_C['d']}/ 命令 · ↑↓+Enter 选择 · Alt+Enter 换行 · /exit 退出{_C['x']}",
     ], width=64)
     print()
 
@@ -1402,9 +1425,20 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         cx = f"ctx ~{_ui['ctx'] // 1000}k · " if _ui["ctx"] else ""
         turns = f"{meter.turns} 轮 · " if meter.turns else ""
         return (f" ivyea · {_label()} · {plan}{auto}"
-                f"{'真实写' if args.execute else 'dry-run'} · {turns}{cx}{cost}输入 / 看命令 ")
+                f"{'真实写' if args.execute else 'dry-run'} · {turns}{cx}{cost}shift+tab 切模式 ")
 
-    ci = chat_input.ChatInput(SLASH_COMMANDS, _status)
+    def _cycle_mode() -> str:
+        """Shift+Tab 循环：普通 → 自动接受编辑 → 计划模式 → 普通。返回新模式名。"""
+        if ctx.plan_mode:
+            ctx.plan_mode = False; ctx.perm.accept_edits = False; label = "普通"
+        elif ctx.perm.accept_edits:
+            ctx.perm.accept_edits = False; ctx.plan_mode = True; label = "计划模式"
+        else:
+            ctx.perm.accept_edits = True; label = "自动接受编辑"
+        messages[0] = _sys_msg()   # 计划模式影响 system prompt
+        return label
+
+    ci = chat_input.ChatInput(SLASH_COMMANDS, _status, mode_cycle_fn=_cycle_mode)
     from . import hooks as _hooks
     _hooks.fire("session_start", {"session_id": sid or "", "cwd": os.getcwd()})
 
@@ -1417,11 +1451,21 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         messages = [_sys_msg()]
         print(ui.message("success", "已清空对话上下文")); return True
 
-    def _sh_plan(line):
-        ctx.plan_mode = not ctx.plan_mode
+    def _set_plan_mode(on: bool) -> None:
+        """显式进/出计划模式（/plan 与自然语言共用）。已在目标状态则只提示。"""
+        if on == ctx.plan_mode:
+            print(ui.message("info", "已在计划模式。" if on else "当前不在计划模式。"))
+            return
+        ctx.plan_mode = on
         messages[0] = _sys_msg()
-        print(ui.message("info", "已进入计划模式（只读，不写入；/approve 批准后执行）。") if ctx.plan_mode
-              else ui.message("success", "已退出计划模式。")); return True
+        if on:
+            print(ui.message("info", "已进入计划模式（只读，不写入；说“退出计划模式”或 /approve 后执行）。"
+                                     "复杂任务建议先 /model 切更强主脑。"))
+        else:
+            print(ui.message("success", "已退出计划模式。"))
+
+    def _sh_plan(line):
+        _set_plan_mode(not ctx.plan_mode); return True
 
     def _sh_approve(line):
         if ctx.plan_mode:
@@ -1612,6 +1656,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 tip = ("，你是否想用：" + " ".join(hits)) if hits else "，输入 /help 看全部"
                 print(ui.message("warn", f"未知命令 {_head}{tip}")); continue
 
+        _pi = _plan_mode_intent(line)   # 自然语言进/出计划模式（整行精确匹配，不进模型轮）
+        if _pi is not None:
+            _set_plan_mode(_pi == "enter"); continue
+
         # 自然语言 → Agent 循环
         api_key = cfg.get_active_key()
         current_model_settings = cfg.load_settings()
@@ -1657,6 +1705,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         ctx.turn_id = _turn_time.strftime("%Y%m%d-%H%M%S")
         from . import hooks as _hooks
         _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
+        messages[0] = _sys_msg()   # 每轮刷新 system：注入真实当前日期，续接旧会话/跨天也不过时
         messages.append({"role": "user", "content": user_content})
         try:
             mcfg = cfg.get_model_config()
@@ -1683,8 +1732,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
             _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
             if c:
-                day = pricing.add_spend(c)
-                print(ui.message("muted", f"本轮 ¥{c:.4f} · 累计 ¥{meter.cost:.4f} · 今日 ¥{day:.4f}"))
+                pricing.add_spend(c)   # 仍记账（今日累计存 spend.json）；正文不再刷花费行，累计花费看底部状态栏
             from . import panels
             if ctx.todos:
                 print(panels.render_todos(ctx.todos, color=sys.stdout.isatty()))

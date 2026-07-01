@@ -671,8 +671,16 @@ def t_todo_write(args: dict, ctx) -> str:
             clean.append({"content": str(t["content"]),
                           "status": st if st in ("pending", "in_progress", "completed") else "pending"})
     ctx.todos = clean
+    if not clean:
+        return "计划已清空。"
     done = sum(1 for t in clean if t["status"] == "completed")
-    return f"已更新计划：{done}/{len(clean)} 完成。" if clean else "计划已清空。"
+    running = sum(1 for t in clean if t["status"] == "in_progress")
+    msg = f"已更新计划：{done}/{len(clean)} 完成。"
+    if running > 1:   # 纪律提醒：同一时间应恰好一个进行中
+        msg += f"（注意：有 {running} 个 in_progress，建议同一时间只保留一个进行中）"
+    elif running == 0 and done < len(clean):
+        msg += "（还有未完成步骤，记得把下一步标 in_progress）"
+    return msg
 
 
 def _task_id(args: dict, ctx) -> str:
@@ -805,7 +813,7 @@ GENERAL_TOOL_SCHEMAS = [
     _fn("mcp_get_prompt", "获取 MCP 服务器某个 prompt 模板的内容（只读）。",
         {"server": {"type": "string"}, "name": {"type": "string"},
          "arguments": {"type": "object", "description": "模板参数（可选）"}}, ["server", "name"]),
-    _fn("todo_write", "维护多步任务计划(让长任务可视化)。每步 {content, status: pending|in_progress|completed}。开始多步任务时先列计划，完成一步就更新状态。",
+    _fn("todo_write", "维护多步任务计划(让长任务可视化)。每步 {content, status: pending|in_progress|completed}。多步任务动手前先列计划；执行时同一时间恰好一个 in_progress，完成一步立刻标 completed 再开下一步，发现新子步骤就追加。单步小任务不必用。",
         {"todos": {"type": "array", "items": {"type": "object", "properties": {
             "content": {"type": "string"},
             "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}}}},

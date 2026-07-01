@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 
 from ivyea_agent import patcher
+
+
+def _plain(s: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", s)
 
 
 def test_validate_and_apply_patch(tmp_path):
@@ -13,7 +18,7 @@ def test_validate_and_apply_patch(tmp_path):
 
     validation = patcher.validate_spec(spec, tmp_path)
     assert validation["ok"] is True
-    assert "+value = 2" in validation["ops"][0]["diff"]
+    assert "+ value = 2" in _plain(validation["ops"][0]["diff"])   # 行号栏+符号 diff（去色后比对）
 
     dry = patcher.apply_spec(spec, tmp_path, execute=False)
     assert dry["ok"] is True and dry["applied"] is False

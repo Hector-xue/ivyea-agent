@@ -588,7 +588,7 @@ def test_service_chat_run_with_tool_event(ivyea_home):
 
     assert result["ok"] is True
     assert result["text"] == "已结合知识库回答"
-    assert any("knowledge_search" in e["text"] for e in result["events"])
+    assert any("查知识库" in e["text"] for e in result["events"])   # 工具行友好动词
     assert any(m["role"] == "tool" for m in result["messages"])
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import sys
 import textwrap
 
 from . import security
@@ -29,7 +30,15 @@ _PALETTE = {
     "muted": _DIM,
 }
 
-_ICONS = {
+_ICONS_UNICODE = {
+    "info": "·",
+    "success": "✓",
+    "warn": "▲",
+    "error": "✗",
+    "tool": "⏺",
+    "result": "⎿",
+}
+_ICONS_ASCII = {
     "info": "i",
     "success": "OK",
     "warn": "!",
@@ -37,6 +46,15 @@ _ICONS = {
     "tool": ">",
     "result": "<",
 }
+
+
+def _unicode_glyphs_ok() -> bool:
+    """终端能安全显示 Unicode 字形吗？非 UTF-8（如 Windows GBK）回退 ASCII，避免乱码。"""
+    enc = (getattr(sys.stdout, "encoding", "") or "").lower()
+    return "utf" in enc
+
+
+_ICONS = _ICONS_UNICODE if _unicode_glyphs_ok() else _ICONS_ASCII
 
 
 def _color_enabled(color: bool | None = None) -> bool:
@@ -161,24 +179,73 @@ def _code_tool_suffix(name: str, args: dict) -> str | None:
     return None
 
 
-def tool_call(name: str, args: dict | None = None, *, color: bool | None = None,
-              step: str = "") -> str:
+# 工具名 → 友好动词（对标 Claude 的 "Reading 1 file / Running…"，中文 UI 用中文动词）
+_TOOL_VERBS = {
+    "read_file": "读取文件", "view_file": "读取文件",
+    "write_file": "写入文件", "edit_file": "编辑文件",
+    "list_dir": "列目录", "glob": "查找文件",
+    "grep": "搜索内容", "search_code": "搜索代码", "code_search": "搜索代码",
+    "run_command": "执行命令", "run_python": "执行 Python", "run_tests": "运行测试",
+    "web_search": "联网搜索", "web_fetch": "抓取网页",
+    "knowledge_search": "查知识库", "skill_search": "查 skill", "recall": "回忆记忆",
+    "todo_write": "更新计划",
+}
+
+
+def _tool_detail(name: str, args: dict) -> str | None:
+    """工具调用的主要明细（路径/命令/查询），走 └ 连接行展示。"""
+    detail = _code_tool_suffix(name, args)
+    if detail is not None:
+        return detail.strip()
+    g = args.get
+    if name == "run_command":
+        cmd = str(g("command") or g("cmd") or "").strip().splitlines()
+        return ("$ " + cmd[0]) if cmd else None
+    if name == "list_dir":
+        return _short_path(g("path") or ".")
+    if name == "glob":
+        return str(g("pattern") or g("glob") or "") or None
+    if name == "run_tests":
+        return _short_path(g("path")) if g("path") else (str(g("target") or "") or "全部")
+    if name in ("web_search", "knowledge_search", "skill_search", "recall"):
+        return str(g("query") or g("q") or g("pattern") or "") or None
+    if name == "web_fetch":
+        return str(g("url") or "") or None
+    if name == "todo_write":
+        todos = g("todos") or []
+        done = sum(1 for t in todos if isinstance(t, dict) and t.get("status") == "completed")
+        cur = next((t.get("content") for t in todos if isinstance(t, dict) and t.get("status") == "in_progress"), "")
+        s = f"{len(todos)} 步 · {done} 完成"
+        return s + (f" · 进行中：{cur}" if cur else "")
+    return None
+
+
+def tool_call(name: str, args: dict | None = None, *, color: bool | None = None) -> str:
     args = args or {}
-    suffix = _code_tool_suffix(name, args)
-    if suffix is not None:
-        suffix = security.redact_text(suffix)
-        if len(suffix) > 72:
-            suffix = suffix[:69] + "..."
-    else:
-        pairs = []
-        for key, value in args.items():
-            text = repr(security.redact_obj(value))
-            if len(text) > 60:
-                text = text[:57] + "..."
-            pairs.append(f"{key}={text}")
-        suffix = f"({', '.join(pairs)})" if pairs else "()"
-    prefix = f"[{step}] " if step else ""
-    return f"{paint(_ICONS['tool'], 'info', color=color)} {paint(prefix, 'muted', color=color)}{paint(name, _B, color=color)}{paint(suffix, 'muted', color=color)}"
+    verb = _TOOL_VERBS.get(name)
+    if name == "code_apply_patch":   # 动词带文件数
+        ops = args.get("ops") or []
+        n = len([o for o in ops if isinstance(o, dict) and o.get("path")])
+        verb = f"编辑 {n} 个文件" if n else "应用补丁"
+    if verb:
+        head = f"{paint(_ICONS['tool'], 'info', color=color)} {paint(verb, _B, color=color)}"
+        detail = _tool_detail(name, args)
+        if not detail:
+            return head
+        detail = security.redact_text(detail)
+        if len(detail) > 80:
+            detail = detail[:77] + "..."
+        branch = paint("└", "muted", color=color)
+        return f"{head}\n  {branch} {paint(detail, 'muted', color=color)}"
+    # 兜底：未列入的工具 → 图标 + 名 + 脱敏参数（保留可读性与安全脱敏）
+    pairs = []
+    for key, value in args.items():
+        text = repr(security.redact_obj(value))
+        if len(text) > 60:
+            text = text[:57] + "..."
+        pairs.append(f"{key}={text}")
+    suffix = f"({', '.join(pairs)})" if pairs else "()"
+    return f"{paint(_ICONS['tool'], 'info', color=color)} {paint(name, _B, color=color)}{paint(suffix, 'muted', color=color)}"
 
 
 def tool_result(text: str, *, color: bool | None = None) -> str:

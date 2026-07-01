@@ -64,23 +64,64 @@ def colorize_patch(patch: str, *, color: bool = True) -> str:
     return "\n".join(out)
 
 
+def _diff_lexer(path: str):
+    """按文件名取 pygments lexer；不可用/未知则 None（退化为纯文本）。"""
+    if not path:
+        return None
+    try:
+        from pygments.lexers import get_lexer_for_filename
+        return get_lexer_for_filename(path, stripnl=False)
+    except Exception:
+        return None
+
+
+def _hl(code: str, lexer) -> str:
+    """对单行代码做语法高亮（保留行内不跨行的 ANSI）；无 lexer 原样返回。"""
+    if lexer is None or not code:
+        return code
+    try:
+        from pygments import highlight
+        from pygments.formatters import TerminalFormatter
+        return highlight(code, lexer, TerminalFormatter()).rstrip("\n")
+    except Exception:
+        return code
+
+
 def render_diff(old: str, new: str, path: str = "", *, color: bool = True, context: int = 2) -> str:
-    """old→new 的彩色统一 diff（红删/绿增）。"""
+    """old→new 的彩色 diff（对标 Claude Code）：左侧行号栏 + +/- 标记 + 语法高亮。
+
+    每行自带不跨行的 ANSI，便于被审批菜单逐行解析配色。color=False 时纯文本（测试/管道）。
+    """
     if old == new:
         return "（无变化）"
-    diff = difflib.unified_diff(old.splitlines(), new.splitlines(),
-                                fromfile=path or "old", tofile=path or "new",
-                                lineterm="", n=context)
-    out = []
-    for ln in diff:
-        if ln.startswith(("+++", "---")):
+    a, b = old.splitlines(), new.splitlines()
+    lexer = _diff_lexer(path) if color else None
+    sm = difflib.SequenceMatcher(None, a, b)
+
+    def row(num, sign: str, code: str) -> str:
+        gutter = f"{num:>4}" if num else "    "
+        hl = _hl(code, lexer)
+        if not color:
+            return f"{gutter} {sign} {code}".rstrip()
+        sign_c = {"+": _GREEN, "-": _RED}.get(sign, "")
+        return f"{_DIM}{gutter}{_X} {sign_c}{sign or ' '}{_X} {hl}".rstrip()
+
+    out: list[str] = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            seg = list(range(i1, i2))
+            if len(seg) > context * 2 + 1:          # 大段未变只留首尾 context 行，中间折叠
+                seg = seg[:context] + [None] + seg[-context:]
+            for k in seg:
+                if k is None:
+                    out.append(f"{_DIM}     ⋮{_X}" if color else "     ⋮")
+                else:
+                    out.append(row(j1 + (k - i1) + 1, " ", a[k]))
             continue
-        if ln.startswith("@@"):
-            out.append(f"{_DIM}{ln}{_X}" if color else ln)
-        elif ln.startswith("+"):
-            out.append(f"{_GREEN}{ln}{_X}" if color else ln)
-        elif ln.startswith("-"):
-            out.append(f"{_RED}{ln}{_X}" if color else ln)
-        else:
-            out.append(ln)
+        if tag in ("replace", "delete"):
+            for k in range(i1, i2):
+                out.append(row(k + 1, "-", a[k]))
+        if tag in ("replace", "insert"):
+            for k in range(j1, j2):
+                out.append(row(k + 1, "+", b[k]))
     return "\n".join(out)

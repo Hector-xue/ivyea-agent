@@ -1426,7 +1426,7 @@ def _model_requires_key(settings: dict[str, Any]) -> bool:
 
 
 def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext) -> tuple[list[dict[str, Any]], float | None]:
-    system = agent_loop.SYSTEM_PROMPT
+    system = agent_loop.SYSTEM_PROMPT + agent_loop.runtime_context_note()
     if ctx.plan_mode:
         system += agent_loop.PLAN_NOTE
     system += "\n\n[IvyeaOps 嵌入模式] 当前默认只读。需要写入广告、文件或执行命令时，先输出计划和审批项，不要在本轮直接执行。"
