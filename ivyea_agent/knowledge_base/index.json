@@ -6,7 +6,13 @@
     "source_type": "official",
     "version": "2026.06",
     "path": "amazon_ads/sponsored_products_targeting.md",
-    "tags": ["sponsored-products", "targeting", "match-types", "negative-targeting", "campaign-structure"]
+    "tags": [
+      "sponsored-products",
+      "targeting",
+      "match-types",
+      "negative-targeting",
+      "campaign-structure"
+    ]
   },
   {
     "id": "amazon_ads.bidding_budget_reports",
@@ -15,7 +21,13 @@
     "source_type": "official",
     "version": "2026.06",
     "path": "amazon_ads/bidding_budget_reports.md",
-    "tags": ["sponsored-products", "bidding", "budget", "reports", "optimization"]
+    "tags": [
+      "sponsored-products",
+      "bidding",
+      "budget",
+      "reports",
+      "optimization"
+    ]
   },
   {
     "id": "listing.product_detail_page",
@@ -24,7 +36,14 @@
     "source_type": "official",
     "version": "2026.06",
     "path": "listing/product_detail_page.md",
-    "tags": ["listing", "product-detail-page", "images", "bullets", "keywords", "a-plus"]
+    "tags": [
+      "listing",
+      "product-detail-page",
+      "images",
+      "bullets",
+      "keywords",
+      "a-plus"
+    ]
   },
   {
     "id": "community.amazon_operator_patterns",
@@ -33,7 +52,12 @@
     "source_type": "community_template",
     "version": "2026.06",
     "path": "community/operator_patterns.md",
-    "tags": ["community", "forum", "operator-experience", "intake"]
+    "tags": [
+      "community",
+      "forum",
+      "operator-experience",
+      "intake"
+    ]
   },
   {
     "id": "governance.source_quality",
@@ -42,7 +66,13 @@
     "source_type": "official_plus_operator_consensus",
     "version": "2026.06",
     "path": "governance/source_quality.md",
-    "tags": ["source-quality", "confidence", "freshness", "evidence", "governance"]
+    "tags": [
+      "source-quality",
+      "confidence",
+      "freshness",
+      "evidence",
+      "governance"
+    ]
   },
   {
     "id": "playbook.search_term_lifecycle",
@@ -51,7 +81,13 @@
     "source_type": "official_plus_community_consensus",
     "version": "2026.06",
     "path": "playbooks/search_term_lifecycle.md",
-    "tags": ["search-term", "keyword-lifecycle", "harvest", "negative", "campaign-structure"]
+    "tags": [
+      "search-term",
+      "keyword-lifecycle",
+      "harvest",
+      "negative",
+      "campaign-structure"
+    ]
   },
   {
     "id": "playbook.negative_keyword_risk",
@@ -60,7 +96,13 @@
     "source_type": "official_plus_community_consensus",
     "version": "2026.06",
     "path": "playbooks/negative_keyword_risk.md",
-    "tags": ["negative-keywords", "risk-control", "phrase-negative", "exact-negative", "guardrails"]
+    "tags": [
+      "negative-keywords",
+      "risk-control",
+      "phrase-negative",
+      "exact-negative",
+      "guardrails"
+    ]
   },
   {
     "id": "playbook.budget_bid_scaling",
@@ -69,7 +111,14 @@
     "source_type": "official_plus_community_consensus",
     "version": "2026.06",
     "path": "playbooks/budget_bid_scaling.md",
-    "tags": ["budget", "bidding", "scaling", "acos", "roas", "cooldown"]
+    "tags": [
+      "budget",
+      "bidding",
+      "scaling",
+      "acos",
+      "roas",
+      "cooldown"
+    ]
   },
   {
     "id": "playbook.listing_ad_feedback_loop",
@@ -78,7 +127,14 @@
     "source_type": "official_plus_community_consensus",
     "version": "2026.06",
     "path": "playbooks/listing_ad_feedback_loop.md",
-    "tags": ["listing", "conversion", "search-term", "images", "bullets", "a-plus"]
+    "tags": [
+      "listing",
+      "conversion",
+      "search-term",
+      "images",
+      "bullets",
+      "a-plus"
+    ]
   },
   {
     "id": "playbook.launch_maturity_strategy",
@@ -88,7 +144,14 @@
     "version": "2026.06",
     "path": "playbooks/launch_maturity_strategy.md",
     "source_url": "https://advertising.amazon.com/library/guides/getting-started-with-sponsored-ads",
-    "tags": ["launch", "mature-asin", "automatic-targeting", "manual-targeting", "harvest", "budget"]
+    "tags": [
+      "launch",
+      "mature-asin",
+      "automatic-targeting",
+      "manual-targeting",
+      "harvest",
+      "budget"
+    ]
   },
   {
     "id": "playbook.report_driven_optimization",
@@ -98,7 +161,13 @@
     "version": "2026.06",
     "path": "playbooks/report_driven_optimization.md",
     "source_url": "https://advertising.amazon.com/library/guides/getting-started-with-sponsored-ads",
-    "tags": ["reports", "search-term-report", "targeting-report", "placement-report", "cadence"]
+    "tags": [
+      "reports",
+      "search-term-report",
+      "targeting-report",
+      "placement-report",
+      "cadence"
+    ]
   },
   {
     "id": "playbook.content_conversion_assets",
@@ -108,6 +177,251 @@
     "version": "2026.06",
     "path": "playbooks/content_conversion_assets.md",
     "source_url": "https://sell.amazon.com/tools/a-content",
-    "tags": ["a-plus", "images", "video", "comparison-chart", "conversion", "brand-story"]
+    "tags": [
+      "a-plus",
+      "images",
+      "video",
+      "comparison-chart",
+      "conversion",
+      "brand-story"
+    ]
+  },
+  {
+    "id": "amazon_ads.match_types",
+    "title": "Amazon Ads keyword match types",
+    "category": "amazon_ads",
+    "source_type": "official",
+    "version": "2026.07",
+    "path": "amazon_ads/match_types.md",
+    "source_url": "https://advertising.amazon.com/help/GHTRFDZRJPW6764R",
+    "license": "amazon_public_docs_summary",
+    "tags": [
+      "sponsored-products",
+      "keyword-targeting",
+      "match-types",
+      "broad",
+      "phrase",
+      "exact"
+    ]
+  },
+  {
+    "id": "amazon_ads.negative_targeting",
+    "title": "Amazon Ads negative keywords and negative product targeting",
+    "category": "amazon_ads",
+    "source_type": "official",
+    "version": "2026.07",
+    "path": "amazon_ads/negative_targeting.md",
+    "source_url": "https://advertising.amazon.com/help/GTEHPEG5BXY9UX5W",
+    "license": "amazon_public_docs_summary",
+    "tags": [
+      "negative-keywords",
+      "negative-targeting",
+      "exact-negative",
+      "phrase-negative",
+      "product-targeting"
+    ]
+  },
+  {
+    "id": "amazon_ads.sponsored_products_targeting_guide",
+    "title": "Targeting with Sponsored Products",
+    "category": "amazon_ads",
+    "source_type": "official",
+    "version": "2026.07",
+    "path": "amazon_ads/sponsored_products_targeting_guide.md",
+    "source_url": "https://advertising.amazon.com/library/guides/targeting-with-sponsored-products",
+    "license": "amazon_public_docs_summary",
+    "tags": [
+      "sponsored-products",
+      "automatic-targeting",
+      "manual-targeting",
+      "product-targeting",
+      "launch"
+    ]
+  },
+  {
+    "id": "amazon_ads.bidding_rules",
+    "title": "Sponsored Products bidding rules and bid adjustments",
+    "category": "amazon_ads",
+    "source_type": "official",
+    "version": "2026.07",
+    "path": "amazon_ads/bidding_rules.md",
+    "source_url": "https://advertising.amazon.com/help/GDLQ5D2BNFCAU3TW",
+    "license": "amazon_public_docs_summary",
+    "tags": [
+      "sponsored-products",
+      "bidding",
+      "bid-rules",
+      "dynamic-bidding",
+      "placement"
+    ]
+  },
+  {
+    "id": "seller_central.listing_quality_guidelines",
+    "title": "Seller Central listing quality guidelines",
+    "category": "seller_central",
+    "source_type": "official",
+    "version": "2026.07",
+    "path": "seller_central/listing_quality_guidelines.md",
+    "source_url": "https://sellercentral.amazon.com/help/hub/reference/external/GC3QAQ8CCXUG5RE4?locale=en-US",
+    "license": "amazon_public_docs_summary",
+    "tags": [
+      "listing",
+      "listing-quality",
+      "title",
+      "bullets",
+      "images",
+      "discoverability"
+    ]
+  },
+  {
+    "id": "seller_central.product_bullet_point_requirements",
+    "title": "Product bullet point requirements",
+    "category": "seller_central",
+    "source_type": "official",
+    "version": "2026.07",
+    "path": "seller_central/product_bullet_point_requirements.md",
+    "source_url": "https://sellercentral.amazon.com/help/hub/reference/external/GX5L8BF8GLMML6CX?locale=en-US",
+    "license": "amazon_public_docs_summary",
+    "tags": [
+      "listing",
+      "bullet-points",
+      "conversion",
+      "copywriting"
+    ]
+  },
+  {
+    "id": "seller_central.product_listing_guidelines",
+    "title": "Product listing guidelines",
+    "category": "seller_central",
+    "source_type": "official",
+    "version": "2026.07",
+    "path": "seller_central/product_listing_guidelines.md",
+    "source_url": "https://sellercentral.amazon.com/help/hub/reference/external/202073140",
+    "license": "amazon_public_docs_summary",
+    "tags": [
+      "listing",
+      "product-detail-page",
+      "title",
+      "images",
+      "variation",
+      "compliance"
+    ]
+  },
+  {
+    "id": "seller_central.manage_your_experiments",
+    "title": "Manage Your Experiments for listing content tests",
+    "category": "seller_central",
+    "source_type": "official",
+    "version": "2026.07",
+    "path": "seller_central/manage_your_experiments.md",
+    "source_url": "https://sell.amazon.com/tools/manage-your-experiments",
+    "license": "amazon_public_docs_summary",
+    "tags": [
+      "manage-your-experiments",
+      "ab-testing",
+      "listing",
+      "conversion",
+      "brand"
+    ]
+  },
+  {
+    "id": "fba.fulfillment_by_amazon_overview",
+    "title": "Fulfillment by Amazon overview",
+    "category": "fba",
+    "source_type": "official",
+    "version": "2026.07",
+    "path": "fba/fulfillment_by_amazon_overview.md",
+    "source_url": "https://sell.amazon.com/fulfillment-by-amazon",
+    "license": "amazon_public_docs_summary",
+    "tags": [
+      "fba",
+      "fulfillment",
+      "inventory",
+      "prime",
+      "offer"
+    ]
+  },
+  {
+    "id": "fba.inventory_management",
+    "title": "Inventory management techniques and FBA readiness",
+    "category": "fba",
+    "source_type": "official",
+    "version": "2026.07",
+    "path": "fba/inventory_management.md",
+    "source_url": "https://sell.amazon.com/learn/inventory-management",
+    "license": "amazon_public_docs_summary",
+    "tags": [
+      "inventory",
+      "fba",
+      "stockout",
+      "replenishment",
+      "advertising-scale"
+    ]
+  },
+  {
+    "id": "policies.account_health_overview",
+    "title": "Amazon account health and seller policy baseline",
+    "category": "policies",
+    "source_type": "official",
+    "version": "2026.07",
+    "path": "policies/account_health_overview.md",
+    "source_url": "https://sellercentral.amazon.com/help/hub/reference/external/G521?locale=en-US",
+    "license": "amazon_public_docs_summary",
+    "tags": [
+      "account-health",
+      "policy",
+      "seller-central",
+      "compliance"
+    ]
+  },
+  {
+    "id": "policies.intellectual_property_policy",
+    "title": "Amazon intellectual property policy",
+    "category": "policies",
+    "source_type": "official",
+    "version": "2026.07",
+    "path": "policies/intellectual_property_policy.md",
+    "source_url": "https://sellercentral.amazon.com/help/hub/reference/external/G201361070?locale=en-US",
+    "license": "amazon_public_docs_summary",
+    "tags": [
+      "intellectual-property",
+      "trademark",
+      "copyright",
+      "patent",
+      "policy"
+    ]
+  },
+  {
+    "id": "seller_university.learn_about_seller_university",
+    "title": "Learn about Amazon Seller University",
+    "category": "seller_university",
+    "source_type": "official",
+    "version": "2026.07",
+    "path": "seller_university/learn_about_seller_university.md",
+    "source_url": "https://sell.amazon.com/learn/seller-university",
+    "license": "amazon_public_docs_summary",
+    "tags": [
+      "seller-university",
+      "training",
+      "seller-central",
+      "operations"
+    ]
+  },
+  {
+    "id": "seller_university.create_product_listings",
+    "title": "Create and optimize Amazon product listings",
+    "category": "seller_university",
+    "source_type": "official",
+    "version": "2026.07",
+    "path": "seller_university/create_product_listings.md",
+    "source_url": "https://sell.amazon.com/blog/amazon-product-listings",
+    "license": "amazon_public_docs_summary",
+    "tags": [
+      "seller-university",
+      "listing",
+      "create-listing",
+      "optimization",
+      "discoverability"
+    ]
   }
 ]

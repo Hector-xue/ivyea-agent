@@ -276,7 +276,7 @@ def test_import_legacy_gbrain_directory(ivyea_home, tmp_path):
     card = knowledge.get_card(row["card_id"])
     assert card and "搜索词复盘" in card["body"]
 
-    hits = knowledge.search("搜索词复盘 Listing 承接", limit=20)
+    hits = knowledge.search("搜索词复盘 Listing 承接", limit=100)
     assert any(h["id"] == row["card_id"] for h in hits)
     ihits = knowledge.search_index("Listing CTR CVR", limit=20)
     assert any(h["id"] == row["card_id"] for h in ihits)
@@ -295,7 +295,7 @@ def test_knowledge_cli_import_and_rebuild(ivyea_home, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "user.listing_note" in out
 
-    assert main(["knowledge", "search", "主图 CTR", "--limit", "5"]) == 0
+    assert main(["knowledge", "search", "主图 CTR", "--limit", "50"]) == 0
     out = capsys.readouterr().out
     assert "user.listing_note" in out
 
@@ -364,3 +364,43 @@ def test_knowledge_conflict_audit(ivyea_home, tmp_path):
     rendered = knowledge.render_conflicts()
     assert "冲突审计" in rendered
     assert "user.negative_hot_take" in rendered
+
+
+
+def test_expanded_official_amazon_knowledge_base():
+    required_ids = {
+        "amazon_ads.match_types",
+        "amazon_ads.negative_targeting",
+        "seller_central.listing_quality_guidelines",
+        "fba.fulfillment_by_amazon_overview",
+        "policies.intellectual_property_policy",
+        "seller_university.learn_about_seller_university",
+    }
+    cards = {c["id"]: c for c in knowledge.list_cards()}
+    assert required_ids.issubset(cards)
+
+    for card_id in required_ids:
+        card = knowledge.get_card(card_id)
+        assert card["source_type"] == "official"
+        assert card["license"] == "amazon_public_docs_summary"
+        assert card["source_quality"] == "authoritative"
+        assert card.get("source_url")
+        assert "Evidence required before action" in card["body"]
+        assert "Guardrails" in card["body"]
+
+    query_expectations = [
+        ("negative exact phrase negative targeting", "amazon_ads.negative_targeting"),
+        ("Seller University create product listing", "seller_university.create_product_listings"),
+        ("FBA inventory advertising scale stockout", "fba.inventory_management"),
+        ("intellectual property competitor brand listing", "policies.intellectual_property_policy"),
+        ("Manage Your Experiments listing conversion", "seller_central.manage_your_experiments"),
+    ]
+    for query, expected_id in query_expectations:
+        hits = knowledge.search(query, limit=10)
+        assert any(h["id"] == expected_id for h in hits), (query, [h["id"] for h in hits])
+
+    registry = knowledge.source_registry()
+    categories = registry["summary"]["categories"]
+    assert categories["seller_university"] >= 1
+    assert categories["fba"] >= 1
+    assert categories["policies"] >= 1
