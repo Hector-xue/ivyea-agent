@@ -188,6 +188,11 @@ class ChatTUI:
         parts = list(self.blocks)
         if self.live is not None:
             parts.append("\033[2m" + self.live + "\033[0m")   # 流式中 dim 显示原文
+        # 思考中（还没吐字 / 工具间隙）：把"生成中"放在内容即将出现的位置（transcript 末尾）
+        elif self.running and self.pending is None:
+            frame = _SPIN[int((time.time() - self.started) * 10) % len(_SPIN)]
+            secs = int(time.time() - self.started)
+            parts.append(f"\033[2m{frame} 生成中 {secs}s…\033[0m")
         if self.pending is not None:
             parts.append("\n".join(self._approval_lines()))   # 审批面板置于末尾
         text = "\n\n".join(p for p in parts if p) or "（开始对话吧。输入 /exit 退出。）"
@@ -208,12 +213,10 @@ class ChatTUI:
 
     def _footer(self):
         base = self.status_fn() or ""
-        if self.running:
-            frame = _SPIN[int((time.time() - self.started) * 10) % len(_SPIN)]
-            secs = int(time.time() - self.started)
+        if self.running:   # "生成中" 已移到 transcript 内容处；footer 只留控制提示 + 状态
             q = f" · 已排队 {len(self.queued)}" if self.queued else ""
-            hint = " · 中断中…" if self.cancel_requested else " · Esc/Ctrl-C 中断 · 回车排队下一条"
-            return [("class:run", f" {frame} 生成中 {secs}s{hint}{q}"), ("class:ftr", " · " + base)]
+            hint = "中断中…" if self.cancel_requested else "Esc/Ctrl-C 中断 · 回车排队下一条"
+            return [("class:run", f" {hint}{q}"), ("class:ftr", " · " + base)]
         return [("class:ftr", " " + base)]
 
     def _start_turn(self, line: str) -> None:
