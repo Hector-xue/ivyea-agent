@@ -13,11 +13,13 @@ class _FakeProvider:
 
 def test_should_compact_threshold(ivyea_home):
     from ivyea_agent import config, context
-    assert context.should_compact(120000) is False
-    assert context.should_warn_compact(120000) is True
+    assert context.DEFAULT_AUTO_COMPACT is True           # 默认主动压缩（对标 Claude）
+    config.set_setting("auto_compact", False)
+    assert context.should_compact(120000) is False        # 关时不自动压
+    assert context.should_warn_compact(120000) is True    # 但仍会提示手动 /compact
     config.set_setting("auto_compact", True)
-    assert context.should_compact(120000) is True
-    assert context.should_compact(100) is False
+    assert context.should_compact(120000) is True         # 开时越过阈值即压
+    assert context.should_compact(100) is False           # 未过阈值不压
 
 
 def test_compact_replaces_history_no_tool_pairs(ivyea_home):

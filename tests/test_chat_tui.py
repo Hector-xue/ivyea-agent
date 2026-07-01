@@ -13,23 +13,25 @@ def _plain(s: str) -> str:
     return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", s)
 
 
-def test_tui_default_on_tty_and_opt_out(monkeypatch):
+def test_tui_default_off_and_opt_in(monkeypatch):
     import types
     monkeypatch.setattr(chat_tui.sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
     monkeypatch.setattr(chat_tui.sys, "stdout", types.SimpleNamespace(isatty=lambda: True))
     monkeypatch.delenv("IVYEA_TUI", raising=False)
-    assert chat_tui.tui_enabled() is True                 # TTY 下默认开
-    for off in ("0", "false", "Off", "NO"):
-        monkeypatch.setenv("IVYEA_TUI", off)
-        assert chat_tui.tui_enabled() is False            # IVYEA_TUI=0 退回行式
+    assert chat_tui.tui_enabled() is False                # 默认走行式（正常滚动缓冲区）
+    for on in ("1", "true", "On", "YES"):
+        monkeypatch.setenv("IVYEA_TUI", on)
+        assert chat_tui.tui_enabled() is True             # IVYEA_TUI=1 才进全屏 TUI（opt-in）
+    monkeypatch.setenv("IVYEA_TUI", "0")
+    assert chat_tui.tui_enabled() is False
 
 
 def test_tui_disabled_when_not_tty(monkeypatch):
     import types
     monkeypatch.setattr(chat_tui.sys, "stdin", types.SimpleNamespace(isatty=lambda: False))
     monkeypatch.setattr(chat_tui.sys, "stdout", types.SimpleNamespace(isatty=lambda: True))
-    monkeypatch.delenv("IVYEA_TUI", raising=False)
-    assert chat_tui.tui_enabled() is False                # 非 TTY 自动回退
+    monkeypatch.setenv("IVYEA_TUI", "1")                  # 即便 opt-in，非 TTY 也回退行式
+    assert chat_tui.tui_enabled() is False
 
 
 def _run_headless(keys: str, status="  ivyea · GPT-5.5 · dry-run "):

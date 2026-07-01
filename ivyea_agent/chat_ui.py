@@ -137,4 +137,4 @@ class _StreamPrinter:
                 sys.stdout.write(f"\033[{lines - 1}A")
             sys.stdout.write("\033[J")
             sys.stdout.flush()
-        print(f"{_C['c']}●{_C['x']} " + markdown.render(final_text))
+        print(f"\n{_C['c']}●{_C['x']} " + markdown.render(final_text))   # 回答前留一空行，呼吸感

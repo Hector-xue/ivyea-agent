@@ -92,11 +92,23 @@ def _render(md: str) -> str:
             out.extend(_render_table(table_buf))
             table_buf.clear()
 
+    def _blank():
+        if out and out[-1] != "":
+            out.append("")
+
     for ln in lines:
         fence = re.match(r"^\s*```(\w*)", ln)
         if fence:
             _flush_table()
-            in_code = not in_code
+            if not in_code:                       # 代码块开：上方留白 + 语言标注框头
+                lang = fence.group(1)
+                _blank()
+                out.append(f"{_DIM}╭─{(' ' + lang) if lang else ''}{_X}")
+                in_code = True
+            else:                                 # 代码块关：框尾 + 下方留白
+                out.append(f"{_DIM}╰─{_X}")
+                out.append("")
+                in_code = False
             continue
         if in_code:
             out.append(f"{_CODE_BAR} {_CODE}{ln}{_X}")
@@ -109,8 +121,13 @@ def _render(md: str) -> str:
         if h:
             level = len(h.group(1))
             color = (_CY, _MG, _YE, _GR, _GR, _GR)[min(level - 1, 5)]
-            prefix = "" if level == 1 else _DIM + "#" * level + " " + _X
-            out.append(f"{prefix}{_B}{color}{_inline(h.group(2))}{_X}")
+            _blank()                              # 标题上方留白，呼吸感
+            title = _inline(h.group(2))
+            if level == 1:                        # 一级标题：不留 #，加同色下划色条
+                out.append(f"{_B}{color}{title}{_X}")
+                out.append(f"{_DIM}{color}{'─' * min(48, max(4, _vis_len(h.group(2))))}{_X}")
+            else:
+                out.append(f"{_DIM}{'#' * level} {_X}{_B}{color}{title}{_X}")
             continue
         if re.match(r"^\s*([-*_])\1{2,}\s*$", ln):
             out.append(f"{_DIM}{'─' * 48}{_X}")

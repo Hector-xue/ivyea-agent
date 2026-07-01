@@ -19,16 +19,17 @@ import threading
 import time
 from typing import Callable
 
-_FALSY = ("0", "false", "off", "no")
+_TRUTHY = ("1", "true", "on", "yes")
 _SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 def tui_enabled() -> bool:
-    """是否走全屏 TUI。默认开；`IVYEA_TUI=0/false/off/no` 退回行式 CLI。
-    非 TTY / prompt_toolkit 不可用时也自动回退，保证任何环境可用。"""
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+    """是否走全屏 TUI（alt-screen）。默认**关**——走行式（正常滚动缓冲区），
+    这样鼠标滚轮/框选复制原生可用（对标 Claude Code）。仅 `IVYEA_TUI=1/true/on/yes`
+    才进全屏 TUI（opt-in）。非 TTY / prompt_toolkit 不可用时也回退到行式。"""
+    if os.environ.get("IVYEA_TUI", "").strip().lower() not in _TRUTHY:
         return False
-    if os.environ.get("IVYEA_TUI", "").strip().lower() in _FALSY:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return False
     try:
         import prompt_toolkit  # noqa: F401

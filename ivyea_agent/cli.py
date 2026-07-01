@@ -1386,7 +1386,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         sid = sessions.new_id()
     ctx.session_id = sid
     render_md = not getattr(args, "raw", False)   # 默认 markdown 渲染
-    stream_live = bool(cfg.get_setting("stream_live", False))   # 完整流式（opt-in，/stream on）
+    # 完整流式默认开（tty 下逐字出字、收尾重排 markdown，对标 Claude）；/stream 可切、可持久化覆盖
+    stream_live = bool(cfg.get_setting("stream_live", True))
 
     def _persist():
         try:
@@ -1429,14 +1430,26 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
     from . import chat_input
 
+    def _ctx_bar() -> str:
+        """上下文用量进度条：ctx ▓▓░░░░ 22%（45k/96k）。分母=自动压缩阈值——到 100% 即压缩回落，
+        对标 Claude 的"距压缩还剩多少"。优先用 provider 真实 prompt_tokens，不回报时回退本地估算。"""
+        used = _ui["ctx"] or ctx_mod.estimate_tokens(messages)
+        if not used:
+            return ""
+        limit = int(cfg.get_setting("compact_at_tokens", ctx_mod.DEFAULT_COMPACT_AT))
+        pct = min(100, round(used * 100 / max(1, limit)))
+        n = 10
+        filled = min(n, round(pct * n / 100))
+        bar = "▓" * filled + "░" * (n - filled)
+        return f"ctx {bar} {pct}%（{used // 1000}k/{limit // 1000}k）· "
+
     def _status() -> str:
         plan = "计划模式 · " if ctx.plan_mode else ""
         auto = "⚡自动放行 · " if ctx.perm.accept_edits else ""
         cost = f"¥{meter.cost:.4f} · " if meter.turns else ""
-        cx = f"ctx ~{_ui['ctx'] // 1000}k · " if _ui["ctx"] else ""
         turns = f"{meter.turns} 轮 · " if meter.turns else ""
         return (f" ivyea · {_label()} · {plan}{auto}"
-                f"{'真实写' if args.execute else 'dry-run'} · {turns}{cx}{cost}shift+tab 切模式 ")
+                f"{'真实写' if args.execute else 'dry-run'} · {turns}{_ctx_bar()}{cost}shift+tab 切模式 ")
 
     def _cycle_mode() -> str:
         """Shift+Tab 循环：普通 → 自动接受编辑 → 计划模式 → 普通。返回新模式名。"""
@@ -1449,7 +1462,15 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         messages[0] = _sys_msg()   # 计划模式影响 system prompt
         return label
 
-    ci = chat_input.ChatInput(SLASH_COMMANDS, _status, mode_cycle_fn=_cycle_mode)
+    def _mode_label() -> str:      # 输入框上边线右端显示的当前模式（对标 Claude）
+        if ctx.plan_mode:
+            return "⏸ 计划模式"
+        if ctx.perm.accept_edits:
+            return "⚡ 自动接受编辑"
+        return ""
+
+    ci = chat_input.ChatInput(SLASH_COMMANDS, _status, mode_cycle_fn=_cycle_mode,
+                              mode_label_fn=_mode_label)
     from . import hooks as _hooks
     _hooks.fire("session_start", {"session_id": sid or "", "cwd": os.getcwd()})
 
@@ -1523,7 +1544,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     def _sh_compact(line):
         nonlocal messages
         if line in ("/compact auto", "/compact auto status"):
-            state = "开启" if bool(cfg.get_setting("auto_compact", False)) else "关闭"
+            state = "开启" if bool(cfg.get_setting("auto_compact", ctx_mod.DEFAULT_AUTO_COMPACT)) else "关闭"
             th = int(cfg.get_setting("compact_at_tokens", ctx_mod.DEFAULT_COMPACT_AT))
             print(ui.message("info", f"自动压缩：{state} · 阈值 {th} prompt tokens")); return True
         if line in ("/compact auto on", "/compact auto off"):
@@ -1703,14 +1724,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         out["blocked"] = False
         return out
 
-    def _mode_label() -> str:    # 输入框上边线右端显示的当前模式（对标 Claude）
-        if ctx.plan_mode:
-            return "⏸ 计划模式"
-        if ctx.perm.accept_edits:
-            return "⚡ 自动接受编辑"
-        return ""
-
-    if _tui_on:                  # 全屏 TUI（默认；IVYEA_TUI=0 走下面的行式循环）
+    if _tui_on:                  # 全屏 TUI（opt-in：IVYEA_TUI=1；默认走下面的行式循环）
         return _chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
                              render_markdown=markdown.render,
                              plan_intent_fn=_plan_mode_intent,
@@ -1813,7 +1827,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                     provider, ctx, messages, model=mcfg.get("model", ""),
                     render=spin.tick, narrate=lambda s: (spin.clear(), print(s)))
                 spin.clear()
-                print(f"{_C['c']}●{_C['x']} " + markdown.render(out["text"]))
+                print(f"\n{_C['c']}●{_C['x']} " + markdown.render(out["text"]))   # 回答前留一空行
             else:
                 print(f"{_C['c']}●{_C['x']} ", end="", flush=True)
                 out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""))
