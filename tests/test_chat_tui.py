@@ -84,10 +84,55 @@ def test_turn_streams_and_interleaves_tool_lines():
 
 
 def test_turn_error_surfaced():
-    def boom(line, render, narrate):
+    def boom(line, render, narrate, cancel_check=None):
         raise RuntimeError("炸了")
     tui = chat_tui.ChatTUI(status_fn=lambda: "s", turn_fn=boom, render_markdown=lambda s: s)
     tui._start_turn("x")
     _wait_idle(tui)
     assert tui.running is False
     assert "炸了" in _plain("\n".join(tui.blocks))
+
+
+# ---- P2 中断 + 排队 ----
+def test_run_turn_stream_cancel_check_raises():
+    from ivyea_agent import agent_loop, agent_tools
+
+    class _P:
+        def stream_chat(self, *a, **k):
+            yield {"type": "text", "text": "x"}
+
+    ctx = agent_tools.ToolContext(session_id="s")
+    ctx.turn_id = "t"
+    import pytest as _pt
+    with _pt.raises(KeyboardInterrupt):
+        agent_loop.run_turn_stream(_P(), ctx, [{"role": "user", "content": "hi"}],
+                                   cancel_check=lambda: True)
+
+
+def test_tui_interrupt_preserves_session():
+    import time
+    def slow(line, render, narrate, cancel_check=None):
+        for _ in range(200):
+            if cancel_check and cancel_check():
+                raise KeyboardInterrupt
+            time.sleep(0.005)
+        return {"text": "done"}
+    tui = chat_tui.ChatTUI(status_fn=lambda: "s", turn_fn=slow, render_markdown=lambda s: s)
+    tui._start_turn("长任务")
+    time.sleep(0.05)
+    tui.cancel_requested = True
+    _wait_idle(tui)
+    assert tui.running is False
+    assert "已中断" in _plain("\n".join(tui.blocks))
+
+
+def test_tui_queue_auto_continues():
+    def quick(line, render, narrate, cancel_check=None):
+        render(f"答:{line}")
+        return {"text": line}
+    tui = chat_tui.ChatTUI(status_fn=lambda: "s", turn_fn=quick, render_markdown=lambda s: s)
+    tui.running = True
+    tui.queued = ["第二条"]
+    tui._finish({"text": "第一条 done"})    # 结束首轮 → 自动跑排队的下一条
+    _wait_idle(tui)
+    assert "❯ 第二条" in _plain("\n".join(tui.blocks))

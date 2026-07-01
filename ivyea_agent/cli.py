@@ -1629,9 +1629,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         "/workspace": _sh_embedded, "/patch": _sh_embedded, "/gitops": _sh_embedded,
     }
 
-    def _execute_turn(line, render, narrate):
+    def _execute_turn(line, render, narrate, cancel_check=None):
         """跑一轮对话，输出经 render(token)/narrate(行) 注入 —— 供 TUI 复用（行式循环仍走下方原逻辑）。
-        返回 {text, usage, blocked}。会更新 messages/meter/记忆/上下文压缩。"""
+        cancel_check：运行中请求中断的钩子（TUI 用）。返回 {text, usage, blocked}。"""
         nonlocal messages
         api_key = cfg.get_active_key()
         cms = cfg.load_settings()
@@ -1673,7 +1673,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         provider = build_chain(mcfg, api_key, narrate=narrate)
         ctx.provider = provider
         out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""),
-                                         render=render, narrate=narrate)
+                                         render=render, narrate=narrate, cancel_check=cancel_check)
         c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
         _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
         if c:

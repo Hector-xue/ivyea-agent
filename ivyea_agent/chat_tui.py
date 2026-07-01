@@ -68,6 +68,8 @@ class ChatTUI:
         self.blocks: list[str] = []          # 已定稿 block（可含 ANSI）
         self.live: str | None = None         # 当前流式助手文本（未定稿）
         self.running = False
+        self.cancel_requested = False        # Esc/Ctrl-C 请求中断当前轮
+        self.queued: list[str] = []          # 运行中回车排队的后续指令
         self.scroll = 0                       # 距底部的物理行数；0=贴底跟随
         self.started = 0.0
         self.app = None
@@ -128,7 +130,9 @@ class ChatTUI:
         if self.running:
             frame = _SPIN[int((time.time() - self.started) * 10) % len(_SPIN)]
             secs = int(time.time() - self.started)
-            return [("class:run", f" {frame} 生成中 {secs}s · Esc 稍后接入中断"), ("class:ftr", " · " + base)]
+            q = f" · 已排队 {len(self.queued)}" if self.queued else ""
+            hint = " · 中断中…" if self.cancel_requested else " · Esc/Ctrl-C 中断 · 回车排队下一条"
+            return [("class:run", f" {frame} 生成中 {secs}s{hint}{q}"), ("class:ftr", " · " + base)]
         return [("class:ftr", " " + base)]
 
     def _start_turn(self, line: str) -> None:
@@ -136,11 +140,21 @@ class ChatTUI:
         self.blocks.append(f"\033[36m❯\033[0m {line}")
         self.scroll = 0
         self.running = True
+        self.cancel_requested = False
         self.started = time.time()
 
         def _worker():
             try:
-                out = self.turn_fn(line, self.render, self.narrate)
+                out = self.turn_fn(line, self.render, self.narrate,
+                                   cancel_check=lambda: self.cancel_requested)
+            except KeyboardInterrupt:
+                out = {"text": "", "cancelled": True}
+            except TypeError:
+                # turn_fn 不接受 cancel_check（如测试假函数）→ 退化重试
+                try:
+                    out = self.turn_fn(line, self.render, self.narrate)
+                except Exception as e:   # noqa: BLE001
+                    out = {"text": "", "error": str(e)}
             except Exception as e:   # noqa: BLE001
                 out = {"text": "", "error": str(e)}
             self._finish(out)
@@ -150,11 +164,19 @@ class ChatTUI:
 
     def _finish(self, out: dict) -> None:
         self._commit_live()
-        err = out.get("error")
-        if err:
-            self.blocks.append(f"\033[31m✗ 出错：{err}\033[0m")
+        if out.get("cancelled"):
+            self.blocks.append("\033[33m⛔ 已中断（会话已保留，可继续输入）\033[0m")
+        elif out.get("error"):
+            self.blocks.append(f"\033[31m✗ 出错：{out['error']}\033[0m")
         self.running = False
+        self.cancel_requested = False
         self.scroll = 0
+        # 处理运行中排队的后续指令：逐条自动继续
+        if self.queued:
+            nxt = self.queued.pop(0)
+            self._invalidate()
+            self._start_turn(nxt)
+            return
         self._invalidate()
 
     def build_app(self):
@@ -178,21 +200,40 @@ class ChatTUI:
         kb = KeyBindings()
 
         @kb.add("c-c")
+        def _(event):
+            if self.running:                 # 运行中：请求中断当前轮
+                self.cancel_requested = True
+            else:                            # 空闲：退出
+                event.app.exit(result=0)
+
         @kb.add("c-d")
         def _(event):
             event.app.exit(result=0)
 
+        @kb.add("escape", eager=True)
+        def _(event):
+            if self.running:                 # 运行中：Esc 也请求中断
+                self.cancel_requested = True
+
         @kb.add("enter")
         def _(event):
-            if self.running:      # P1：运行中先忽略输入（中断/排队见 P2）
-                return
             text = ta.text.strip()
             ta.text = ""
+            if not text:
+                return
+            if self.running:                 # 运行中：回车把指令排队，本轮结束后自动继续
+                if text in ("/exit", "/quit"):
+                    self.cancel_requested = True
+                    event.app.exit(result=0)
+                    return
+                self.queued.append(text)
+                self.blocks.append(f"\033[2m⋯ 已排队：{text}\033[0m")
+                self._invalidate()
+                return
             if text in ("/exit", "/quit"):
                 event.app.exit(result=0)
                 return
-            if text:
-                self._start_turn(text)
+            self._start_turn(text)
 
         @kb.add("pageup")
         def _(event):
