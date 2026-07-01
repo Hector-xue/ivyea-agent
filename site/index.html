@@ -1,145 +1,541 @@
-<!doctype html>
-<html lang="zh-CN">
+<!DOCTYPE html>
+<html lang="zh">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ivyea Agent - Amazon 运营 CLI Agent</title>
-  <meta name="description" content="Ivyea Agent 是自托管的亚马逊运营 CLI Agent，支持广告巡检、知识库、skills、审批写入、视觉诊断和自动化预警。">
-  <link rel="stylesheet" href="styles.css">
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Ivyea Agent · 自托管 Amazon 运营 CLI Agent</title>
+<meta name="description" content="自托管的 Amazon 运营命令行 Agent：确定性规则引擎做广告决策、LLM 只做复核与解释；领星 OpenAPI 真实广告数据，写操作审批制 + 审计回滚，记忆 / 知识库 / Skills / 护栏内置，多模型可切，数据全留本机。" />
+<style>
+  :root{
+    --bg:#f4f8f5; --bg2:#e9f0eb;
+    --line:rgba(12,40,26,.09); --line2:rgba(12,40,26,.15); --line3:rgba(12,40,26,.24);
+    --text:#08130d; --text2:#3c4f45; --text3:#5f7368;
+    --green:#12a150;
+    --grad:linear-gradient(118deg,#0ea5a4 0%,#16a34a 48%,#22c55e 100%);
+    --max:1080px;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth;scroll-padding-top:64px}
+  body{
+    font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    color:var(--text);line-height:1.6;overflow-x:hidden;
+    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+    background:
+      radial-gradient(920px 620px at 14% 0%, rgba(34,197,94,.20), transparent 56%),
+      radial-gradient(860px 720px at 95% 10%, rgba(13,184,166,.17), transparent 58%),
+      radial-gradient(720px 520px at 78% 98%, rgba(16,163,74,.13), transparent 60%),
+      #f3f8f4;
+    background-attachment:fixed;
+  }
+  a{color:inherit;text-decoration:none}
+  button{font:inherit;cursor:pointer;border:none;background:none}
+  code{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+  ::selection{background:rgba(34,197,94,.24)}
+
+  /* ── Background ── */
+  #grid-canvas{position:fixed;inset:0;z-index:0;opacity:.42;pointer-events:none}
+  #glow{position:fixed;width:600px;height:600px;border-radius:50%;pointer-events:none;z-index:0;
+    background:radial-gradient(circle,rgba(34,197,94,.16),rgba(13,184,166,.07) 38%,transparent 70%);
+    transform:translate(-50%,-50%);filter:blur(32px)}
+  .orb{position:fixed;border-radius:50%;filter:blur(110px);z-index:0;pointer-events:none}
+  .orb1{width:360px;height:360px;background:rgba(34,197,94,.16);top:-110px;left:-50px}
+  .orb2{width:320px;height:320px;background:rgba(13,184,166,.13);bottom:-90px;right:-40px}
+
+  /* ── Frame ── */
+  .frame{position:relative;z-index:2;max-width:var(--max);margin:0 auto;padding:0 24px}
+  .section{padding-top:84px;padding-bottom:64px;border-top:1px solid var(--line)}
+
+  /* ── Topbar ── */
+  .topbar{position:fixed;top:0;left:0;right:0;z-index:200;display:flex;align-items:center;
+    justify-content:space-between;min-height:52px;padding:0 24px;
+    background:rgba(244,248,245,.82);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    border-bottom:1px solid var(--line)}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:16px;letter-spacing:-.01em}
+  .brand .mark{width:26px;height:26px;border-radius:6px;display:inline-flex;align-items:center;
+    justify-content:center;background:var(--grad);color:#fff;font-size:14px;font-weight:800;
+    font-family:"JetBrains Mono",ui-monospace,monospace;box-shadow:0 4px 14px -4px rgba(22,163,74,.6)}
+  .nav-links{display:flex;align-items:center;gap:26px;font-size:13px;color:var(--text3)}
+  .nav-links a{transition:color .2s}
+  .nav-links a:hover{color:var(--text)}
+  .nav-act{display:flex;align-items:center;gap:10px}
+  .lang-btn{font-size:12px;color:var(--text3);border:1px solid var(--line2);padding:5px 10px;
+    border-radius:3px;min-width:36px;transition:all .2s}
+  .lang-btn:hover{border-color:var(--line3);color:var(--text)}
+  .gh-btn{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;
+    padding:6px 12px;background:var(--text);color:var(--bg);border-radius:3px;transition:opacity .2s}
+  .gh-btn:hover{opacity:.85}
+  .menu-toggle{display:none;width:36px;height:36px;align-items:center;justify-content:center;
+    border:1px solid var(--line2);border-radius:3px;font-size:16px;color:var(--text)}
+
+  /* ── Hero (install-first) ── */
+  .hero{display:grid;grid-template-columns:minmax(0,1.08fr) minmax(0,1fr);gap:52px;align-items:center;
+    min-height:calc(100vh - 52px);padding:52px 0 56px}
+  .hero-copy{display:flex;flex-direction:column;gap:18px;min-width:0}
+  .badge{display:inline-flex;align-items:center;gap:8px;width:fit-content;
+    font-size:10px;font-weight:600;letter-spacing:.12em;color:var(--text3);
+    padding:5px 12px;border:1px solid var(--line2);border-radius:3px}
+  .badge .dot{width:5px;height:5px;border-radius:50%;background:var(--green);
+    animation:pulse 2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  h1.title{font-size:clamp(34px,4.6vw,52px);line-height:1.06;font-weight:800;letter-spacing:-.04em}
+  h1.title .g{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{font-size:16px;color:var(--text2);line-height:1.7;max-width:460px}
+  .cta{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+  .btn{display:inline-flex;align-items:center;gap:7px;padding:11px 22px;font-size:13px;font-weight:600;
+    border-radius:3px;transition:all .2s}
+  .btn:hover{transform:translateY(-1px)}
+  .btn-primary{background:var(--grad);color:#fff;font-weight:700;
+    box-shadow:0 10px 30px -10px rgba(22,163,74,.5)}
+  .btn-primary:hover{box-shadow:0 14px 38px -8px rgba(22,163,74,.62);filter:brightness(1.05)}
+  .btn-ghost{border:1px solid var(--line2);color:var(--text);background:rgba(255,255,255,.5)}
+  .btn-ghost:hover{border-color:var(--green);background:rgba(34,197,94,.08)}
+  .hero-meta{display:flex;flex-wrap:wrap;gap:8px 20px;font-size:12px;color:var(--text3);margin-top:4px}
+  .hero-meta b{color:var(--text2);font-weight:600}
+
+  /* ── Terminal ── */
+  .term{position:relative;min-width:0;background:#0c1410;border-radius:8px;overflow:hidden;
+    border:1px solid rgba(34,197,94,.18);
+    box-shadow:0 34px 70px -30px rgba(12,40,26,.4), 0 0 54px -20px rgba(34,197,94,.35)}
+  .term-bar{display:flex;align-items:center;flex-wrap:wrap;gap:7px;padding:11px 14px;border-bottom:1px solid rgba(255,255,255,.06)}
+  .term-os-sep{width:1px;height:14px;background:rgba(255,255,255,.14);margin:0 1px}
+  .term-bar .d{width:11px;height:11px;border-radius:50%}
+  .term-bar .t{font-size:11px;color:rgba(255,255,255,.4);margin-left:8px}
+  .term-os-tabs{display:inline-flex;gap:4px;margin-left:8px}
+  .term-os{font-size:11px;color:rgba(255,255,255,.4);padding:3px 9px;border-radius:4px;
+    border:1px solid transparent;transition:all .15s}
+  .term-os:hover{color:rgba(255,255,255,.75)}
+  .term-os.active{color:#e8f5ec;background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.12)}
+  .term-copy{margin-left:auto;display:inline-flex;align-items:center;gap:5px;
+    padding:4px 10px;font-size:10px;color:rgba(255,255,255,.55);
+    background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:3px;transition:all .2s}
+  .term-copy:hover{background:rgba(255,255,255,.12);color:#fff}
+  .term-body{padding:18px 18px 16px;font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:13px;line-height:1.85;color:rgba(200,224,208,.78);overflow-x:hidden}
+  .tl{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+  .tl .c{color:rgba(120,200,150,.5)}
+  .tl .p{color:#4ade80;user-select:none}
+  .tl .cmd{color:#e8f5ec}
+  .tl .ok{color:#4ade80}
+  .tl .dim{color:rgba(200,224,208,.4)}
+  .term-steps{display:flex;gap:16px;padding:12px 18px 16px;border-top:1px solid rgba(255,255,255,.06);flex-wrap:wrap}
+  .term-step{display:flex;align-items:center;gap:7px;font-size:11px;color:rgba(200,224,208,.45);
+    font-family:"Inter",-apple-system,sans-serif}
+  .term-step .n{width:18px;height:18px;border-radius:50%;display:inline-flex;align-items:center;
+    justify-content:center;font-size:10px;font-weight:700;background:var(--green);color:#fff}
+
+  /* ── Section head ── */
+  .section-head{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin-bottom:40px}
+  .section-left{display:flex;flex-direction:column;gap:8px}
+  .sec-tag{font-size:10px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--text3)}
+  .section-left h2{font-size:clamp(26px,3.6vw,38px);font-weight:700;letter-spacing:-.03em}
+  .section-right{font-size:13px;color:var(--text3);max-width:320px;text-align:right;line-height:1.7;text-wrap:balance;word-break:keep-all}
+
+  /* ── Modules ── */
+  .mods{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);
+    border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  .mod{background:var(--bg);padding:26px 22px;transition:background .2s}
+  .mod:hover{background:rgba(34,197,94,.07)}
+  .mod .ic{font-size:24px;line-height:1;margin-bottom:14px;display:inline-block;
+    background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .mod h3{font-size:15px;font-weight:600;margin-bottom:5px;letter-spacing:-.01em}
+  .mod p{font-size:12px;color:var(--text3);line-height:1.6}
+  .mods-more{margin-top:16px;font-size:12px;color:var(--text3);text-align:center}
+  .mods-more b{color:var(--text2);font-weight:600}
+
+  /* ── Values (why) ── */
+  .vals{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);
+    border:1px solid var(--line);border-radius:6px;overflow:hidden}
+
+  /* ── Flow band ── */
+  .flow{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);
+    border:1px solid var(--line);border-radius:6px;overflow:hidden;margin-top:8px}
+  .flow .step{background:var(--bg);padding:22px 20px}
+  .flow .step .k{font-size:11px;font-weight:700;color:var(--green);letter-spacing:.04em;margin-bottom:8px}
+  .flow .step h4{font-size:14px;font-weight:600;margin-bottom:5px;letter-spacing:-.01em}
+  .flow .step p{font-size:12px;color:var(--text3);line-height:1.6}
+
+  /* ── Production / embed ── */
+  .prod{display:flex;align-items:center;justify-content:space-between;gap:24px;flex-wrap:wrap;
+    border:1px solid var(--line2);border-radius:8px;padding:24px 28px;
+    background:linear-gradient(120deg,rgba(34,197,94,.10),rgba(13,184,166,.06))}
+  .prod-l h3{font-size:17px;font-weight:600;margin-bottom:6px;letter-spacing:-.01em}
+  .prod-l p{font-size:13px;color:var(--text2);line-height:1.6}
+  .prod-l p code{font-size:12px;color:var(--green)}
+
+  /* ── Footer ── */
+  footer{padding:30px 0 36px;border-top:1px solid var(--line)}
+  .foot-top{display:grid;grid-template-columns:1.7fr 1fr 1fr 1fr;gap:28px;padding-bottom:30px}
+  .foot-about{max-width:320px}
+  .foot-brand{display:flex;align-items:center;gap:9px;font-weight:600;font-size:14px;margin-bottom:11px}
+  .foot-brand .mark{width:22px;height:22px;border-radius:5px;display:inline-flex;align-items:center;
+    justify-content:center;background:var(--grad);color:#fff;font-size:12px;font-weight:800;
+    font-family:"JetBrains Mono",ui-monospace,monospace}
+  .foot-tagline{color:var(--text3);font-size:12.5px;line-height:1.75;margin-bottom:15px}
+  .foot-star{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text2);
+    border:1px solid var(--line2);border-radius:3px;padding:6px 12px;transition:all .2s}
+  .foot-star:hover{border-color:var(--green);color:var(--green);background:rgba(34,197,94,.07)}
+  .foot-col-h{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--text3);
+    font-weight:600;margin-bottom:13px}
+  .foot-col a,.foot-col span{display:block;font-size:13px;color:var(--text2);padding:4px 0}
+  .foot-col a{transition:color .15s}
+  .foot-col a:hover{color:var(--green)}
+  .foot-col span{color:var(--text3)}
+  .foot-bottom{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;
+    padding-top:20px;border-top:1px solid var(--line);font-size:12px;color:var(--text3)}
+  .foot-meta{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  @media(max-width:720px){
+    .foot-top{grid-template-columns:1fr 1fr;gap:22px}
+    .foot-about{grid-column:1 / -1}
+  }
+
+  /* ── Reveal ── */
+  .reveal{opacity:0;transform:translateY(16px);
+    transition:opacity .6s cubic-bezier(.2,.7,.2,1),transform .6s cubic-bezier(.2,.7,.2,1)}
+  .reveal.in{opacity:1;transform:none}
+
+  /* ── Responsive ── */
+  @media(max-width:920px){
+    .mods{grid-template-columns:repeat(2,1fr)}
+    .vals{grid-template-columns:repeat(2,1fr)}
+    .flow{grid-template-columns:repeat(2,1fr)}
+  }
+  @media(max-width:860px){
+    .hero{grid-template-columns:minmax(0,1fr);gap:28px;min-height:auto;padding:68px 0 48px}
+    .section-head{flex-direction:column;align-items:flex-start;gap:12px}
+    .section-right{text-align:left}
+  }
+  @media(max-width:640px){
+    .frame{padding:0 16px}
+    .topbar{padding:0 16px}
+    .nav-links,.nav-act .gh-btn span{display:none}
+    .menu-toggle{display:flex;margin-left:auto;order:3}
+    .nav-act{gap:8px}
+    .nav-links.open{display:flex;position:fixed;top:52px;left:0;right:0;flex-direction:column;gap:0;
+      background:var(--bg);padding:8px 16px 12px;border-bottom:1px solid var(--line);z-index:150}
+    .nav-links.open a{padding:11px 0;font-size:14px;color:var(--text2);border-bottom:1px solid var(--line)}
+    .nav-links.open a:last-child{border-bottom:none}
+    .section{padding-top:48px;padding-bottom:36px}
+    h1.title{font-size:30px}
+    .sub{font-size:14px}
+    .term-body{font-size:11.5px}
+    .term-copy{display:none}
+    .term-os{padding:3px 7px;font-size:10px}
+    .term-os-tabs{margin-left:4px;gap:3px}
+    .mods,.vals,.flow{grid-template-columns:1fr}
+    .prod{flex-direction:column;align-items:flex-start}
+  }
+</style>
 </head>
 <body>
-  <header class="site-header">
-    <nav class="nav" aria-label="主导航">
-      <a class="brand" href="index.html"><span class="brand-mark">I</span><span>Ivyea Agent</span></a>
-      <div class="nav-links">
-        <a href="install.html">安装</a>
-        <a href="docs.html">文档</a>
-        <a href="docs.html#operations">运营能力</a>
-        <a href="docs.html#security">安全</a>
-        <a class="button secondary" href="https://github.com/Hector-xue/ivyea-agent">GitHub</a>
+<canvas id="grid-canvas"></canvas>
+<div id="glow"></div>
+<div class="orb orb1"></div>
+<div class="orb orb2"></div>
+
+<!-- TOPBAR -->
+<div class="topbar">
+  <a class="brand" href="#top"><span class="mark">›_</span> Ivyea Agent</a>
+  <nav class="nav-links" id="navLinks">
+    <a href="#install" data-zh="安装" data-en="Install">安装</a>
+    <a href="#why" data-zh="优势" data-en="Why">优势</a>
+    <a href="#features" data-zh="能力" data-en="Capabilities">能力</a>
+    <a href="#embed" data-zh="嵌入 Ops" data-en="Embed">嵌入 Ops</a>
+    <a href="docs.html" data-zh="文档" data-en="Docs">文档</a>
+    <a href="https://github.com/Hector-xue/ivyea-agent" target="_blank" rel="noreferrer">GitHub</a>
+  </nav>
+  <div class="nav-act">
+    <button class="lang-btn" id="langToggle">EN</button>
+    <a class="gh-btn" href="https://github.com/Hector-xue/ivyea-agent" target="_blank" rel="noreferrer">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      <span>GitHub</span>
+    </a>
+    <button class="menu-toggle" id="menuToggle" aria-label="menu">☰</button>
+  </div>
+</div>
+
+<div id="top"></div>
+
+<!-- HERO -->
+<header id="install" class="frame">
+  <div class="hero">
+    <div class="hero-copy reveal">
+      <span class="badge"><span class="dot"></span>OPEN SOURCE · SELF-HOSTED · CLI AGENT</span>
+      <h1 class="title"
+        data-zh-html="自托管的<br><span class='g'>Amazon 运营 CLI Agent</span>"
+        data-en-html="Self-hosted<br><span class='g'>Amazon ops CLI agent</span>">自托管的<br><span class="g">Amazon 运营 CLI Agent</span></h1>
+      <p class="sub" data-zh="确定性规则引擎做广告决策，LLM 只做复核与解释。领星 OpenAPI 真实广告数据，写操作逐条审批 + 审计回滚；记忆、知识库、Skills、护栏内置，多模型可切——配置、密钥、数据全留本机。"
+         data-en="A deterministic rule engine decides; the LLM only reviews and explains. Real ad data via Lingxing OpenAPI, every write approved + auditable & reversible. Memory, knowledge base, skills and guardrails built in, multi-model — your config, keys and data stay local.">确定性规则引擎做广告决策，LLM 只做复核与解释。领星 OpenAPI 真实广告数据，写操作逐条审批 + 审计回滚；记忆、知识库、Skills、护栏内置，多模型可切——配置、密钥、数据全留本机。</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="#install"><span data-zh="一行命令安装" data-en="Install in one line">一行命令安装</span> →</a>
+        <a class="btn btn-ghost" href="https://github.com/Hector-xue/ivyea-agent" target="_blank" rel="noreferrer"><span data-zh="GitHub 源码" data-en="GitHub source">GitHub 源码</span> ↗</a>
       </div>
-    </nav>
-  </header>
-
-  <main>
-    <section class="hero">
-      <div>
-        <p class="eyebrow">Self-hosted Amazon operations agent</p>
-        <h1>Ivyea Agent</h1>
-        <p class="hero-copy">
-          面向亚马逊运营的命令行 Agent：用确定性规则引擎做广告巡检，用 LLM 做复核和解释，用审批、记忆、知识库和护栏保证真实写入可控。
-        </p>
-        <div class="hero-actions">
-          <a class="button" href="install.html">开始安装</a>
-          <a class="button secondary" href="docs.html">查看完整文档</a>
-        </div>
-        <div class="hero-meta">
-          <span class="pill">Windows / macOS / Linux</span>
-          <span class="pill">pipx 一键安装</span>
-          <span class="pill">v0.5.6</span>
-        </div>
+      <div class="hero-meta">
+        <span><b>Windows / macOS / Linux</b></span>
+        <span data-zh="pipx 一键安装" data-en="One-line pipx install">pipx 一键安装</span>
+        <span><b>v1.0.19</b> <span data-zh="· 离线包可内网部署" data-en="· offline bundle for intranet">· 离线包可内网部署</span></span>
       </div>
-
-      <div class="console-visual" aria-label="Ivyea Agent 产品界面预览">
-        <div class="console-head"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
-        <div class="console-grid">
-          <div class="terminal">
-            <pre>$ ivyea patrol search-term.xlsx --asin B0XXXX
-✓ 读取搜索词报告
-✓ 应用否词/调 bid/放量规则
-✓ 注入 Amazon skills 与知识库
-✓ 输出证据链与动作队列
-
-$ ivyea alert check --notify
-WARN profile.incomplete
-INFO shadow.review_due
-
-$ ivyea image vision ./listing --provider openai --call
-✓ 主图卖点识别
-✓ 包装/文案风险检查</pre>
-          </div>
-          <div class="panel">
-            <p class="panel-title">Run summary</p>
-            <div class="metric"><span>Rule engine</span><strong class="status-ok">PASS</strong></div>
-            <div class="metric"><span>Knowledge recall</span><strong class="status-ok">FTS5</strong></div>
-            <div class="metric"><span>Write actions</span><strong class="status-warn">Approval</strong></div>
-            <div class="metric"><span>Policy guard</span><strong class="status-ok">Enabled</strong></div>
-            <div class="metric"><span>Eval suite</span><strong class="status-ok">198 passed</strong></div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="band">
-      <div class="section compact">
-        <h2>为什么要单独做一个 Amazon Agent</h2>
-        <p class="lead">通用编码 Agent 解决不了广告报表、否词误伤、Listing 承接、预算节奏和真实写入审批这些运营问题。Ivyea Agent 把这些流程产品化。</p>
-        <div class="grid">
-          <article class="card">
-            <h3>广告巡检</h3>
-            <p>读取搜索词报告，输出否词、放量、降 bid、Listing 反馈和人工复核建议，每条建议都有证据。</p>
-          </article>
-          <article class="card">
-            <h3>知识库和 Skills</h3>
-            <p>内置 Amazon Ads、Listing、预算、Launch、周度复盘等运营流程，支持导入团队知识。</p>
-          </article>
-          <article class="card">
-            <h3>审批式执行</h3>
-            <p>真实写入前逐条确认，保护品牌词/核心词，记录审计日志并支持回滚。</p>
-          </article>
-          <article class="card">
-            <h3>视觉诊断</h3>
-            <p>本地图片尺寸检查、OCR、多模态模型审核请求包，以及可选真实调用。</p>
-          </article>
-          <article class="card">
-            <h3>自动预警</h3>
-            <p>检查动作积压、工具失败、知识库缺失、画像配置和磁盘空间，可发 webhook 或飞书通知。</p>
-          </article>
-          <article class="card">
-            <h3>本地私有</h3>
-            <p>配置、API key、记忆、知识库默认都在本机 `~/.ivyea/`，不依赖外部数据库。</p>
-          </article>
-        </div>
-      </div>
-    </section>
-
-    <section class="section">
-      <h2>一条命令安装</h2>
-      <p class="lead">普通用户不需要 clone 仓库。脚本会安装 pipx，并优先从 GitHub Release wheel 安装最新稳定版本。</p>
-      <div class="grid">
-        <article class="card">
-          <h3>Linux / macOS</h3>
-          <pre>curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash</pre>
-        </article>
-        <article class="card">
-          <h3>Windows PowerShell</h3>
-          <pre>iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</pre>
-        </article>
-        <article class="card">
-          <h3>固定版本</h3>
-          <pre>curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v0.5.6 bash</pre>
-        </article>
-      </div>
-    </section>
-
-    <section class="band">
-      <div class="section">
-        <h2>部署门户网站</h2>
-        <p class="lead">`site/` 是静态站点，正式部署方式和 ivyea.com 一样：文件同步到服务器 `/var/www/agent.ivyea.com/`，由 Nginx 对外提供服务。</p>
-        <div class="steps">
-          <div class="step"><span class="step-num">1</span><div><strong>同步 site/</strong><p>执行 `rsync -a --delete site/ /var/www/agent.ivyea.com/`。</p></div></div>
-          <div class="step"><span class="step-num">2</span><div><strong>配置 Nginx</strong><p>使用 `deploy/nginx/agent.ivyea.com.conf`，风格和 `ivyea.com.conf` 一致。</p></div></div>
-          <div class="step"><span class="step-num">3</span><div><strong>开启 HTTPS</strong><p>DNS 指向服务器后执行 `certbot --nginx -d agent.ivyea.com`。</p></div></div>
-        </div>
-      </div>
-    </section>
-  </main>
-
-  <footer class="site-footer">
-    <div class="footer-inner">
-      <span>Ivyea Agent</span>
-      <span>Amazon operations, local-first agent.</span>
     </div>
-  </footer>
+
+    <div class="term reveal">
+      <div class="term-bar">
+        <span class="d" style="background:#ff5f57"></span>
+        <span class="d" style="background:#febc2e"></span>
+        <span class="d" style="background:#28c840"></span>
+        <span class="term-os-tabs">
+          <button class="term-os active" data-os="linux">Linux / macOS</button>
+          <button class="term-os" data-os="windows">Windows</button>
+        </span>
+        <span class="term-os-sep"></span>
+        <span class="term-os-tabs">
+          <button class="term-os active" data-method="script" data-zh="一键脚本" data-en="Script">一键脚本</button>
+          <button class="term-os" data-method="pipx">pipx</button>
+        </span>
+        <button class="term-copy" id="copyBtn" data-zh="复制" data-en="Copy">⧉ 复制</button>
+      </div>
+      <div class="term-body">
+<div class="os-pane" data-pane="linux-script">
+<div class="tl"><span class="c"># 1 · </span><span class="c" data-zh="一键安装（自动装 pipx，拉 Release wheel）" data-en="Install (auto-installs pipx, pulls Release wheel)">一键安装（自动装 pipx，拉 Release wheel）</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash</span></div>
+<div class="tl"><span class="c"># 2 · </span><span class="c" data-zh="选模型 / 配 key（可选接领星）" data-en="Pick model / set key (Lingxing optional)">选模型 / 配 key（可选接领星）</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">ivyea onboard</span></div>
+<div class="tl"><span class="c"># 3 · </span><span class="c" data-zh="开始对话" data-en="Start chatting">开始对话</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">ivyea chat</span></div>
+<div class="tl"><span class="ok">→ </span><span class="ok" data-zh="对话式运营 Agent 就绪" data-en="Conversational ops agent ready">对话式运营 Agent 就绪</span>  <span class="ok">✓</span></div>
+</div>
+<div class="os-pane" data-pane="windows-script" hidden>
+<div class="tl"><span class="c"># 1 · </span><span class="c" data-zh="一键安装（PowerShell）" data-en="Install (PowerShell)">一键安装（PowerShell）</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</span></div>
+<div class="tl"><span class="c"># 2 · </span><span class="c" data-zh="选模型 / 配 key" data-en="Pick model / set key">选模型 / 配 key</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">ivyea onboard</span></div>
+<div class="tl"><span class="c"># 3 · </span><span class="c" data-zh="开始对话" data-en="Start chatting">开始对话</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">ivyea chat</span></div>
+<div class="tl"><span class="ok">→ </span><span class="ok" data-zh="对话式运营 Agent 就绪" data-en="Conversational ops agent ready">对话式运营 Agent 就绪</span>  <span class="ok">✓</span></div>
+</div>
+<div class="os-pane" data-pane="linux-pipx" hidden>
+<div class="tl"><span class="c"># 1 · </span><span class="c" data-zh="用 pipx 从源码安装" data-en="Install from source via pipx">用 pipx 从源码安装</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">pipx install git+https://github.com/Hector-xue/ivyea-agent.git</span></div>
+<div class="tl"><span class="c"># 2 · </span><span class="c" data-zh="配置主脑模型与密钥" data-en="Configure model & keys">配置主脑模型与密钥</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">ivyea config</span></div>
+<div class="tl"><span class="c"># 3 · </span><span class="c" data-zh="开始对话" data-en="Start chatting">开始对话</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">ivyea chat</span></div>
+<div class="tl"><span class="ok">→ http://127.0.0.1:8765</span>  <span class="dim" data-zh="（ivyea serve 给 IvyeaOps 用）" data-en="(ivyea serve for IvyeaOps)">（ivyea serve 给 IvyeaOps 用）</span></div>
+</div>
+<div class="os-pane" data-pane="windows-pipx" hidden>
+<div class="tl"><span class="c"># 1 · </span><span class="c" data-zh="用 pipx 从源码安装" data-en="Install from source via pipx">用 pipx 从源码安装</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">pipx install git+https://github.com/Hector-xue/ivyea-agent.git</span></div>
+<div class="tl"><span class="c"># 2 · </span><span class="c" data-zh="配置主脑模型与密钥" data-en="Configure model & keys">配置主脑模型与密钥</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">ivyea config</span></div>
+<div class="tl"><span class="c"># 3 · </span><span class="c" data-zh="开始对话" data-en="Start chatting">开始对话</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">ivyea chat</span></div>
+<div class="tl"><span class="ok">→ </span><span class="ok" data-zh="就绪" data-en="Ready">就绪</span>  <span class="ok">✓</span></div>
+</div>
+<div class="tl" style="margin-top:11px;padding-top:11px;border-top:1px solid rgba(255,255,255,.08);white-space:normal;word-break:break-word;line-height:1.6"><span class="dim" data-zh="一键脚本默认装最新 Release wheel，不可用时回退 git 源码安装。内网 / 离线：python scripts/build_offline_bundle.py 生成离线包（含 wheelhouse 与启动器），解压后 bash install.sh 即可。" data-en="The script installs the latest Release wheel, falling back to git source. Intranet / offline: python scripts/build_offline_bundle.py builds a bundle (wheelhouse + launcher); unzip and run bash install.sh.">一键脚本默认装最新 Release wheel，不可用时回退 git 源码安装。内网 / 离线：python scripts/build_offline_bundle.py 生成离线包（含 wheelhouse 与启动器），解压后 bash install.sh 即可。</span></div>
+      </div>
+      <div class="term-steps">
+        <span class="term-step"><span class="n">1</span><span data-zh="安装" data-en="Install">安装</span></span>
+        <span class="term-step"><span class="n">2</span><span data-zh="配置" data-en="Configure">配置</span></span>
+        <span class="term-step"><span class="n">3</span><span data-zh="对话" data-en="Chat">对话</span></span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- WHY -->
+<section id="why" class="frame section reveal">
+  <div class="section-head">
+    <div class="section-left">
+      <div class="sec-tag">Why Ivyea Agent</div>
+      <h2 data-zh="为什么要单独做一个 Amazon Agent" data-en="Why a dedicated Amazon agent">为什么要单独做一个 Amazon Agent</h2>
+    </div>
+    <div class="section-right">
+      <p data-zh="通用编码 Agent 解决不了否词误伤、预算节奏和真实写入审批；这些运营问题，确定性 + 可控才靠谱。"
+         data-en="Generic coding agents can't handle negative-keyword misfires, budget pacing or approved live writes. Ops needs determinism and control.">通用编码 Agent 解决不了否词误伤、预算节奏和真实写入审批；这些运营问题，确定性 + 可控才靠谱。</p>
+    </div>
+  </div>
+  <div class="vals">
+    <article class="mod reveal"><div class="ic">◆</div><h3 data-zh="规则引擎 + LLM 复核" data-en="Rule engine + LLM review">规则引擎 + LLM 复核</h3><p data-zh="决策由确定性规则给出，LLM 只做词分类、归因与措辞，不推翻数据。" data-en="Decisions come from deterministic rules; the LLM only classifies, attributes and phrases — never overrides data.">决策由确定性规则给出，LLM 只做词分类、归因与措辞，不推翻数据。</p></article>
+    <article class="mod reveal"><div class="ic">⊘</div><h3 data-zh="审批式写入" data-en="Approval-gated writes">审批式写入</h3><p data-zh="否词 / 调 bid / 预算逐条人工确认，operate 总开关默认关，幅度闸 + 审计回滚。" data-en="Negatives / bids / budgets confirmed one by one; the operate switch is off by default, with a magnitude cap, audit log and rollback.">否词 / 调 bid / 预算逐条人工确认，operate 总开关默认关，幅度闸 + 审计回滚。</p></article>
+    <article class="mod reveal"><div class="ic">◐</div><h3 data-zh="影子模式" data-en="Shadow mode">影子模式</h3><p data-zh="动钱前先只记不写，用后续真实花费回测「若照做能省 / 能多卖多少」。" data-en="Before touching spend, record-only — then backtest against real later spend: what you'd have saved or earned.">动钱前先只记不写，用后续真实花费回测「若照做能省 / 能多卖多少」。</p></article>
+    <article class="mod reveal"><div class="ic">⌂</div><h3 data-zh="本地私有" data-en="Local & private">本地私有</h3><p data-zh="配置、API key、记忆、知识库默认都在本机 ~/.ivyea/，不依赖外部数据库。" data-en="Config, API keys, memory and knowledge live in ~/.ivyea/ by default — no external database.">配置、API key、记忆、知识库默认都在本机 <code>~/.ivyea/</code>，不依赖外部数据库。</p></article>
+    <article class="mod reveal"><div class="ic">⟐</div><h3 data-zh="多模型可切" data-en="Multi-model">多模型可切</h3><p data-zh="DeepSeek / Claude / Gemini / Codex / Qwen / Kimi / Ollama 等 provider，带重试与降级链。" data-en="DeepSeek / Claude / Gemini / Codex / Qwen / Kimi / Ollama and more, with retries and a fallback chain.">DeepSeek / Claude / Gemini / Codex / Qwen / Kimi / Ollama 等 provider，带重试与降级链。</p></article>
+    <article class="mod reveal"><div class="ic">▤</div><h3 data-zh="记忆 + 知识库" data-en="Memory + knowledge">记忆 + 知识库</h3><p data-zh="SQLite FTS5 长期记忆 + 持久指令注入；内置 Amazon 运营知识与本地统一检索。" data-en="SQLite FTS5 long-term memory + persistent instructions; built-in Amazon ops knowledge and unified local retrieval.">SQLite FTS5 长期记忆 + 持久指令注入；内置 Amazon 运营知识与本地统一检索。</p></article>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section id="features" class="frame section reveal">
+  <div class="section-head">
+    <div class="section-left">
+      <div class="sec-tag">Capabilities</div>
+      <h2 data-zh="一个 CLI，运营 + 工程双内核" data-en="One CLI, ops + engineering">一个 CLI，运营 + 工程双内核</h2>
+    </div>
+    <div class="section-right">
+      <p data-zh="围绕广告与 Listing 两条主线，叠加对话内核、知识库、Skills 和通用工程能力。"
+         data-en="Built around ads & Listing, layered with a chat core, knowledge base, skills and general engineering tools.">围绕广告与 Listing 两条主线，叠加对话内核、知识库、Skills 和通用工程能力。</p>
+    </div>
+  </div>
+
+  <div class="mods">
+    <article class="mod reveal"><div class="ic">◉</div><h3 data-zh="对话式 Agent" data-en="Conversational agent">对话式 Agent</h3><p data-zh="自然语言 + 斜杠命令 + 计划模式" data-en="NL + slash commands + plan mode">自然语言 + 斜杠命令 + 计划模式</p></article>
+    <article class="mod reveal"><div class="ic">⊕</div><h3 data-zh="领星广告巡检" data-en="Lingxing ad patrol">领星广告巡检</h3><p data-zh="真实 OpenAPI 数据 · 否词/调bid/预算" data-en="Real OpenAPI data · negatives/bids/budget">真实 OpenAPI 数据 · 否词/调bid/预算</p></article>
+    <article class="mod reveal"><div class="ic">▥</div><h3 data-zh="知识库 & Skills" data-en="Knowledge & skills">知识库 & Skills</h3><p data-zh="Amazon 运营流程内置可复用" data-en="Built-in reusable ops playbooks">Amazon 运营流程内置可复用</p></article>
+    <article class="mod reveal"><div class="ic">⎇</div><h3 data-zh="工程 Agent" data-en="Engineering agent">工程 Agent</h3><p data-zh="workspace/code/patch/gitops 闭环" data-en="workspace/code/patch/gitops loop">workspace/code/patch/gitops 闭环</p></article>
+    <article class="mod reveal"><div class="ic">▦</div><h3 data-zh="视觉诊断" data-en="Vision audit">视觉诊断</h3><p data-zh="主图卖点 · OCR · 多模态审核" data-en="Hero image · OCR · multimodal">主图卖点 · OCR · 多模态审核</p></article>
+    <article class="mod reveal"><div class="ic">◬</div><h3 data-zh="自动预警" data-en="Auto alerts">自动预警</h3><p data-zh="积压/失败/缺失 → webhook/飞书" data-en="Backlog/fail/gaps → webhook/Feishu">积压/失败/缺失 → webhook/飞书</p></article>
+    <article class="mod reveal"><div class="ic">◈</div><h3 data-zh="统一检索" data-en="Unified retrieval">统一检索</h3><p data-zh="知识库 + 记忆本地召回" data-en="Knowledge + memory, local recall">知识库 + 记忆本地召回</p></article>
+    <article class="mod reveal"><div class="ic">⟳</div><h3 data-zh="长任务" data-en="Long tasks">长任务</h3><p data-zh="状态机 · 日志 · 断点续跑" data-en="State machine · logs · resume">状态机 · 日志 · 断点续跑</p></article>
+  </div>
+  <div class="mods-more" data-zh="更多：周度复盘 · 竞品诊断 · Listing 转化诊断 · 成本护栏 · 动作队列 · 运行 trace"
+       data-en="More: weekly review · competitor audit · Listing diagnosis · cost guard · action queue · run trace">更多：周度复盘 · 竞品诊断 · Listing 转化诊断 · 成本护栏 · 动作队列 · 运行 trace</div>
+
+  <div class="flow">
+    <div class="step reveal"><div class="k">01</div><h4 data-zh="读数据" data-en="Read data">读数据</h4><p data-zh="领星 OpenAPI 拉店铺广告，或读搜索词报告 CSV。" data-en="Pull store ads via Lingxing OpenAPI, or read a search-term CSV.">领星 OpenAPI 拉店铺广告，或读搜索词报告 CSV。</p></div>
+    <div class="step reveal"><div class="k">02</div><h4 data-zh="出候选" data-en="Propose">出候选</h4><p data-zh="规则引擎按否词/收割/调bid/预算分区，每条带证据与置信度。" data-en="The rule engine groups negatives/harvest/bid/budget — each with evidence and confidence.">规则引擎按否词/收割/调bid/预算分区，每条带证据与置信度。</p></div>
+    <div class="step reveal"><div class="k">03</div><h4 data-zh="LLM 复核" data-en="LLM review">LLM 复核</h4><p data-zh="词分类、归因、护栏与措辞复核，不改动数据结论。" data-en="Classify, attribute, guardrail and phrase — without altering the data verdict.">词分类、归因、护栏与措辞复核，不改动数据结论。</p></div>
+    <div class="step reveal"><div class="k">04</div><h4 data-zh="审批写入" data-en="Approve & write">审批写入</h4><p data-zh="逐条确认后写回，抓快照、记审计，可一键回滚。" data-en="Write after per-item approval — snapshot, audit log, one-click rollback.">逐条确认后写回，抓快照、记审计，可一键回滚。</p></div>
+  </div>
+</section>
+
+<!-- EMBED INTO IVYEAOPS -->
+<section id="embed" class="frame section reveal">
+  <div class="prod">
+    <div class="prod-l">
+      <h3 data-zh="也能嵌入 IvyeaOps 工作台" data-en="Embeds into the IvyeaOps workbench">也能嵌入 IvyeaOps 工作台</h3>
+      <p data-zh-html="同款内核 · <code>ivyea serve</code> 暴露 /v1 REST + 流式对话 + 反向 MCP 配置，供 IvyeaOps 浏览器控制台调用。"
+         data-en-html="Same core · <code>ivyea serve</code> exposes /v1 REST, streaming chat and a reverse MCP config for the IvyeaOps browser console.">同款内核 · <code>ivyea serve</code> 暴露 /v1 REST + 流式对话 + 反向 MCP 配置，供 IvyeaOps 浏览器控制台调用。</p>
+    </div>
+    <a class="btn btn-ghost" href="https://github.com/Hector-xue/IvyeaOps" target="_blank" rel="noreferrer"><span data-zh="了解 IvyeaOps" data-en="Explore IvyeaOps">了解 IvyeaOps</span> ↗</a>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer class="frame reveal">
+  <div class="foot-top">
+    <div class="foot-about">
+      <div class="foot-brand"><span class="mark">›_</span> Ivyea Agent</div>
+      <p class="foot-tagline"
+         data-zh="自托管的 Amazon 运营命令行 Agent。确定性规则引擎做决策、LLM 做复核，真实写入审批制 —— 数据、密钥与记忆始终留在你自己的机器上。"
+         data-en="Self-hosted Amazon ops CLI agent. A deterministic rule engine decides, the LLM reviews, live writes are approval-gated — your data, keys and memory stay on your own machine.">自托管的 Amazon 运营命令行 Agent。确定性规则引擎做决策、LLM 做复核，真实写入审批制 —— 数据、密钥与记忆始终留在你自己的机器上。</p>
+      <a class="foot-star" href="https://github.com/Hector-xue/ivyea-agent" target="_blank" rel="noreferrer">★ <span data-zh="在 GitHub 上 Star" data-en="Star on GitHub">在 GitHub 上 Star</span></a>
+    </div>
+    <div class="foot-col">
+      <div class="foot-col-h" data-zh="产品" data-en="Product">产品</div>
+      <a href="#install" data-zh="安装" data-en="Install">安装</a>
+      <a href="#features" data-zh="能力" data-en="Capabilities">能力</a>
+      <a href="#why" data-zh="为什么自托管" data-en="Why self-host">为什么自托管</a>
+      <a href="#embed" data-zh="嵌入 IvyeaOps" data-en="Embed into IvyeaOps">嵌入 IvyeaOps</a>
+    </div>
+    <div class="foot-col">
+      <div class="foot-col-h" data-zh="资源" data-en="Resources">资源</div>
+      <a href="https://github.com/Hector-xue/ivyea-agent" target="_blank" rel="noreferrer">GitHub</a>
+      <a href="docs.html" data-zh="使用文档" data-en="Docs">使用文档</a>
+      <a href="https://github.com/Hector-xue/ivyea-agent/blob/main/README.md" target="_blank" rel="noreferrer">README</a>
+      <a href="https://github.com/Hector-xue/ivyea-agent/issues" target="_blank" rel="noreferrer" data-zh="问题反馈" data-en="Issues">问题反馈</a>
+    </div>
+    <div class="foot-col">
+      <div class="foot-col-h" data-zh="技术栈" data-en="Built with">技术栈</div>
+      <span>Python · CLI</span>
+      <span>SQLite FTS5</span>
+      <span data-zh="多模型 provider" data-en="Multi-model providers">多模型 provider</span>
+      <span data-zh="纯自托管 · 无云依赖" data-en="Self-hosted · no cloud">纯自托管 · 无云依赖</span>
+    </div>
+  </div>
+  <div class="foot-bottom">
+    <div class="foot-meta">
+      <span>© 2026 Ivyea</span>
+      <span>·</span>
+      <span data-zh="开源 · 自托管" data-en="Open source · self-hosted">开源 · 自托管</span>
+    </div>
+    <div data-zh="你的数据，始终留在你自己的机器上。" data-en="Your data stays on your own machine.">你的数据，始终留在你自己的机器上。</div>
+  </div>
+</footer>
+
+<script>
+// ── Bilingual ──
+function setLang(lang){
+  document.documentElement.lang = lang === "en" ? "en" : "zh";
+  document.querySelectorAll("[data-zh]").forEach(el=>{ el.textContent = el.dataset[lang] || el.dataset.zh; });
+  document.querySelectorAll("[data-zh-html]").forEach(el=>{ el.innerHTML = el.dataset[lang+"Html"] || el.dataset.zhHtml; });
+  document.getElementById("langToggle").textContent = lang === "en" ? "中" : "EN";
+  localStorage.setItem("ivyea-agent-lang", lang);
+}
+let curLang = localStorage.getItem("ivyea-agent-lang") || "zh";
+document.getElementById("langToggle").onclick = ()=>{ curLang = curLang === "en" ? "zh" : "en"; setLang(curLang); };
+
+// ── Mobile menu ──
+document.getElementById("menuToggle").onclick = ()=>{ document.getElementById("navLinks").classList.toggle("open"); };
+document.querySelectorAll("#navLinks a").forEach(a=>a.onclick=()=>document.getElementById("navLinks").classList.remove("open"));
+
+// ── Install tabs (OS × method) ──
+const OS_CMDS = {
+  "linux-script": "curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash\nivyea onboard\nivyea chat",
+  "windows-script": "iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex\nivyea onboard\nivyea chat",
+  "linux-pipx": "pipx install git+https://github.com/Hector-xue/ivyea-agent.git\nivyea config\nivyea chat",
+  "windows-pipx": "pipx install git+https://github.com/Hector-xue/ivyea-agent.git\nivyea config\nivyea chat",
+};
+let curOS = "linux", curMethod = "script";
+function applyTabs(){
+  document.querySelectorAll(".term-os[data-os]").forEach(x=>x.classList.toggle("active", x.dataset.os===curOS));
+  document.querySelectorAll(".term-os[data-method]").forEach(x=>x.classList.toggle("active", x.dataset.method===curMethod));
+  const key = curOS+"-"+curMethod;
+  document.querySelectorAll(".os-pane").forEach(p=>{ p.hidden = p.dataset.pane!==key; });
+}
+document.querySelectorAll(".term-os[data-os]").forEach(b=>b.onclick=()=>{ curOS=b.dataset.os; applyTabs(); });
+document.querySelectorAll(".term-os[data-method]").forEach(b=>b.onclick=()=>{ curMethod=b.dataset.method; applyTabs(); });
+applyTabs();
+
+// ── Copy commands ──
+document.getElementById("copyBtn").onclick = async (e)=>{
+  const btn = e.currentTarget;
+  const CMDS = OS_CMDS[curOS+"-"+curMethod];
+  try{ await navigator.clipboard.writeText(CMDS); }
+  catch{ const t=document.createElement("textarea"); t.value=CMDS; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); }
+  btn.textContent = curLang === "en" ? "✓ Copied" : "✓ 已复制";
+  setTimeout(()=>{ btn.textContent = curLang === "en" ? "⧉ Copy" : "⧉ 复制"; }, 1600);
+};
+
+// ── Mouse glow ──
+const glow = document.getElementById("glow");
+let gx=innerWidth/2, gy=innerHeight/2, tx=gx, ty=gy;
+addEventListener("mousemove",e=>{ tx=e.clientX; ty=e.clientY; });
+(function loop(){ gx+=(tx-gx)*.1; gy+=(ty-gy)*.1; glow.style.left=gx+"px"; glow.style.top=gy+"px"; requestAnimationFrame(loop); })();
+
+// ── Particle network ──
+const cv=document.getElementById("grid-canvas"), ctx=cv.getContext("2d");
+let W,H,parts=[],mouse={x:-9999,y:-9999};
+function resize(){
+  W=cv.width=innerWidth; H=cv.height=innerHeight;
+  const n=Math.min(120,Math.floor(W*H/12500)); parts=[];
+  for(let i=0;i<n;i++) parts.push({x:Math.random()*W,y:Math.random()*H,vx:(Math.random()-.5)*.4,vy:(Math.random()-.5)*.4,pulse:Math.random()*6.28,size:Math.random()*1.5+.8});
+}
+addEventListener("resize",resize); resize();
+addEventListener("mousemove",e=>{ mouse.x=e.clientX; mouse.y=e.clientY; });
+addEventListener("mouseout",()=>{ mouse.x=mouse.y=-9999; });
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  for(const p of parts){
+    p.pulse+=.014; p.x+=p.vx; p.y+=p.vy;
+    if(p.x<0||p.x>W) p.vx*=-1; if(p.y<0||p.y>H) p.vy*=-1;
+    const dx=p.x-mouse.x, dy=p.y-mouse.y, d=Math.hypot(dx,dy); let act=0;
+    if(d<160){ const f=(160-d)/160*1.4; p.x+=dx/Math.max(d,.1)*f; p.y+=dy/Math.max(d,.1)*f; act=(160-d)/160; }
+    const a=.34+Math.sin(p.pulse)*.12+act*.30;
+    ctx.beginPath(); ctx.fillStyle=`rgba(13,148,100,${Math.max(.18,a)})`;
+    ctx.arc(p.x,p.y,p.size+act*1.1,0,6.28); ctx.fill();
+  }
+  for(let i=0;i<parts.length;i++) for(let j=i+1;j<parts.length;j++){
+    const a=parts[i],b=parts[j],dd=Math.hypot(a.x-b.x,a.y-b.y);
+    if(dd<142){ ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y);
+      ctx.strokeStyle=`rgba(16,163,120,${.08+(1-dd/142)*.20})`; ctx.lineWidth=.85; ctx.stroke(); }
+  }
+  requestAnimationFrame(draw);
+}
+draw();
+
+// ── Reveal ──
+const io=new IntersectionObserver(es=>es.forEach(e=>{ if(e.isIntersecting) e.target.classList.add("in"); }),{threshold:.08});
+document.querySelectorAll(".reveal").forEach(el=>io.observe(el));
+
+setLang(curLang);
+</script>
 </body>
 </html>
