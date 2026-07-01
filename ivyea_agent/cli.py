@@ -1451,18 +1451,19 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         messages = [_sys_msg()]
         print(ui.message("success", "已清空对话上下文")); return True
 
-    def _set_plan_mode(on: bool) -> None:
-        """显式进/出计划模式（/plan 与自然语言共用）。已在目标状态则只提示。"""
+    def _set_plan_mode_msg(on: bool) -> str:
+        """进/出计划模式并返回提示消息（不打印）。/plan、NL、TUI 共用。"""
         if on == ctx.plan_mode:
-            print(ui.message("info", "已在计划模式。" if on else "当前不在计划模式。"))
-            return
+            return ui.message("info", "已在计划模式。" if on else "当前不在计划模式。")
         ctx.plan_mode = on
         messages[0] = _sys_msg()
         if on:
-            print(ui.message("info", "已进入计划模式（只读，不写入；说“退出计划模式”或 /approve 后执行）。"
-                                     "复杂任务建议先 /model 切更强主脑。"))
-        else:
-            print(ui.message("success", "已退出计划模式。"))
+            return ui.message("info", "已进入计划模式（只读，不写入；说“退出计划模式”或 /approve 后执行）。"
+                                      "复杂任务建议先 /model 切更强主脑。")
+        return ui.message("success", "已退出计划模式。")
+
+    def _set_plan_mode(on: bool) -> None:
+        print(_set_plan_mode_msg(on))
 
     def _sh_plan(line):
         _set_plan_mode(not ctx.plan_mode); return True
@@ -1628,6 +1629,76 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         "/config": _sh_config, "/model": _sh_model,
         "/workspace": _sh_embedded, "/patch": _sh_embedded, "/gitops": _sh_embedded,
     }
+
+    def _execute_turn(line, render, narrate, cancel_check=None):
+        """跑一轮对话，输出经 render(token)/narrate(行) 注入 —— 供 TUI 复用（行式循环仍走下方原逻辑）。
+        cancel_check：运行中请求中断的钩子（TUI 用）。返回 {text, usage, blocked}。"""
+        nonlocal messages
+        api_key = cfg.get_active_key()
+        cms = cfg.load_settings()
+        if (cms.get("kind") in ("native", "oauth", "login")
+                and cms.get("api_mode") not in ("gemini_native", "gemini_code_assist", "bedrock_converse", "copilot_chat_completions", "codex_responses")):
+            narrate(ui.message("warn", "当前 provider 需原生/OAuth transport，尚未接入。请用 /model 切换。"))
+            return {"text": "", "usage": {}, "blocked": True}
+        if _model_needs_key(cms) and not api_key:
+            narrate(ui.message("warn", f"未配置主脑模型 key（{cms.get('key_env')}）。用 /model 配置。"))
+            return {"text": "", "usage": {}, "blocked": True}
+        _lim = pricing.daily_limit()
+        if _lim > 0 and pricing.today_spend() >= _lim:
+            narrate(ui.message("warn", f"今日已花 ¥{pricing.today_spend():.2f} 达上限 ¥{_lim:.2f}，已暂停。"))
+            return {"text": "", "usage": {}, "blocked": True}
+        from . import engineering_context, knowledge, skills
+        ectx = engineering_context.build(os.getcwd(), line)
+        _inject = bool(getattr(ctx, "asin", "")) or _is_amazon_domain(line) or not _looks_like_code_task(line)
+        kctx, kids = knowledge.context_for_query(line, limit=3) if _inject else ("", [])
+        sctx, sids = skills.context_for_query(line, limit=2) if _inject else ("", [])
+        user_content = line
+        if ectx:
+            user_content += "\n\n[工程上下文]\n" + ectx
+            narrate(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))
+        if sctx:
+            user_content += ("\n\n[Ivyea Skill：本轮相关可复用流程]\n" + sctx
+                             + "\n\n要求：优先按 skill workflow 组织执行步骤；涉及事实依据时再结合知识库。")
+            narrate(ui.message("muted", "已注入 skill: " + ", ".join(sids)))
+        if kctx:
+            user_content += ("\n\n[Ivyea 内置亚马逊知识库：本轮相关摘录]\n" + kctx
+                             + "\n\n要求：使用这些知识时说明依据，若与用户账户记忆冲突，以用户账户记忆为准。")
+            narrate(ui.message("muted", "已注入知识卡: " + ", ".join(kids)))
+        import time as _tt
+        ctx.turn_id = _tt.strftime("%Y%m%d-%H%M%S")
+        from . import hooks as _hooks
+        _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
+        messages[0] = _sys_msg()
+        messages.append({"role": "user", "content": user_content})
+        mcfg = cfg.get_model_config()
+        provider = build_chain(mcfg, api_key, narrate=narrate)
+        ctx.provider = provider
+        out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""),
+                                         render=render, narrate=narrate, cancel_check=cancel_check)
+        c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
+        _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
+        if c:
+            pricing.add_spend(c)
+        memory.index_turn("user", line, sid)
+        memory.index_turn("assistant", out.get("text", ""), sid)
+        if ctx.todos:                        # 供 TUI 在轮末渲染计划面板（与行式对齐）
+            from . import panels as _panels
+            out["todos_panel"] = _panels.render_todos(ctx.todos, color=True)
+        if ctx_mod.should_compact(int((out.get("usage") or {}).get("prompt_tokens") or 0)):
+            messages, _s = ctx_mod.compact(messages, provider)
+            if _s:
+                memory.remember_summary(_s, sid)
+                narrate(ui.message("info", "上下文较长，已自动压缩并入库摘要以省 token"))
+        out["blocked"] = False
+        return out
+
+    from . import chat_tui
+    if chat_tui.tui_enabled():   # IVYEA_TUI=1 全屏 TUI（分阶段构建）；否则走下面的行式循环
+        return chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
+                            render_markdown=markdown.render,
+                            plan_intent_fn=_plan_mode_intent,
+                            set_plan_mode=_set_plan_mode_msg,
+                            cycle_mode=_cycle_mode)
 
     while True:
         line = ci.read("❯ ")
