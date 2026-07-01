@@ -136,3 +136,63 @@ def test_tui_queue_auto_continues():
     tui._finish({"text": "第一条 done"})    # 结束首轮 → 自动跑排队的下一条
     _wait_idle(tui)
     assert "❯ 第二条" in _plain("\n".join(tui.blocks))
+
+
+# ---- P3 审批 marshal 到 TUI ----
+def test_approval_marshaled_from_tool_thread():
+    import threading
+    import time
+    from ivyea_agent import tui as tui_mod
+
+    tui = chat_tui.ChatTUI(status_fn=lambda: "s", turn_fn=lambda *a, **k: {"text": ""},
+                           render_markdown=lambda s: s)
+    tui_mod.set_active_selector(tui._approve)
+    res = {}
+
+    def worker():
+        res["r"] = tui_mod.select("需要确认写操作", "编辑 demo.py：替换 1 处",
+                                  [("approve", "批准本次"), ("deny", "拒绝"), ("abort", "全部停止")])
+
+    th = threading.Thread(target=worker)
+    th.start()
+    for _ in range(200):
+        if tui.pending:
+            break
+        time.sleep(0.005)
+    try:
+        assert tui.pending is not None
+        panel = _plain("\n".join(tui._approval_lines()))
+        assert "批准本次" in panel and "编辑 demo.py" in panel   # 选项 + diff 预览
+        tui._confirm_approval(0)                                  # 选“批准本次”
+        th.join(timeout=1)
+        assert res.get("r") == "approve"
+        assert tui.pending is None
+    finally:
+        tui_mod.set_active_selector(None)
+
+
+def test_approval_ctrl_c_picks_last_abort():
+    import threading
+    import time
+    from ivyea_agent import tui as tui_mod
+
+    tui = chat_tui.ChatTUI(status_fn=lambda: "s", turn_fn=lambda *a, **k: {"text": ""},
+                           render_markdown=lambda s: s)
+    tui_mod.set_active_selector(tui._approve)
+    res = {}
+
+    def worker():
+        res["r"] = tui_mod.select("t", "b", [("approve", "a"), ("deny", "d"), ("abort", "停止")])
+
+    th = threading.Thread(target=worker)
+    th.start()
+    for _ in range(200):
+        if tui.pending:
+            break
+        time.sleep(0.005)
+    try:
+        tui._confirm_approval(len(tui.pending["options"]) - 1)   # 模拟 Ctrl-C 选最后
+        th.join(timeout=1)
+        assert res.get("r") == "abort"
+    finally:
+        tui_mod.set_active_selector(None)

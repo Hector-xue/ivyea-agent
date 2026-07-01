@@ -73,6 +73,10 @@ class ChatTUI:
         self.scroll = 0                       # 距底部的物理行数；0=贴底跟随
         self.started = 0.0
         self.app = None
+        # 审批（P3）：工具线程投递请求→主 app 渲染内联浮层→选定回填并唤醒
+        self.pending = None                  # {"title","body","options","idx"}
+        self._approval_ev = None
+        self._approval_result = None
 
     # ---- 供后台线程调用的输出回调（线程安全：仅追加 + invalidate）----
     def render(self, token: str = "") -> None:
@@ -104,11 +108,44 @@ class ChatTUI:
             except Exception:
                 pass
 
+    # ---- 审批（工具线程调用，阻塞等主 app 选定）----
+    def _approve(self, title: str, body: str, options: list, kind: str = "warn") -> str:
+        ev = threading.Event()
+        self._approval_ev = ev
+        self._approval_result = None
+        self.pending = {"title": title, "body": body, "options": options, "idx": 0}
+        self._invalidate()
+        ev.wait()                      # 阻塞工具线程，直到主 app 选定
+        return self._approval_result or (options[-1][0] if options else "")
+
+    def _confirm_approval(self, idx: int) -> None:
+        opts = self.pending["options"] if self.pending else []
+        if opts:
+            self._approval_result = opts[max(0, min(idx, len(opts) - 1))][0]
+        self.pending = None
+        if self._approval_ev is not None:
+            self._approval_ev.set()
+        self._invalidate()
+
+    def _approval_lines(self) -> list[str]:
+        p = self.pending
+        out = [f"\033[33m  ▌ {p['title']}\033[0m"]
+        for ln in str(p["body"]).splitlines():
+            out.append("    " + ln)
+        out.append("")
+        for i, (_k, label) in enumerate(p["options"]):
+            mark = "\033[36m ❯ \033[0m" if i == p["idx"] else "   "
+            out.append(f"{mark}{i + 1}. {label}")
+        out.append("\033[2m  ↑/↓ 选择 · Enter 确认 · 数字直选 · Ctrl-C 停止\033[0m")
+        return out
+
     def _body_ansi(self):
         from prompt_toolkit.formatted_text import ANSI
         parts = list(self.blocks)
         if self.live is not None:
             parts.append("\033[2m" + self.live + "\033[0m")   # 流式中 dim 显示原文
+        if self.pending is not None:
+            parts.append("\n".join(self._approval_lines()))   # 审批面板置于末尾
         text = "\n\n".join(p for p in parts if p) or "（开始对话吧。输入 /exit 退出。）"
         width = shutil.get_terminal_size((100, 30)).columns
         rows = shutil.get_terminal_size((100, 30)).lines
@@ -186,7 +223,10 @@ class ChatTUI:
         from prompt_toolkit.layout.controls import FormattedTextControl
         from prompt_toolkit.widgets import TextArea
         from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.filters import Condition
         from prompt_toolkit.styles import Style
+
+        approving = Condition(lambda: self.pending is not None)
 
         ta = TextArea(prompt=[("class:prompt", "❯ ")], multiline=False, height=1)
         root = HSplit([
@@ -201,7 +241,9 @@ class ChatTUI:
 
         @kb.add("c-c")
         def _(event):
-            if self.running:                 # 运行中：请求中断当前轮
+            if self.pending is not None:     # 审批中：Ctrl-C = 选最后一项(约定=停止)
+                self._confirm_approval(len(self.pending["options"]) - 1)
+            elif self.running:               # 运行中：请求中断当前轮
                 self.cancel_requested = True
             else:                            # 空闲：退出
                 event.app.exit(result=0)
@@ -217,6 +259,9 @@ class ChatTUI:
 
         @kb.add("enter")
         def _(event):
+            if self.pending is not None:     # 审批中：回车确认当前选项（下方 filtered 处理，此处兜底）
+                self._confirm_approval(self.pending["idx"])
+                return
             text = ta.text.strip()
             ta.text = ""
             if not text:
@@ -243,6 +288,28 @@ class ChatTUI:
         def _(event):
             self.scroll = max(0, self.scroll - 5)
 
+        # 审批中：↑/↓ 移动选择，数字直选（仅 pending 时激活，不影响正常输入）
+        @kb.add("up", filter=approving)
+        def _(event):
+            n = len(self.pending["options"])
+            self.pending["idx"] = (self.pending["idx"] - 1) % n
+            self._invalidate()
+
+        @kb.add("down", filter=approving)
+        def _(event):
+            n = len(self.pending["options"])
+            self.pending["idx"] = (self.pending["idx"] + 1) % n
+            self._invalidate()
+
+        def _mk_digit(d):
+            def handler(event):
+                if self.pending and d - 1 < len(self.pending["options"]):
+                    self._confirm_approval(d - 1)
+            return handler
+
+        for _d in range(1, 10):
+            kb.add(str(_d), filter=approving)(_mk_digit(_d))
+
         style = Style.from_dict({
             "hdr": "bold ansicyan", "rule": "ansibrightblack",
             "ftr": "noreverse ansibrightblack", "run": "ansiyellow",
@@ -261,5 +328,10 @@ def run(status_fn: Callable[[], str], slash_commands: list,
     """启动 TUI 会话。turn_fn(line, render, narrate)->dict 跑真正一轮。"""
     tui = ChatTUI(status_fn=status_fn, turn_fn=turn_fn or (lambda *a, **k: {"text": ""}),
                   render_markdown=render_markdown)
-    tui.build_app().run()
+    from . import tui as _tui_mod
+    _tui_mod.set_active_selector(tui._approve)   # 工具线程的审批 marshal 回本 app
+    try:
+        tui.build_app().run()
+    finally:
+        _tui_mod.set_active_selector(None)
     return 0

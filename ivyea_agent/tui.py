@@ -10,6 +10,15 @@ from typing import Callable, Optional
 
 from . import ui
 
+# 活动选择器：全屏 TUI 运行时挂上自己的审批路由(fn(title, body, options, kind)->key)，
+# 让工具线程里的审批不再自建嵌套 Application，而是 marshal 回主 app。默认 None。
+_ACTIVE_SELECTOR: Optional[Callable[[str, str, list, str], str]] = None
+
+
+def set_active_selector(fn: Optional[Callable[[str, str, list, str], str]]) -> None:
+    global _ACTIVE_SELECTOR
+    _ACTIVE_SELECTOR = fn
+
 
 def _default_input(prompt: str) -> str:
     try:
@@ -121,6 +130,11 @@ def select(title: str, body: str, options: list[tuple[str, str]], *,
     """
     if not options:
         return ""
+    if _ACTIVE_SELECTOR is not None:   # 全屏 TUI：路由到主 app 的内联审批，避免嵌套 Application
+        try:
+            return _ACTIVE_SELECTOR(title, body, options, kind)
+        except Exception:
+            pass   # 路由失败则回退下方常规路径
     reader = input_fn or _default_input
     if not sys.stdin.isatty():
         return _fallback(title, body, options, kind, reader)
