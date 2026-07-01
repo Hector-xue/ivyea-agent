@@ -242,6 +242,8 @@ class ChatTUI:
 
     def _finish(self, out: dict) -> None:
         self._commit_live()
+        if out.get("todos_panel"):           # 轮末计划面板（与行式对齐）
+            self.blocks.append(out["todos_panel"])
         if out.get("cancelled"):
             self.blocks.append("\033[33m⛔ 已中断（会话已保留，可继续输入）\033[0m")
         elif out.get("error"):

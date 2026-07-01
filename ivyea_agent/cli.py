@@ -1681,6 +1681,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             pricing.add_spend(c)
         memory.index_turn("user", line, sid)
         memory.index_turn("assistant", out.get("text", ""), sid)
+        if ctx.todos:                        # 供 TUI 在轮末渲染计划面板（与行式对齐）
+            from . import panels as _panels
+            out["todos_panel"] = _panels.render_todos(ctx.todos, color=True)
         if ctx_mod.should_compact(int((out.get("usage") or {}).get("prompt_tokens") or 0)):
             messages, _s = ctx_mod.compact(messages, provider)
             if _s:
