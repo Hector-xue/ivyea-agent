@@ -36,7 +36,8 @@ def test_render_diff_colors():
     out = panels.render_diff("bid 1.00\nstate on", "bid 0.85\nstate on", "kw")
     assert "\033[31m" in out and "\033[32m" in out      # 红删绿增
     plain = _plain(out)
-    assert "-bid 1.00" in plain and "+bid 0.85" in plain
+    assert "- bid 1.00" in plain and "+ bid 0.85" in plain   # 行号栏 + 符号 + 代码
+    assert "1 -" in plain and "1 +" in plain                 # 左侧行号
 
 
 def test_render_diff_nochange():
@@ -71,7 +72,7 @@ def test_edit_file_preview_shows_diff(tmp_path):
     """edit_file 审批预览应含彩色 diff（用 session_allow 放行后不弹）。"""
     from ivyea_agent import panels as p
     d = p.render_diff("1.00", "0.85", "f")
-    assert "-1.00" in _plain(d) and "+0.85" in _plain(d)
+    assert "- 1.00" in _plain(d) and "+ 0.85" in _plain(d)
 
 
 def test_markdown_no_color(monkeypatch):
@@ -93,14 +94,15 @@ def test_ui_message_and_panel_no_color(monkeypatch):
 def test_ui_tool_call_truncates_args():
     from ivyea_agent import ui
     out = ui.tool_call("read_file", {"path": "/tmp/" + "x" * 100}, color=False)
-    assert "read_file" in out and "..." in out
+    assert "读取文件" in out and "..." in out      # 友好动词 + 超长明细截断
 
 
-def test_ui_tool_call_step_and_stage_no_color():
+def test_ui_tool_call_friendly_verb_and_stage_no_color():
     from ivyea_agent import ui
-    call = ui.tool_call("read_file", {"path": "a.py"}, step="1/48.1", color=False)
+    call = ui.tool_call("read_file", {"path": "a.py"}, color=False)
     stage = ui.stage("Code", "计划 → 测试", color=False)
-    assert "[1/48.1]" in call and "read_file" in call
+    assert "读取文件" in call and "a.py" in call and "└" in call   # 动词 + └ 明细行
+    assert "read_file" not in call                                  # 不再暴露原始工具名
     assert "Code" in stage and "计划" in stage
 
 
@@ -112,9 +114,30 @@ def test_chat_input_style_avoids_block_backgrounds():
     assert styles["completion-menu.completion.current"] == "ansicyan bold"
 
 
-def test_chat_input_boxed_mode_is_opt_in(monkeypatch):
+def test_chat_input_boxed_mode_default_on(monkeypatch):
     from ivyea_agent.chat_input import ChatInput
     monkeypatch.delenv("IVYEA_BOXED_INPUT", raising=False)
-    assert ChatInput._boxed_enabled() is False
+    assert ChatInput._boxed_enabled() is True            # 默认带框
+    for off in ("0", "false", "Off", "NO"):
+        monkeypatch.setenv("IVYEA_BOXED_INPUT", off)
+        assert ChatInput._boxed_enabled() is False        # 显式关闭
     monkeypatch.setenv("IVYEA_BOXED_INPUT", "1")
     assert ChatInput._boxed_enabled() is True
+
+
+def test_chat_input_echo_indents_multiline(capsys, monkeypatch):
+    from ivyea_agent.chat_input import ChatInput
+    monkeypatch.setenv("NO_COLOR", "1")
+    ChatInput._echo_submitted("第一行\n第二行")
+    ChatInput._echo_submitted("   ")                      # 纯空白不回显
+    out = capsys.readouterr().out
+    assert out == "❯ 第一行\n  第二行\n"                  # 续行缩进 2 格、空白被跳过
+
+
+def test_ui_icons_fallback_to_ascii_on_non_utf8(monkeypatch):
+    import types
+    from ivyea_agent import ui
+    monkeypatch.setattr(ui.sys, "stdout", types.SimpleNamespace(encoding="gbk"))
+    assert ui._unicode_glyphs_ok() is False               # Windows GBK 回退 ASCII
+    monkeypatch.setattr(ui.sys, "stdout", types.SimpleNamespace(encoding="utf-8"))
+    assert ui._unicode_glyphs_ok() is True
