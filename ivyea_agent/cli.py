@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import __version__, config, ui
 # chat 展示层 helper 已拆到 chat_ui.py；re-export 保持 cli.X 引用与既有测试兼容。
-from .chat_ui import _is_amazon_domain, _looks_like_code_task, _LiveSpinner, _StreamPrinter
+from .chat_ui import _is_amazon_domain, _looks_like_code_task, _LiveSpinner, _StreamPrinter, BusyInput
 
 
 def _ask(prompt: str, default: str = "") -> str:
@@ -1629,8 +1629,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         "/workspace": _sh_embedded, "/patch": _sh_embedded, "/gitops": _sh_embedded,
     }
 
+    pending_lines: list[str] = []
     while True:
-        line = ci.read("❯ ")
+        line = pending_lines.pop(0) if pending_lines else ci.read("❯ ")
         if line is chat_input.EXIT:
             print("\n再见。")
             return 0
@@ -1706,29 +1707,40 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         from . import hooks as _hooks
         _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
         messages[0] = _sys_msg()   # 每轮刷新 system：注入真实当前日期，续接旧会话/跨天也不过时
+        pre_turn_len = len(messages)
         messages.append({"role": "user", "content": user_content})
         try:
             mcfg = cfg.get_model_config()
             provider = build_chain(mcfg, api_key, narrate=lambda s: print(s))
             ctx.provider = provider   # 供 dispatch_subagent 跑只读子 agent 用
-            if render_md and stream_live and sys.stdout.isatty():
-                # 完整流式：边生成边打印正文，收尾擦除最后一段改渲染 markdown
-                sp = _StreamPrinter()
-                out = agent_loop.run_turn_stream(
-                    provider, ctx, messages, model=mcfg.get("model", ""),
-                    render=sp.render, narrate=lambda s: (sp.commit(), print(s)))
-                sp.rerender(out["text"])
-            elif render_md:
-                # 缓冲 + spinner（含流式正文预览），收尾渲染 markdown
-                spin = _LiveSpinner()
-                out = agent_loop.run_turn_stream(
-                    provider, ctx, messages, model=mcfg.get("model", ""),
-                    render=spin.tick, narrate=lambda s: (spin.clear(), print(s)))
-                spin.clear()
-                print(f"{_C['c']}●{_C['x']} " + markdown.render(out["text"]))
-            else:
-                print(f"{_C['c']}●{_C['x']} ", end="", flush=True)
-                out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""))
+            queued_next = ""
+            spin = _LiveSpinner() if render_md and not (stream_live and sys.stdout.isatty()) else None
+            with BusyInput(on_change=(spin.set_input_preview if spin else None)) as busy:
+                if render_md and stream_live and sys.stdout.isatty():
+                    # 完整流式：边生成边打印正文，收尾擦除最后一段改渲染 markdown
+                    sp = _StreamPrinter()
+                    out = agent_loop.run_turn_stream(
+                        provider, ctx, messages, model=mcfg.get("model", ""),
+                        render=sp.render, narrate=lambda s: (sp.commit(), print(s)),
+                        cancel_check=busy.cancel_check)
+                    sp.rerender(out["text"])
+                elif render_md:
+                    # 缓冲 + spinner（含流式正文预览），收尾渲染 markdown；运行中可 Ctrl-C/Esc 中断，或输入下一条指令回车排队。
+                    out = agent_loop.run_turn_stream(
+                        provider, ctx, messages, model=mcfg.get("model", ""),
+                        render=spin.tick, narrate=lambda s: (spin.clear(), print(s)),
+                        cancel_check=busy.cancel_check)
+                    spin.clear()
+                    print(f"{_C['c']}●{_C['x']} " + markdown.render(out["text"]))
+                else:
+                    print(f"{_C['c']}●{_C['x']} ", end="", flush=True)
+                    out = agent_loop.run_turn_stream(
+                        provider, ctx, messages, model=mcfg.get("model", ""),
+                        cancel_check=busy.cancel_check)
+                queued_next = busy.pop_queued()
+            if queued_next:
+                pending_lines.append(queued_next)
+                print(ui.message("muted", "已收到运行中输入，下一轮自动执行。"))
             c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
             _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
             if c:
@@ -1753,7 +1765,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 print(ui.message("muted", "上下文已经较长；需要节省 token 时手动执行 /compact，或 /compact auto on 开启自动压缩。"))
             _persist()
         except KeyboardInterrupt:
-            print("\n" + ui.message("info", "已中断本轮，会话保留。继续输入即可。"))
+            del messages[pre_turn_len:]
+            print("\n" + ui.message("info", "已中断本轮，未完成上下文已撤回。继续输入即可。"))
         except LLMError as e:
             print("\n" + ui.message("error", f"模型错误: {e}"))
             messages.pop()  # 撤回这条 user，避免污染上下文

@@ -138,6 +138,27 @@ def test_run_turn_stream_records_limit_trace(ivyea_home):
     assert any(r["event"] == "turn_limit" and r["name"] == "tool_steps" for r in recent)
 
 
+def test_run_turn_stream_cancel_check_interrupts_before_final_append(ivyea_home):
+    from ivyea_agent import agent_loop, agent_tools
+    ctx = agent_tools.ToolContext()
+    msgs = [{"role": "system", "content": "x"}, {"role": "user", "content": "取消测试"}]
+    checks = {"n": 0}
+
+    def cancel_check():
+        checks["n"] += 1
+        return checks["n"] >= 2
+
+    try:
+        agent_loop.run_turn_stream(_FakeProvider(), ctx, msgs, render=lambda s: None,
+                                   narrate=lambda s: None, cancel_check=cancel_check)
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError("expected KeyboardInterrupt")
+
+    assert msgs == [{"role": "system", "content": "x"}, {"role": "user", "content": "取消测试"}]
+
+
 class _AlwaysToolChatProvider:
     def chat(self, messages, tools=None, temperature=0.3, timeout=120.0):
         return {"content": "", "tool_calls": [{"id": f"c{len(messages)}", "name": "recall", "arguments": {"query": "x"}}]}
