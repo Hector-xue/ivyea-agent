@@ -1703,12 +1703,19 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         out["blocked"] = False
         return out
 
+    def _mode_label() -> str:    # 输入框上边线右端显示的当前模式（对标 Claude）
+        if ctx.plan_mode:
+            return "⏸ 计划模式"
+        if ctx.perm.accept_edits:
+            return "⚡ 自动接受编辑"
+        return ""
+
     if _tui_on:                  # 全屏 TUI（默认；IVYEA_TUI=0 走下面的行式循环）
         return _chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
                              render_markdown=markdown.render,
                              plan_intent_fn=_plan_mode_intent,
                              set_plan_mode=_set_plan_mode_msg,
-                             cycle_mode=_cycle_mode, intro=_intro)
+                             cycle_mode=_cycle_mode, mode_label_fn=_mode_label, intro=_intro)
 
     while True:
         line = ci.read("❯ ")

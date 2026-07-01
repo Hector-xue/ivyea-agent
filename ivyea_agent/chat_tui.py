@@ -63,23 +63,6 @@ def _visual_lines(text: str, width: int) -> list[str]:
     return out
 
 
-def _make_scroll_control(get_text, on_scroll):
-    """FormattedTextControl + 鼠标滚轮处理（末屏裁剪下内容不溢出，需自己接滚轮）。"""
-    from prompt_toolkit.layout.controls import FormattedTextControl
-    from prompt_toolkit.mouse_events import MouseEventType
-
-    class _C(FormattedTextControl):
-        def mouse_handler(self, mouse_event):
-            et = mouse_event.event_type
-            if et == MouseEventType.SCROLL_UP:
-                on_scroll(-3); return None
-            if et == MouseEventType.SCROLL_DOWN:
-                on_scroll(3); return None
-            return super().mouse_handler(mouse_event)
-
-    return _C(get_text)
-
-
 class ChatTUI:
     """一次 TUI 会话的状态与渲染。turn_fn(line, render, narrate)->dict 跑真正一轮。"""
 
@@ -89,11 +72,13 @@ class ChatTUI:
                  plan_intent_fn: Callable[[str], str] | None = None,
                  set_plan_mode: Callable[[bool], str] | None = None,
                  cycle_mode: Callable[[], str] | None = None,
+                 mode_label_fn: Callable[[], str] | None = None,
                  intro: str | None = None):
         self.status_fn = status_fn
         self.turn_fn = turn_fn
         self._md = render_markdown or (lambda s: s)
         self.slash_commands = slash_commands or []
+        self._mode_label_fn = mode_label_fn   # ()->当前模式文字 或 None
         self._plan_intent = plan_intent_fn or (lambda _t: None)
         self._set_plan = set_plan_mode        # (on)->msg 或 None
         self._cycle = cycle_mode              # ()->label 或 None
@@ -208,10 +193,9 @@ class ChatTUI:
         return "turn"
 
     def _body_height(self) -> int:
-        """transcript 可用物理行数（终端高 - 头部/分隔/输入框/状态栏的固定占用）。"""
+        """transcript 可用物理行数（终端高 - 输入框上线/输入/下线/状态栏 4 行）。"""
         rows = shutil.get_terminal_size((100, 30)).lines
-        chrome = (2 if self.instruction else 0) + 3 + 1   # 头部+线 / 输入框上线+框+下线 / 状态栏
-        return max(3, rows - chrome)
+        return max(3, rows - 4)
 
     def _body_ansi(self):
         from prompt_toolkit.formatted_text import ANSI
@@ -246,10 +230,12 @@ class ChatTUI:
         """新内容出现时贴底跟随。"""
         self.scroll = 0
 
-    def _header(self):
-        instr = self.instruction or "（还没有指令）"
-        tail = "  ⟳ 运行中" if self.running else ""
-        return [("class:hdr", f" ▶ 当前指令：{instr}{tail}")]
+    def _mode_label(self):
+        """输入框上边线右端的模式标签（计划模式/自动接受编辑），对标 Claude。"""
+        m = self._mode_label_fn() if self._mode_label_fn else ""
+        if not m:
+            return [("class:rule", "──")]
+        return [("class:rule", "── "), ("class:mode", f" {m} "), ("class:rule", "──")]
 
     def _footer(self):
         base = self.status_fn() or ""
@@ -260,7 +246,8 @@ class ChatTUI:
         return [("class:ftr", " " + base)]
 
     def _start_turn(self, line: str) -> None:
-        self.instruction = line               # 头部固定显示当前指令；不再在 transcript 里重复回显
+        self.instruction = line
+        self.blocks.append(f"\033[36m❯\033[0m {line}")   # 问题内联回显（正常 Q/A 流，滚动可见）
         self._scroll_to_bottom()
         self.running = True
         self.cancel_requested = False
@@ -328,22 +315,18 @@ class ChatTUI:
         ta = TextArea(prompt=[("class:prompt", "❯ ")], multiline=False, height=1,
                       completer=self._completer(), complete_while_typing=True,
                       auto_suggest=AutoSuggestFromHistory(), history=history)
-        from prompt_toolkit.layout.containers import ConditionalContainer
-        has_instr = Condition(lambda: bool(self.instruction))
-        # transcript：末屏裁剪(贴底) + 自定义鼠标滚轮 + 键盘键滚动
-        self._body_window = Window(_make_scroll_control(self._body_ansi, self._scroll_by), wrap_lines=True)
+        from prompt_toolkit.layout.containers import VSplit
+        # transcript：末屏裁剪(贴底) + 键盘滚动。无固定头部——问题/回答正常内联流。
+        self._body_window = Window(FormattedTextControl(self._body_ansi), wrap_lines=True)
+        # 输入框上边线：右端显示当前模式（计划模式/自动接受编辑），对标 Claude 边线上的标签
+        top_border = VSplit([
+            Window(height=1, char="─", style="class:rule"),                  # 左侧铺满的线
+            Window(FormattedTextControl(self._mode_label), height=1, dont_extend_width=True),
+        ])
         root = HSplit([
-            # 固定头部（当前指令置顶）：仅在有指令后显示；没指令时让图形/欢迎框在最顶
-            ConditionalContainer(
-                HSplit([
-                    Window(FormattedTextControl(self._header), height=1, style="class:hdr"),
-                    Window(height=1, char="─", style="class:rule"),
-                ]),
-                filter=has_instr,
-            ),
-            self._body_window,                                               # transcript（原生可滚）
-            Window(height=1, char="─", style="class:rule"),                  # 输入框上边线
-            ta,                                                              # 输入框（上下有线，像个框）
+            self._body_window,                                               # transcript
+            top_border,                                                      # 输入框上边线（右端带模式）
+            ta,                                                              # 输入框
             Window(height=1, char="─", style="class:rule"),                  # 输入框下边线
             Window(FormattedTextControl(self._footer), height=1),            # 状态栏（最底部）
         ])
@@ -401,8 +384,8 @@ class ChatTUI:
             self.blocks.append(f"\033[2m⇄ 模式：{label}\033[0m")
             self._invalidate()
 
-        # 键盘滚动 transcript（鼠标滚轮由控件的 mouse_handler 处理）。PgUp/PgDn +
-        # Ctrl-U/Ctrl-B（上）、Ctrl-N（下）作为浏览器终端下 PgUp 被拦时的替代键。
+        # 键盘滚动 transcript（mouse_support=False 为了原生框选复制，滚动走键盘）。
+        # PgUp/PgDn + Ctrl-U/Ctrl-B（上）、Ctrl-N（下）（浏览器终端 PgUp 可能被拦）。
         @kb.add("pageup")
         @kb.add("c-u")
         @kb.add("c-b")
@@ -411,6 +394,26 @@ class ChatTUI:
         @kb.add("pagedown")
         @kb.add("c-n")
         def _(event): self._scroll_by(8)      # 下滚回到更新
+
+        # Tab：优先接受 ghost 建议（上文/历史推荐），否则走斜杠补全菜单
+        @kb.add("tab")
+        def _(event):
+            buf = ta.buffer
+            if buf.complete_state:
+                buf.complete_next()
+            elif buf.suggestion and buf.suggestion.text:
+                buf.insert_text(buf.suggestion.text)
+            elif buf.text.startswith("/"):
+                buf.start_completion(select_first=True)
+
+        # →（行尾）也接受 ghost 建议，对齐行式界面的习惯
+        @kb.add("right")
+        def _(event):
+            buf = ta.buffer
+            if buf.cursor_position == len(buf.text) and buf.suggestion and buf.suggestion.text:
+                buf.insert_text(buf.suggestion.text)
+            else:
+                buf.cursor_position += 1
 
         # 审批中：↑/↓ 移动选择，数字直选（仅 pending 时激活，不影响正常输入）
         @kb.add("up", filter=approving)
@@ -435,13 +438,14 @@ class ChatTUI:
             kb.add(str(_d), filter=approving)(_mk_digit(_d))
 
         style = Style.from_dict({
-            "hdr": "bold ansicyan", "rule": "ansibrightblack",
-            "ftr": "noreverse ansibrightblack", "run": "ansiyellow",
-            "prompt": "ansicyan bold",
+            "rule": "ansibrightblack", "ftr": "noreverse ansibrightblack",
+            "run": "ansiyellow", "prompt": "ansicyan bold",
+            "mode": "ansicyan bold", "auto-suggestion": "ansibrightblack",
         })
+        # mouse_support=False：不抢鼠标，终端原生选中/复制可用；滚动走键盘(PgUp/PgDn/Ctrl-U/B/N)
         self.app = Application(
             layout=Layout(root, focused_element=ta), key_bindings=kb, style=style,
-            full_screen=True, mouse_support=True, refresh_interval=0.2,
+            full_screen=True, mouse_support=False, refresh_interval=0.3,
         )
         return self.app
 
@@ -452,12 +456,13 @@ def run(status_fn: Callable[[], str], slash_commands: list,
         plan_intent_fn: Callable[[str], str] | None = None,
         set_plan_mode: Callable[[bool], str] | None = None,
         cycle_mode: Callable[[], str] | None = None,
+        mode_label_fn: Callable[[], str] | None = None,
         intro: str | None = None) -> int:
     """启动 TUI 会话。turn_fn(line, render, narrate)->dict 跑真正一轮。"""
     tui = ChatTUI(status_fn=status_fn, turn_fn=turn_fn or (lambda *a, **k: {"text": ""}),
                   render_markdown=render_markdown, slash_commands=slash_commands,
                   plan_intent_fn=plan_intent_fn, set_plan_mode=set_plan_mode, cycle_mode=cycle_mode,
-                  intro=intro)
+                  mode_label_fn=mode_label_fn, intro=intro)
     from . import tui as _tui_mod
     _tui_mod.set_active_selector(tui._approve)   # 工具线程的审批 marshal 回本 app
     try:

@@ -56,11 +56,17 @@ def _run_headless(keys: str, status="  ivyea · GPT-5.5 · dry-run "):
     return rc, _plain(buf.getvalue())
 
 
-def test_skeleton_sticky_header_and_clean_exit():
-    rc, vis = _run_headless("排查任务\r/exit\r")
+def test_skeleton_clean_exit_and_status():
+    rc, vis = _run_headless("/exit\r")
     assert rc == 0                                   # /exit 干净退出
-    assert "当前指令：排查任务" in vis               # sticky 头部显示最近指令（不再 transcript 重复回显）
     assert "GPT-5.5" in vis                          # footer 显示 status
+
+
+def test_question_echoed_inline():
+    # 正常 Q/A 流：问题内联回显进 transcript（不再置顶固定头部），滚动到某回答即见其问题
+    tui = chat_tui.ChatTUI(status_fn=lambda: "s", turn_fn=lambda *a, **k: {"text": ""}, render_markdown=lambda s: s)
+    tui._start_turn("排查任务")
+    assert any("排查任务" in _plain(b) for b in tui.blocks)
 
 
 def test_skeleton_ctrl_c_exits():
