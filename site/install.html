@@ -1,90 +1,249 @@
-<!doctype html>
-<html lang="zh-CN">
+<!DOCTYPE html>
+<html lang="zh">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>安装 Ivyea Agent</title>
-  <meta name="description" content="Ivyea Agent Windows、macOS、Linux 一键安装和企业部署说明。">
-  <link rel="stylesheet" href="styles.css">
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Ivyea Agent · 安装指南</title>
+<meta name="description" content="Ivyea Agent Windows、macOS、Linux 一键安装、固定版本、手动安装、离线部署和故障排查。" />
+<style>
+  :root{
+    --bg:#f4f8f5; --line:rgba(12,40,26,.09); --line2:rgba(12,40,26,.15); --line3:rgba(12,40,26,.24);
+    --text:#08130d; --text2:#3c4f45; --text3:#5f7368; --green:#12a150;
+    --grad:linear-gradient(118deg,#0ea5a4 0%,#16a34a 48%,#22c55e 100%);
+    --max:1140px; --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth;scroll-padding-top:72px}
+  body{font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;
+    background:radial-gradient(820px 560px at 10% 0%,rgba(34,197,94,.16),transparent 56%),
+      radial-gradient(760px 620px at 96% 4%,rgba(13,184,166,.12),transparent 58%),#f3f8f4;
+    background-attachment:fixed}
+  a{color:inherit;text-decoration:none}
+  button{font:inherit;cursor:pointer;border:none;background:none}
+  ::selection{background:rgba(34,197,94,.24)}
+  .orb{position:fixed;border-radius:50%;filter:blur(110px);z-index:0;pointer-events:none}
+  .orb1{width:320px;height:320px;background:rgba(34,197,94,.13);top:-110px;left:-60px}
+
+  .topbar{position:fixed;top:0;left:0;right:0;z-index:200;display:flex;align-items:center;
+    justify-content:space-between;min-height:52px;padding:0 24px;
+    background:rgba(244,248,245,.82);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    border-bottom:1px solid var(--line)}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:16px;letter-spacing:-.01em}
+  .brand .mark{width:26px;height:26px;border-radius:6px;display:inline-flex;align-items:center;
+    justify-content:center;background:var(--grad);color:#fff;font-size:14px;font-weight:800;
+    font-family:var(--mono);box-shadow:0 4px 14px -4px rgba(22,163,74,.6)}
+  .nav-links{display:flex;align-items:center;gap:24px;font-size:13px;color:var(--text3)}
+  .nav-links a{transition:color .2s}
+  .nav-links a:hover,.nav-links a.active{color:var(--text)}
+  .gh-btn{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;
+    padding:6px 12px;background:var(--text);color:var(--bg);border-radius:3px;transition:opacity .2s}
+  .gh-btn:hover{opacity:.85}
+  .menu-toggle{display:none;width:36px;height:36px;align-items:center;justify-content:center;
+    border:1px solid var(--line2);border-radius:3px;font-size:16px;color:var(--text)}
+
+  .wrap{position:relative;z-index:2;max-width:var(--max);margin:0 auto;padding:0 24px}
+  .doc-grid{display:grid;grid-template-columns:212px minmax(0,1fr);gap:52px;padding:96px 0 64px}
+  .toc{position:sticky;top:76px;align-self:start;display:flex;flex-direction:column;gap:1px;
+    max-height:calc(100vh - 96px);overflow:auto}
+  .toc .toc-h{font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--text3);padding:6px 10px 8px}
+  .toc a{font-size:13px;color:var(--text3);padding:6px 10px;border-radius:4px;border-left:2px solid transparent;transition:all .15s}
+  .toc a:hover{color:var(--text);background:rgba(34,197,94,.07)}
+  .toc a.active{color:var(--green);border-left-color:var(--green);background:rgba(34,197,94,.08);font-weight:600}
+
+  .doc{min-width:0}
+  .eyebrow{font-size:10px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--text3);margin-bottom:10px}
+  .doc h1{font-size:clamp(30px,4vw,42px);font-weight:800;letter-spacing:-.035em;line-height:1.1;margin-bottom:14px}
+  .doc-intro{font-size:15.5px;color:var(--text2);line-height:1.75;max-width:660px;margin-bottom:8px}
+  .doc h2{font-size:23px;font-weight:700;letter-spacing:-.02em;margin:46px 0 14px;padding-top:22px;border-top:1px solid var(--line)}
+  .doc p{font-size:14px;color:var(--text2);line-height:1.75;margin:10px 0;max-width:680px}
+  .doc code{font-family:var(--mono);font-size:12.5px;background:rgba(34,197,94,.10);color:#0a7a3e;
+    padding:1px 6px;border-radius:4px;border:1px solid rgba(34,197,94,.16)}
+  .doc pre{background:#0c1410;border:1px solid rgba(34,197,94,.18);border-radius:8px;
+    padding:16px 18px;margin:14px 0;overflow-x:auto;
+    font-family:var(--mono);font-size:13px;line-height:1.8;color:#cfe6d8;
+    box-shadow:0 18px 44px -28px rgba(12,40,26,.5)}
+  .doc pre code{background:none;border:none;color:inherit;padding:0;font-size:inherit}
+
+  table{border-collapse:collapse;width:100%;max-width:760px;margin:16px 0;font-size:13.5px;
+    border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  thead th{background:rgba(34,197,94,.08);text-align:left;font-weight:600;color:var(--text);
+    padding:10px 14px;font-size:12.5px;border-bottom:1px solid var(--line)}
+  tbody td{padding:10px 14px;color:var(--text2);border-bottom:1px solid var(--line);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+  tbody td code{white-space:nowrap}
+
+  .install-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0;max-width:760px}
+  .cmd-box{border:1px solid rgba(34,197,94,.18);border-radius:8px;overflow:hidden;background:#0c1410;
+    box-shadow:0 18px 44px -28px rgba(12,40,26,.5)}
+  .cmd-box .cmd-title{font-size:11px;font-weight:600;color:#4ade80;
+    padding:9px 14px;border-bottom:1px solid rgba(255,255,255,.07);font-family:"Inter",sans-serif}
+  .cmd-box pre{margin:0;border:none;border-radius:0;box-shadow:none;font-size:11.5px;line-height:1.7}
+
+  footer{position:relative;z-index:2;border-top:1px solid var(--line);margin-top:20px}
+  .foot{max-width:var(--max);margin:0 auto;padding:28px 24px 36px;display:flex;
+    justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap}
+  .foot-brand{display:flex;align-items:center;gap:9px;font-weight:600;font-size:14px}
+  .foot-brand .mark{width:22px;height:22px;border-radius:5px;display:inline-flex;align-items:center;
+    justify-content:center;background:var(--grad);color:#fff;font-size:12px;font-weight:800;font-family:var(--mono)}
+  .foot-links{display:flex;gap:20px;font-size:13px;color:var(--text3)}
+  .foot-links a:hover{color:var(--green)}
+  .foot-note{font-size:12px;color:var(--text3)}
+
+  @media(max-width:860px){
+    .doc-grid{grid-template-columns:1fr;gap:0;padding-top:78px}
+    .toc{position:static;flex-direction:row;flex-wrap:wrap;gap:6px;max-height:none;margin-bottom:28px;
+      padding-bottom:18px;border-bottom:1px solid var(--line)}
+    .toc .toc-h{display:none}
+    .toc a{border-left:none;border:1px solid var(--line2);border-radius:20px;padding:5px 12px}
+    .toc a.active{border-color:var(--green)}
+  }
+  @media(max-width:640px){
+    .wrap,.foot{padding-left:16px;padding-right:16px}
+    .topbar{padding:0 16px}
+    .nav-links,.gh-btn span{display:none}
+    .menu-toggle{display:flex;margin-left:auto}
+    .nav-links.open{display:flex;position:fixed;top:52px;left:0;right:0;flex-direction:column;gap:0;
+      background:var(--bg);padding:8px 16px 12px;border-bottom:1px solid var(--line);z-index:150}
+    .nav-links.open a{padding:11px 0;font-size:14px;border-bottom:1px solid var(--line)}
+    .install-grid{grid-template-columns:1fr}
+  }
+</style>
 </head>
 <body>
-  <header class="site-header">
-    <nav class="nav" aria-label="主导航">
-      <a class="brand" href="index.html"><span class="brand-mark">I</span><span>Ivyea Agent</span></a>
-      <div class="nav-links">
-        <a href="install.html">安装</a>
-        <a href="docs.html">文档</a>
-        <a class="button secondary" href="https://github.com/Hector-xue/ivyea-agent">GitHub</a>
-      </div>
-    </nav>
-  </header>
+<div class="orb orb1"></div>
 
-  <main class="doc-layout">
-    <aside class="toc">
-      <a href="#quick">快速安装</a>
-      <a href="#windows">Windows</a>
-      <a href="#linux">Linux</a>
-      <a href="#macos">macOS</a>
-      <a href="#upgrade">升级卸载</a>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="mark">›_</span> Ivyea Agent</a>
+  <nav class="nav-links" id="navLinks">
+    <a href="index.html#features">能力</a>
+    <a href="install.html" class="active">安装</a>
+    <a href="docs.html">文档</a>
+    <a href="index.html#embed">嵌入 Ops</a>
+    <a href="https://github.com/Hector-xue/ivyea-agent" target="_blank" rel="noreferrer">GitHub</a>
+  </nav>
+  <div style="display:flex;align-items:center;gap:10px">
+    <a class="gh-btn" href="https://github.com/Hector-xue/ivyea-agent" target="_blank" rel="noreferrer">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      <span>GitHub</span>
+    </a>
+    <button class="menu-toggle" id="menuToggle" aria-label="menu">☰</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="doc-grid">
+    <aside class="toc" id="toc">
+      <div class="toc-h">安装目录</div>
+      <a href="#quick">最快安装</a>
+      <a href="#platforms">系统要求</a>
+      <a href="#version">固定版本</a>
+      <a href="#manual">手动安装</a>
       <a href="#offline">离线部署</a>
+      <a href="#first-run">首次配置</a>
       <a href="#trouble">故障排查</a>
     </aside>
+
     <article class="doc">
+      <p class="eyebrow">Install guide · v1.0.19</p>
       <h1>安装 Ivyea Agent</h1>
-      <p>推荐使用 pipx 安装。它会把 `ivyea` 作为独立 CLI 放进 PATH，不污染系统 Python。</p>
+      <p class="doc-intro">推荐使用 pipx 安装。它会把 <code>ivyea</code> 作为独立命令放进 PATH，不污染系统 Python，也方便升级和卸载。</p>
 
-      <h2 id="quick">快速安装</h2>
-      <h3>Linux / macOS</h3>
-      <pre>curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash</pre>
-      <h3>Windows PowerShell</h3>
-      <pre>iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</pre>
-      <p>安装后重开终端，执行：</p>
-      <pre>ivyea config
-ivyea chat</pre>
+      <h2 id="quick">最快安装</h2>
+      <div class="install-grid">
+        <div class="cmd-box">
+          <div class="cmd-title">Linux / macOS</div>
+          <pre><code>curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash</code></pre>
+        </div>
+        <div class="cmd-box">
+          <div class="cmd-title">Windows PowerShell</div>
+          <pre><code>iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</code></pre>
+        </div>
+      </div>
+      <p>安装完成后重开终端，执行：</p>
+      <pre><code>ivyea onboard
+ivyea chat</code></pre>
 
-      <h2 id="windows">Windows</h2>
-      <ol>
-        <li>安装 Python 3.9+，勾选 Add Python to PATH。</li>
-        <li>以普通 PowerShell 执行一键安装脚本。</li>
-        <li>重开 PowerShell 后运行 `ivyea --version`。</li>
-      </ol>
-      <pre>$env:IVYEA_VERSION="v0.5.6"
-iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</pre>
+      <h2 id="platforms">系统要求</h2>
+      <table>
+        <thead><tr><th>项目</th><th>要求</th></tr></thead>
+        <tbody>
+          <tr><td>Python</td><td>Python 3.9 或更高版本。</td></tr>
+          <tr><td>系统</td><td>Windows、macOS、Linux（CI 三平台 × py3.9/3.11/3.12 全绿）。</td></tr>
+          <tr><td>安装器</td><td>脚本自动安装 pipx；也可手动安装。</td></tr>
+          <tr><td>模型</td><td>可使用 DeepSeek、OpenAI 兼容模型、Anthropic、Gemini 等配置。</td></tr>
+        </tbody>
+      </table>
 
-      <h2 id="linux">Linux</h2>
-      <p>Debian / Ubuntu 如未安装 Python：</p>
-      <pre>sudo apt update
-sudo apt install -y python3 python3-pip python3-venv
-curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash</pre>
+      <h2 id="version">固定版本安装</h2>
+      <p>团队内建议固定版本，避免不同成员安装到不同 Release。</p>
+      <pre><code>curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v1.0.19 bash</code></pre>
+      <pre><code>$env:IVYEA_VERSION="v1.0.19"
+iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</code></pre>
 
-      <h2 id="macos">macOS</h2>
-      <p>如果没有 Python，可先用 Homebrew 安装：</p>
-      <pre>brew install python
-curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash</pre>
-
-      <h2 id="upgrade">升级卸载</h2>
-      <pre>pipx upgrade ivyea-agent
-pipx uninstall ivyea-agent</pre>
-      <p>卸载不会删除 `~/.ivyea/`，因此配置、记忆和知识库会保留。</p>
+      <h2 id="manual">手动安装</h2>
+      <pre><code>pipx install git+https://github.com/Hector-xue/ivyea-agent.git</code></pre>
+      <p>开发者可用 editable 模式：</p>
+      <pre><code>git clone https://github.com/Hector-xue/ivyea-agent.git
+cd ivyea-agent
+python -m venv .venv
+. .venv/bin/activate
+pip install -e ".[dev,anthropic]"</code></pre>
 
       <h2 id="offline">离线部署</h2>
-      <p>从 Release 下载 wheel 和依赖 wheel，复制到内网后安装：</p>
-      <pre>pip download ivyea_agent-0.5.2-py3-none-any.whl -d wheelhouse
-pipx install --pip-args="--no-index --find-links ./wheelhouse" ./wheelhouse/ivyea_agent-0.5.2-py3-none-any.whl</pre>
+      <p>在有外网的发版机上生成离线包（含 wheelhouse 与启动器），复制到内网后解压安装，全程不下载 Python 包：</p>
+      <pre><code>python scripts/build_offline_bundle.py
+# 产物在 dist/offline/：
+#   ivyea-agent-offline-1.0.19.tar.gz   (Linux / macOS)
+#   ivyea-agent-offline-1.0.19.zip      (Windows)
+# 内网解压后：
+bash install.sh            # Linux / macOS
+# 或 powershell -ExecutionPolicy Bypass -File .\install.ps1   (Windows)</code></pre>
+      <p>要把本地语义检索依赖或 embedding 模型也放进离线包，加 <code>--with-semantic</code>（详见 README）。</p>
+
+      <h2 id="first-run">首次配置</h2>
+      <pre><code>ivyea onboard      # 引导：选模型 → 配 key → 可选领星 → AGENTS.md
+ivyea model list
+ivyea doctor</code></pre>
+      <p>配置和记忆默认在 <code>~/.ivyea/</code>，包括 <code>.env</code>、<code>settings.json</code>、<code>mcp.json</code>、<code>memory.db</code> 和用户知识库。</p>
 
       <h2 id="trouble">故障排查</h2>
       <table>
-        <thead><tr><th>问题</th><th>处理</th></tr></thead>
+        <thead><tr><th>问题</th><th>处理方式</th></tr></thead>
         <tbody>
-          <tr><td>找不到 `ivyea`</td><td>运行 `pipx ensurepath` 后重开终端。</td></tr>
-          <tr><td>Release 读取失败</td><td>私有仓库设置 `GITHUB_TOKEN`，或设置 `IVYEA_REF=main` 从 git 安装。</td></tr>
-          <tr><td>中文 CSV 乱码</td><td>优先使用 `.xlsx`，或把 CSV 另存为 UTF-8。</td></tr>
-          <tr><td>真实写入失败</td><td>运行 `ivyea doctor` 和 `ivyea mcp validate <名称>`。</td></tr>
+          <tr><td>找不到 <code>ivyea</code></td><td>运行 <code>pipx ensurepath</code> 后重开终端。</td></tr>
+          <tr><td>Python 版本太低</td><td>安装 Python 3.9+；Windows 安装时勾选 Add Python to PATH。</td></tr>
+          <tr><td>Release 读取失败</td><td>私有仓库设置 <code>GITHUB_TOKEN</code>，或设置 <code>IVYEA_REF=main</code> 从 git 安装。</td></tr>
+          <tr><td>中文 CSV 乱码</td><td>优先使用 <code>.xlsx</code>，或把 CSV 另存为 UTF-8。</td></tr>
         </tbody>
       </table>
     </article>
-  </main>
+  </div>
+</div>
 
-  <footer class="site-footer"><div class="footer-inner"><span>Ivyea Agent</span><a href="docs.html">完整文档</a></div></footer>
+<footer>
+  <div class="foot">
+    <div class="foot-brand"><span class="mark">›_</span> Ivyea Agent</div>
+    <div class="foot-links">
+      <a href="index.html">首页</a>
+      <a href="docs.html">文档</a>
+      <a href="docs.html#deploy">服务器部署</a>
+      <a href="https://github.com/Hector-xue/ivyea-agent" target="_blank" rel="noreferrer">GitHub</a>
+    </div>
+    <div class="foot-note">© 2026 Ivyea · 开源 · 自托管</div>
+  </div>
+</footer>
+
+<script>
+document.getElementById("menuToggle").onclick=()=>document.getElementById("navLinks").classList.toggle("open");
+document.querySelectorAll("#navLinks a").forEach(a=>a.onclick=()=>document.getElementById("navLinks").classList.remove("open"));
+const links=[...document.querySelectorAll("#toc a")];
+const map=new Map(links.map(a=>[a.getAttribute("href").slice(1),a]));
+const io=new IntersectionObserver(es=>{
+  es.forEach(e=>{ if(e.isIntersecting){ links.forEach(l=>l.classList.remove("active")); const a=map.get(e.target.id); if(a)a.classList.add("active"); } });
+},{rootMargin:"-72px 0px -70% 0px"});
+document.querySelectorAll(".doc [id]").forEach(s=>io.observe(s));
+</script>
 </body>
 </html>

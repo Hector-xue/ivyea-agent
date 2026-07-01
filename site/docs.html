@@ -1,150 +1,297 @@
-<!doctype html>
-<html lang="zh-CN">
+<!DOCTYPE html>
+<html lang="zh">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ivyea Agent 文档</title>
-  <meta name="description" content="Ivyea Agent 完整文档：安装、配置、亚马逊广告巡检、知识库、skills、MCP、审批写入、视觉诊断和部署。">
-  <link rel="stylesheet" href="styles.css">
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Ivyea Agent · 文档中心</title>
+<meta name="description" content="Ivyea Agent 文档中心：安装、配置、广告巡检、领星 OpenAPI、知识库、Skills、MCP、审批写入、图片视觉、自动化和服务器部署。" />
+<style>
+  :root{
+    --bg:#f4f8f5; --line:rgba(12,40,26,.09); --line2:rgba(12,40,26,.15); --line3:rgba(12,40,26,.24);
+    --text:#08130d; --text2:#3c4f45; --text3:#5f7368; --green:#12a150;
+    --grad:linear-gradient(118deg,#0ea5a4 0%,#16a34a 48%,#22c55e 100%);
+    --max:1140px; --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth;scroll-padding-top:72px}
+  body{font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;
+    background:radial-gradient(820px 560px at 10% 0%,rgba(34,197,94,.16),transparent 56%),
+      radial-gradient(760px 620px at 96% 4%,rgba(13,184,166,.12),transparent 58%),#f3f8f4;
+    background-attachment:fixed}
+  a{color:inherit;text-decoration:none}
+  button{font:inherit;cursor:pointer;border:none;background:none}
+  ::selection{background:rgba(34,197,94,.24)}
+  .orb{position:fixed;border-radius:50%;filter:blur(110px);z-index:0;pointer-events:none}
+  .orb1{width:320px;height:320px;background:rgba(34,197,94,.13);top:-110px;left:-60px}
+
+  /* topbar */
+  .topbar{position:fixed;top:0;left:0;right:0;z-index:200;display:flex;align-items:center;
+    justify-content:space-between;min-height:52px;padding:0 24px;
+    background:rgba(244,248,245,.82);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    border-bottom:1px solid var(--line)}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:16px;letter-spacing:-.01em}
+  .brand .mark{width:26px;height:26px;border-radius:6px;display:inline-flex;align-items:center;
+    justify-content:center;background:var(--grad);color:#fff;font-size:14px;font-weight:800;
+    font-family:var(--mono);box-shadow:0 4px 14px -4px rgba(22,163,74,.6)}
+  .nav-links{display:flex;align-items:center;gap:24px;font-size:13px;color:var(--text3)}
+  .nav-links a{transition:color .2s}
+  .nav-links a:hover,.nav-links a.active{color:var(--text)}
+  .gh-btn{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;
+    padding:6px 12px;background:var(--text);color:var(--bg);border-radius:3px;transition:opacity .2s}
+  .gh-btn:hover{opacity:.85}
+  .menu-toggle{display:none;width:36px;height:36px;align-items:center;justify-content:center;
+    border:1px solid var(--line2);border-radius:3px;font-size:16px;color:var(--text)}
+
+  /* layout */
+  .wrap{position:relative;z-index:2;max-width:var(--max);margin:0 auto;padding:0 24px}
+  .doc-grid{display:grid;grid-template-columns:212px minmax(0,1fr);gap:52px;padding:96px 0 64px}
+  .toc{position:sticky;top:76px;align-self:start;display:flex;flex-direction:column;gap:1px;
+    max-height:calc(100vh - 96px);overflow:auto}
+  .toc .toc-h{font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--text3);padding:6px 10px 8px}
+  .toc a{font-size:13px;color:var(--text3);padding:6px 10px;border-radius:4px;border-left:2px solid transparent;transition:all .15s}
+  .toc a:hover{color:var(--text);background:rgba(34,197,94,.07)}
+  .toc a.sub{padding-left:22px;font-size:12px}
+  .toc a.active{color:var(--green);border-left-color:var(--green);background:rgba(34,197,94,.08);font-weight:600}
+
+  /* article */
+  .doc{min-width:0}
+  .eyebrow{font-size:10px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--text3);margin-bottom:10px}
+  .doc h1{font-size:clamp(30px,4vw,42px);font-weight:800;letter-spacing:-.035em;line-height:1.1;margin-bottom:14px}
+  .doc-intro{font-size:15.5px;color:var(--text2);line-height:1.75;max-width:660px;margin-bottom:8px}
+  .doc h2{font-size:23px;font-weight:700;letter-spacing:-.02em;margin:46px 0 14px;padding-top:22px;border-top:1px solid var(--line)}
+  .doc h3{font-size:16px;font-weight:600;margin:26px 0 10px;color:var(--text)}
+  .doc p{font-size:14px;color:var(--text2);line-height:1.75;margin:10px 0;max-width:680px}
+  .doc ul{margin:12px 0;padding-left:20px;max-width:680px}
+  .doc li{font-size:14px;color:var(--text2);line-height:1.7;margin:6px 0}
+  .doc code{font-family:var(--mono);font-size:12.5px;background:rgba(34,197,94,.10);color:#0a7a3e;
+    padding:1px 6px;border-radius:4px;border:1px solid rgba(34,197,94,.16)}
+  .doc pre{background:#0c1410;border:1px solid rgba(34,197,94,.18);border-radius:8px;
+    padding:16px 18px;margin:14px 0;overflow-x:auto;
+    font-family:var(--mono);font-size:13px;line-height:1.8;color:#cfe6d8;
+    box-shadow:0 18px 44px -28px rgba(12,40,26,.5)}
+  .doc pre code{background:none;border:none;color:inherit;padding:0;font-size:inherit}
+
+  .callout{display:flex;flex-direction:column;gap:4px;border:1px solid var(--line2);
+    border-left:3px solid var(--green);border-radius:6px;padding:16px 18px;margin:16px 0;
+    background:linear-gradient(120deg,rgba(34,197,94,.08),rgba(13,184,166,.04));max-width:680px}
+  .callout strong{font-size:13px;font-weight:700;color:var(--text)}
+  .callout p{margin:0;font-size:13.5px}
+
+  table{border-collapse:collapse;width:100%;max-width:760px;margin:16px 0;font-size:13.5px;
+    border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  thead th{background:rgba(34,197,94,.08);text-align:left;font-weight:600;color:var(--text);
+    padding:10px 14px;font-size:12.5px;border-bottom:1px solid var(--line)}
+  tbody td{padding:10px 14px;color:var(--text2);border-bottom:1px solid var(--line);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+  tbody td code{white-space:nowrap}
+
+  /* footer */
+  footer{position:relative;z-index:2;border-top:1px solid var(--line);margin-top:20px}
+  .foot{max-width:var(--max);margin:0 auto;padding:28px 24px 36px;display:flex;
+    justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap}
+  .foot-brand{display:flex;align-items:center;gap:9px;font-weight:600;font-size:14px}
+  .foot-brand .mark{width:22px;height:22px;border-radius:5px;display:inline-flex;align-items:center;
+    justify-content:center;background:var(--grad);color:#fff;font-size:12px;font-weight:800;font-family:var(--mono)}
+  .foot-links{display:flex;gap:20px;font-size:13px;color:var(--text3)}
+  .foot-links a:hover{color:var(--green)}
+  .foot-note{font-size:12px;color:var(--text3)}
+
+  @media(max-width:860px){
+    .doc-grid{grid-template-columns:1fr;gap:0;padding-top:78px}
+    .toc{position:static;flex-direction:row;flex-wrap:wrap;gap:6px;max-height:none;margin-bottom:28px;
+      padding-bottom:18px;border-bottom:1px solid var(--line)}
+    .toc .toc-h{display:none}
+    .toc a{border-left:none;border:1px solid var(--line2);border-radius:20px;padding:5px 12px}
+    .toc a.sub{padding-left:12px}
+    .toc a.active{border-color:var(--green)}
+  }
+  @media(max-width:640px){
+    .wrap,.foot{padding-left:16px;padding-right:16px}
+    .topbar{padding:0 16px}
+    .nav-links,.gh-btn span{display:none}
+    .menu-toggle{display:flex;margin-left:auto}
+    .nav-links.open{display:flex;position:fixed;top:52px;left:0;right:0;flex-direction:column;gap:0;
+      background:var(--bg);padding:8px 16px 12px;border-bottom:1px solid var(--line);z-index:150}
+    .nav-links.open a{padding:11px 0;font-size:14px;border-bottom:1px solid var(--line)}
+  }
+</style>
 </head>
 <body>
-  <header class="site-header">
-    <nav class="nav" aria-label="主导航">
-      <a class="brand" href="index.html"><span class="brand-mark">I</span><span>Ivyea Agent</span></a>
-      <div class="nav-links">
-        <a href="install.html">安装</a>
-        <a href="docs.html">文档</a>
-        <a href="#deploy">门户部署</a>
-        <a class="button secondary" href="https://github.com/Hector-xue/ivyea-agent">GitHub</a>
-      </div>
-    </nav>
-  </header>
+<div class="orb orb1"></div>
 
-  <main class="doc-layout">
-    <aside class="toc">
-      <a href="#overview">概览</a>
-      <a href="#install">安装</a>
-      <a href="#config">配置</a>
-      <a href="#operations">运营能力</a>
-      <a href="#knowledge">Skills / 知识库</a>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="mark">›_</span> Ivyea Agent</a>
+  <nav class="nav-links" id="navLinks">
+    <a href="index.html#features">能力</a>
+    <a href="install.html">安装</a>
+    <a href="docs.html" class="active">文档</a>
+    <a href="index.html#embed">嵌入 Ops</a>
+    <a href="https://github.com/Hector-xue/ivyea-agent" target="_blank" rel="noreferrer">GitHub</a>
+  </nav>
+  <div style="display:flex;align-items:center;gap:10px">
+    <a class="gh-btn" href="https://github.com/Hector-xue/ivyea-agent" target="_blank" rel="noreferrer">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      <span>GitHub</span>
+    </a>
+    <button class="menu-toggle" id="menuToggle" aria-label="menu">☰</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="doc-grid">
+    <aside class="toc" id="toc">
+      <div class="toc-h">文档目录</div>
+      <a href="#overview">产品概览</a>
+      <a href="#quickstart">快速开始</a>
+      <a href="#operations">运营命令</a>
+      <a href="#lingxing" class="sub">领星 OpenAPI</a>
+      <a href="#knowledge" class="sub">知识库与 Skills</a>
       <a href="#execution">审批执行</a>
-      <a href="#mcp">MCP</a>
+      <a href="#mcp">MCP 接入</a>
       <a href="#vision">图片视觉</a>
       <a href="#automation">自动化</a>
-      <a href="#security">安全</a>
+      <a href="#security">安全策略</a>
       <a href="#deploy">门户部署</a>
     </aside>
 
     <article class="doc">
-      <h1>Ivyea Agent 文档</h1>
-      <p>Ivyea Agent 是本地优先的 Amazon 运营 CLI Agent。核心原则是：规则引擎先给确定性结论，LLM 负责解释、复核、补充知识和执行流程，但真实写入必须经过审批。</p>
+      <p class="eyebrow">Documentation · v1.0.19</p>
+      <h1>文档中心</h1>
+      <p class="doc-intro">这份文档按实际使用路径组织：先安装和配置，再跑 CSV 或领星广告巡检，随后接入知识库、MCP、审批写入、图片视觉和自动化任务。</p>
 
-      <h2 id="overview">概览</h2>
+      <h2 id="overview">产品概览</h2>
+      <div class="callout">
+        <strong>核心原则</strong>
+        <p>规则引擎先给确定性结论，LLM 负责解释、复核和流程编排；真实写入必须经过人工审批、护栏校验和审计记录。</p>
+      </div>
       <table>
-        <thead><tr><th>模块</th><th>能力</th></tr></thead>
+        <thead><tr><th>模块</th><th>解决的问题</th><th>常用命令</th></tr></thead>
         <tbody>
-          <tr><td>广告巡检</td><td>搜索词报告分析、否词候选、降 bid、放量、Listing 反馈、人工复核。</td></tr>
-          <tr><td>对话 Agent</td><td>自然语言触发巡检、知识检索、动作队列和工具调用。</td></tr>
-          <tr><td>Skills</td><td>内置 Amazon 搜索词优化、否词风控、预算节奏、Listing 诊断、新品启动、周度复盘。</td></tr>
-          <tr><td>知识库</td><td>官方/社区/用户知识卡，SQLite FTS5 索引，冲突审计。</td></tr>
-          <tr><td>写入执行</td><td>人工审批、保护词、动作队列、审计日志、回滚。</td></tr>
-          <tr><td>视觉诊断</td><td>图片资产检查、OCR、多模态模型请求包和可选真实调用。</td></tr>
+          <tr><td>广告巡检</td><td>识别浪费词、放量词、降 bid 候选和 Listing 反馈。</td><td><code>ivyea patrol</code></td></tr>
+          <tr><td>领星链路</td><td>按店铺拉取真实广告数据，带缓存、operate 总闸和审批写入。</td><td><code>ivyea lingxing</code></td></tr>
+          <tr><td>对话 Agent</td><td>自然语言触发巡检、工具调用和任务计划。</td><td><code>ivyea chat</code></td></tr>
+          <tr><td>知识库</td><td>沉淀官方知识、社区经验和团队打法。</td><td><code>ivyea knowledge</code></td></tr>
+          <tr><td>写入执行</td><td>审批式落地否词、出价和预算动作。</td><td><code>ivyea apply</code></td></tr>
+          <tr><td>视觉诊断</td><td>检查 Listing 图片质量、文字和合规风险。</td><td><code>ivyea image</code></td></tr>
         </tbody>
       </table>
 
-      <h2 id="install">安装</h2>
-      <p>普通用户推荐一键脚本。更完整的离线、内网和企业部署见仓库内 `docs/部署指南.md`。</p>
-      <pre># Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash
+      <h2 id="quickstart">快速开始</h2>
+      <pre><code>ivyea onboard
+ivyea patrol 搜索词报告.xlsx --asin B0XXXXXXXX --site US --target-acos 0.3
+ivyea chat</code></pre>
+      <p>未配置模型 key 时，广告巡检会自动降级为规则引擎输出，不会中断。</p>
 
-# Windows PowerShell
-iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</pre>
-      <p>安装固定版本：</p>
-      <pre>curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v0.5.6 bash</pre>
+      <h2 id="operations">运营命令</h2>
+      <h3>广告搜索词巡检</h3>
+      <pre><code>ivyea patrol 搜索词报告.xlsx --asin B0XXXXXXXX --site US --target-acos 0.3
+ivyea patrol 搜索词报告.csv --no-llm</code></pre>
+      <p>CSV/XLSX 模式适合没有 API 凭据的新用户，也适合把 Amazon Ads 后台导出的搜索词报告拿来离线分析。</p>
 
-      <h2 id="config">配置</h2>
-      <pre>ivyea config
-ivyea config show
-ivyea model list
-ivyea model deepseek-chat</pre>
-      <p>配置文件都存放在本机 `~/.ivyea/`。API key 写入 `.env`，模型、站点和默认 ACOS 写入 `settings.json`。</p>
+      <h3 id="lingxing">领星 OpenAPI 店铺巡检</h3>
+      <pre><code>ivyea lingxing setup
+ivyea lingxing probe
+ivyea lingxing sellers
+ivyea patrol --from-lingxing --sid 1863 --days 30
+ivyea shadow off
+ivyea lingxing operate on
+ivyea patrol --from-lingxing --sid 1863 --days 30 --execute</code></pre>
+      <p>领星链路是当前推荐的真实广告数据入口。只读巡检会使用本地缓存和逐日进度；真实写入必须关闭影子模式、打开 operate 总闸，并逐条人工审批。</p>
 
-      <h2 id="operations">运营能力</h2>
-      <h3>广告巡检</h3>
-      <pre>ivyea patrol 搜索词报告.xlsx --asin B0XXXXXXXX --site US --target-acos 0.3
-ivyea patrol 搜索词报告.csv --no-llm</pre>
-      <p>输出 Markdown 报告，包含动作、证据、风险和置信度。无模型 key 时会自动降级为规则引擎。</p>
-
-      <h3>Listing / Review / Offer / 竞品诊断</h3>
-      <pre>ivyea listing audit --title "Karaoke Machine" --search-terms "karaoke machine kids,studio mic"
+      <h3>Listing / Review / Offer / 竞品</h3>
+      <pre><code>ivyea listing audit --title "Karaoke Machine" --search-terms "karaoke machine kids,studio mic"
 ivyea review audit --reviews "质量差，不能用，少件" --rating 3.7 --review-count 4
 ivyea offer audit --margin-rate 0.3 --target-acos 0.35 --inventory-days 9
-ivyea competitor audit --own-terms "karaoke machine" --search-terms "acme karaoke,B0ABCDEFGH"</pre>
-      <p>这些命令用于判断广告表现差是流量问题、Listing 承接问题、评论信任问题、价格/库存问题还是竞品串号问题。</p>
+ivyea competitor audit --own-terms "karaoke machine" --search-terms "acme karaoke,B0ABCDEFGH"</code></pre>
 
-      <h2 id="knowledge">Skills / 知识库</h2>
-      <pre>ivyea skill list
+      <h3 id="knowledge">知识库与 Skills</h3>
+      <pre><code>ivyea skill list
 ivyea skill search 否词
 ivyea skill show amazon.search_term_optimizer
 ivyea knowledge audit
 ivyea knowledge import ./note.md --id user.playbook --tags "listing,预算"
 ivyea knowledge index
-ivyea knowledge conflicts</pre>
-      <p>用户知识库存放在 `~/.ivyea/knowledge/`。导入时会记录来源类型、可信度、更新时间、URL、license 和正文 hash。</p>
+ivyea knowledge conflicts</code></pre>
+      <p>用户知识库存放在 <code>~/.ivyea/knowledge/</code>。导入时记录来源类型、可信度、更新时间、URL、license 和正文 hash。</p>
 
       <h2 id="execution">审批执行</h2>
-      <pre>ivyea apply 巡检输出目录
+      <pre><code>ivyea apply 巡检输出目录
 ivyea apply 巡检输出目录 --protected "品牌词,核心词"
 ivyea apply 巡检输出目录 --execute --from-mcp writer
 ivyea audit list
-ivyea audit rollback &lt;审计ID&gt;</pre>
-      <p>默认 dry-run。真实写入需要显式 `--execute`，并且 MCP 服务器必须配置 `writeActions`。品牌词、核心词、保护词、低置信度动作会被护栏拦截。</p>
+ivyea audit rollback &lt;审计ID&gt;</code></pre>
+      <p>默认 dry-run。领星写入需要 <code>ivyea lingxing operate on</code>；通用 MCP 写入需要配置 <code>writeActions</code>。两种路径都会走审批和审计。</p>
 
-      <h2 id="mcp">MCP</h2>
-      <pre>ivyea mcp add
+      <h2 id="mcp">MCP 接入</h2>
+      <pre><code>ivyea mcp add
 ivyea mcp tools &lt;名称&gt;
 ivyea mcp call &lt;名称&gt; &lt;工具&gt; --args '{"asin":"B0..."}'
 ivyea mcp suggest &lt;名称&gt; &lt;工具&gt; --args '{"asin":"{asin}","site":"{site}","days":"{days}"}'
-ivyea mcp validate &lt;名称&gt;</pre>
-      <p>MCP 客户端是通用映射模式，不绑定厂商字段。`mcp suggest` 会根据工具返回自动推断 `dataSource.rows_path` 和搜索词报告字段映射。</p>
+ivyea mcp validate &lt;名称&gt;</code></pre>
+      <p>MCP 是通用数据源和写入映射，<strong>不等于领星广告源</strong>。领星广告数据请优先走 <code>ivyea lingxing</code>；MCP 适合 Sorftime、SIF、自建服务或其它内部数据接口。</p>
 
       <h2 id="vision">图片视觉</h2>
-      <pre>ivyea image audit ./listing-images --prompt
+      <pre><code>ivyea image audit ./listing-images --prompt
 ivyea image ocr ./listing-images --lang eng+chi_sim
 ivyea image vision ./listing-images --provider openai --payload --output reports/openai-vision.json
-OPENAI_API_KEY=... ivyea image vision ./listing-images --provider openai --call</pre>
-      <p>`image vision` 默认只生成请求包；传 `--call` 才会真实调用 OpenAI、Anthropic 或 Gemini 多模态 API。</p>
+OPENAI_API_KEY=... ivyea image vision ./listing-images --provider openai --call</code></pre>
+      <p><code>image vision</code> 默认只生成请求包；传 <code>--call</code> 才会真实调用多模态 API。</p>
 
       <h2 id="automation">自动化</h2>
-      <pre>ivyea weekly review --output reports/weekly.md
+      <pre><code>ivyea weekly review --output reports/weekly.md
 ivyea alert check
 ivyea alert check --notify --channel feishu
 ivyea schedule set daily-alert alert --every-hours 24 --notify --channel webhook
 ivyea schedule run-due
-ivyea eval</pre>
-      <p>`schedule` 不是常驻服务，适合由 cron、systemd timer、Windows Task Scheduler 或 IvyeaOps 定时调用。</p>
+ivyea eval</code></pre>
+      <p><code>schedule</code> 不是常驻服务，适合由 cron、systemd timer、Windows Task Scheduler 或 IvyeaOps 定时调用。</p>
 
-      <h2 id="security">安全</h2>
+      <h2 id="security">安全策略</h2>
       <ul>
-        <li>API key、token、secret 在工具输出、trace 和通知中会脱敏。</li>
-        <li>写文件、执行命令、真实广告写入都有审批或策略限制。</li>
-        <li>`~/.ivyea/policy.json` 可限制读写目录和命令 allow/deny。</li>
+        <li>API key、token、secret 在工具输出、trace 和通知中自动脱敏。</li>
+        <li>写文件、执行命令和真实广告写入都有审批或策略限制。</li>
+        <li><code>~/.ivyea/policy.json</code> 可限制读写目录和命令 allow/deny。</li>
         <li>真实写入有审计记录和回滚入口。</li>
       </ul>
-      <pre>ivyea policy init
+      <pre><code>ivyea policy init
 ivyea policy show
-ivyea policy check-command "git reset --hard"</pre>
+ivyea policy check-command "git reset --hard"</code></pre>
 
       <h2 id="deploy">门户部署</h2>
-      <p>本网站源码在 `site/`。正式部署和 `ivyea.com` 一样，静态文件放到 `/var/www/agent.ivyea.com/`，Nginx 读取该目录。</p>
-      <pre>rsync -a --delete site/ /var/www/agent.ivyea.com/
+      <p>本网站源码在 <code>site/</code>。正式部署和 <code>ivyea.com</code> 一样，静态文件放到 <code>/var/www/agent.ivyea.com/</code>，Nginx 读取该目录。</p>
+      <pre><code>mkdir -p /var/www/agent.ivyea.com
+cp -a site/. /var/www/agent.ivyea.com/
 cp deploy/nginx/agent.ivyea.com.conf /etc/nginx/conf.d/agent.ivyea.com.conf
-nginx -t &amp;&amp; systemctl reload nginx
-certbot --nginx -d agent.ivyea.com</pre>
-      <p>DNS 需要把 `agent.ivyea.com` 的 A 记录指向当前服务器公网 IP。</p>
+nginx -t &amp;&amp; nginx -s reload
+certbot --nginx -d agent.ivyea.com</code></pre>
     </article>
-  </main>
+  </div>
+</div>
 
-  <footer class="site-footer"><div class="footer-inner"><span>Ivyea Agent Docs</span><a href="install.html">安装指南</a></div></footer>
+<footer>
+  <div class="foot">
+    <div class="foot-brand"><span class="mark">›_</span> Ivyea Agent</div>
+    <div class="foot-links">
+      <a href="index.html">首页</a>
+      <a href="install.html">安装</a>
+      <a href="https://github.com/Hector-xue/ivyea-agent" target="_blank" rel="noreferrer">GitHub</a>
+      <a href="https://github.com/Hector-xue/ivyea-agent/blob/main/README.md" target="_blank" rel="noreferrer">README</a>
+    </div>
+    <div class="foot-note">© 2026 Ivyea · 开源 · 自托管</div>
+  </div>
+</footer>
+
+<script>
+document.getElementById("menuToggle").onclick=()=>document.getElementById("navLinks").classList.toggle("open");
+document.querySelectorAll("#navLinks a").forEach(a=>a.onclick=()=>document.getElementById("navLinks").classList.remove("open"));
+const links=[...document.querySelectorAll("#toc a")];
+const map=new Map(links.map(a=>[a.getAttribute("href").slice(1),a]));
+const io=new IntersectionObserver(es=>{
+  es.forEach(e=>{ if(e.isIntersecting){ links.forEach(l=>l.classList.remove("active")); const a=map.get(e.target.id); if(a)a.classList.add("active"); } });
+},{rootMargin:"-72px 0px -70% 0px"});
+document.querySelectorAll(".doc [id]").forEach(s=>io.observe(s));
+</script>
 </body>
 </html>
