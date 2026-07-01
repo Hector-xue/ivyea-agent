@@ -147,6 +147,10 @@ class ChatInput:
                       completer=self._completer(), complete_while_typing=True,
                       auto_suggest=AutoSuggestFromHistory(),   # 历史 ghost 建议
                       history=self._history)
+        # 输入框高度按内容行数固定(空=1行,封顶8行):不支持 CPR 的终端(如手机浏览器)会
+        # 按整屏预留空间→多行 TextArea 会撑满屏幕,固定高度可避免。
+        from prompt_toolkit.layout.dimension import Dimension
+        ta.window.height = lambda: Dimension.exact(min(8, max(1, ta.document.line_count)))
         frame = self._rounded_frame(ta)
         hint = Window(FormattedTextControl(lambda: self.status_fn()), height=1, style="class:hint")
         root = HSplit([frame, hint])
@@ -197,13 +201,14 @@ class ChatInput:
                 event.app.invalidate()   # 底部状态行实时反映新模式
 
         style = Style.from_dict(self._style_dict())
-        app = Application(layout=Layout(root), key_bindings=kb,
-                          style=style, full_screen=False, mouse_support=False)
+        app = Application(layout=Layout(root), key_bindings=kb, style=style,
+                          full_screen=False, mouse_support=False,
+                          erase_when_done=True)   # 提交后擦掉输入框,避免与下方灰底带回显重复
         result = app.run()
         if result is EXIT:
             return EXIT
-        # 带框 Application 是 inline 渲染，退出后框会被擦除。把刚提交的输入回显成
-        # 一行静态历史，让对话自上而下在框上方累积、输出不再“贴底”。
+        # 输入框已擦除；把刚提交的指令回显成 Claude 风格灰底带（唯一的一次显示），
+        # 让对话自上而下在其上方累积、输出不再“贴底”。
         self._echo_submitted(result or "")
         return result
 
