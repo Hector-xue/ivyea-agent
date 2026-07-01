@@ -79,8 +79,35 @@ def sync_site(site_dir: Path | None = None) -> list[Path]:
     return changed
 
 
+# README 里「当前版本」指针（会随发版刷新）。刻意精确匹配，避免误伤历史特性
+# 标注（如「（v1.0.21–v1.0.22）」那种描述某能力何时引入的版本区间）。
+_README_VERSION_SUBS = [
+    (r"(最新 Release：`)v\d+\.\d+\.\d+(`)", r"\g<1>{v}\g<2>"),
+    (r"(IVYEA_VERSION=)v\d+\.\d+\.\d+", r"\g<1>{v}"),
+    (r'(IVYEA_VERSION=")v\d+\.\d+\.\d+(")', r"\g<1>{v}\g<2>"),
+    (r"(当前文档按 \*\*)v\d+\.\d+\.\d+(\*\* 示例维护)", r"\g<1>{v}\g<2>"),
+]
+
+
+def sync_readme(version: str) -> Path | None:
+    """刷 README 的『当前版本』指针，保留历史特性标注。有改动返回路径，否则 None。"""
+    path = ROOT / "README.md"
+    text = path.read_text(encoding="utf-8")
+    v = f"v{version}"
+    new = text
+    for pattern, repl in _README_VERSION_SUBS:
+        new = re.sub(pattern, repl.replace("{v}", v), new)
+    if new == text:
+        return None
+    path.write_text(new, encoding="utf-8")
+    return path
+
+
 def main() -> int:
     changed = sync_site()
+    readme = sync_readme(project_version())
+    if readme is not None:
+        changed.append(readme)
     print("Portal sync")
     for path in changed:
         print(f"- {path.relative_to(ROOT)}")
