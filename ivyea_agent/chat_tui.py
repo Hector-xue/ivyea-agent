@@ -5,8 +5,9 @@
 - P1：核心闭环——提交回显 + sticky 头部 + 后台线程跑一轮 + 助手文本/工具行
   线程安全 marshal 进 transcript + 状态行 spinner + 贴底跟随/上滚查看。
 
-启用：TTY + IVYEA_TUI=1（opt-in）。非 TTY / 未开 / 依赖缺失 → tui_enabled()
-False，调用方回退现有行式 CLI。审批/补全/中断等见后续阶段。
+默认启用（TTY 下）。`IVYEA_TUI=0/false/off/no` 退回行式 CLI；非 TTY / 依赖缺失
+时 tui_enabled() 返回 False 自动回退。功能：sticky 头部 + 常驻输入 + 后台流式 +
+中断/排队 + TUI 内审批 + 补全/历史/计划模式/Shift+Tab + 轮末 todo 面板。
 """
 from __future__ import annotations
 
@@ -18,15 +19,16 @@ import threading
 import time
 from typing import Callable
 
-_TRUTHY = ("1", "true", "on", "yes")
+_FALSY = ("0", "false", "off", "no")
 _SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 def tui_enabled() -> bool:
-    """是否走全屏 TUI。默认关（opt-in），P5 再翻默认。"""
+    """是否走全屏 TUI。默认开；`IVYEA_TUI=0/false/off/no` 退回行式 CLI。
+    非 TTY / prompt_toolkit 不可用时也自动回退，保证任何环境可用。"""
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return False
-    if os.environ.get("IVYEA_TUI", "").strip().lower() not in _TRUTHY:
+    if os.environ.get("IVYEA_TUI", "").strip().lower() in _FALSY:
         return False
     try:
         import prompt_toolkit  # noqa: F401
