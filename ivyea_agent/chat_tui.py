@@ -60,10 +60,18 @@ class ChatTUI:
     """一次 TUI 会话的状态与渲染。turn_fn(line, render, narrate)->dict 跑真正一轮。"""
 
     def __init__(self, *, status_fn: Callable[[], str], turn_fn: Callable[..., dict],
-                 render_markdown: Callable[[str], str] | None = None):
+                 render_markdown: Callable[[str], str] | None = None,
+                 slash_commands: list | None = None,
+                 plan_intent_fn: Callable[[str], str] | None = None,
+                 set_plan_mode: Callable[[bool], str] | None = None,
+                 cycle_mode: Callable[[], str] | None = None):
         self.status_fn = status_fn
         self.turn_fn = turn_fn
         self._md = render_markdown or (lambda s: s)
+        self.slash_commands = slash_commands or []
+        self._plan_intent = plan_intent_fn or (lambda _t: None)
+        self._set_plan = set_plan_mode        # (on)->msg 或 None
+        self._cycle = cycle_mode              # ()->label 或 None
         self.instruction = ""
         self.blocks: list[str] = []          # 已定稿 block（可含 ANSI）
         self.live: str | None = None         # 当前流式助手文本（未定稿）
@@ -138,6 +146,39 @@ class ChatTUI:
             out.append(f"{mark}{i + 1}. {label}")
         out.append("\033[2m  ↑/↓ 选择 · Enter 确认 · 数字直选 · Ctrl-C 停止\033[0m")
         return out
+
+    def _completer(self):
+        from prompt_toolkit.completion import Completer, Completion
+        slash = self.slash_commands
+
+        class _C(Completer):
+            def get_completions(s, document, complete_event):
+                t = document.text_before_cursor
+                if not t.startswith("/"):
+                    return
+                for cmd, desc in slash:
+                    if cmd.startswith(t):
+                        yield Completion(cmd, start_position=-len(t), display=cmd, display_meta=desc)
+        return _C()
+
+    def _handle_submit(self, text: str) -> str:
+        """处理一条已提交文本。返回 'exit' / 'handled' / 'turn'。"""
+        if text in ("/exit", "/quit"):
+            return "exit"
+        if text == "/clear":
+            self.blocks = []
+            self.live = None
+            self.scroll = 0
+            return "handled"
+        pi = self._plan_intent(text)                       # 自然语言进/出计划模式
+        if pi is not None:
+            if self._set_plan is not None:
+                self.blocks.append("\033[2m" + self._set_plan(pi == "enter") + "\033[0m")
+            return "handled"
+        if text.startswith("/"):                           # 其它斜杠命令：P5 再接全，先提示
+            self.blocks.append(f"\033[2m（{text}：该命令暂请退出 TUI 后在行式界面使用；完整接入见 P5）\033[0m")
+            return "handled"
+        return "turn"
 
     def _body_ansi(self):
         from prompt_toolkit.formatted_text import ANSI
@@ -228,7 +269,18 @@ class ChatTUI:
 
         approving = Condition(lambda: self.pending is not None)
 
-        ta = TextArea(prompt=[("class:prompt", "❯ ")], multiline=False, height=1)
+        from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+        history = None
+        try:
+            from prompt_toolkit.history import FileHistory
+            from . import config as _cfg
+            _cfg.ensure_dirs()
+            history = FileHistory(str(_cfg.IVYEA_DIR / "chat_history"))
+        except Exception:
+            history = None
+        ta = TextArea(prompt=[("class:prompt", "❯ ")], multiline=False, height=1,
+                      completer=self._completer(), complete_while_typing=True,
+                      auto_suggest=AutoSuggestFromHistory(), history=history)
         root = HSplit([
             Window(FormattedTextControl(self._header), height=1, style="class:hdr"),
             Window(height=1, char="─", style="class:rule"),
@@ -275,10 +327,21 @@ class ChatTUI:
                 self.blocks.append(f"\033[2m⋯ 已排队：{text}\033[0m")
                 self._invalidate()
                 return
-            if text in ("/exit", "/quit"):
+            action = self._handle_submit(text)   # /exit /clear /plan / 计划模式 NL / 其它斜杠 / 普通轮
+            if action == "exit":
                 event.app.exit(result=0)
+            elif action == "handled":
+                self._invalidate()
+            else:
+                self._start_turn(text)
+
+        @kb.add("s-tab")                     # Shift+Tab：循环 普通/自动接受编辑/计划模式
+        def _(event):
+            if self.running or self.pending is not None or self._cycle is None:
                 return
-            self._start_turn(text)
+            label = self._cycle()
+            self.blocks.append(f"\033[2m⇄ 模式：{label}\033[0m")
+            self._invalidate()
 
         @kb.add("pageup")
         def _(event):
@@ -324,10 +387,14 @@ class ChatTUI:
 
 def run(status_fn: Callable[[], str], slash_commands: list,
         turn_fn: Callable[..., dict] | None = None,
-        render_markdown: Callable[[str], str] | None = None) -> int:
+        render_markdown: Callable[[str], str] | None = None,
+        plan_intent_fn: Callable[[str], str] | None = None,
+        set_plan_mode: Callable[[bool], str] | None = None,
+        cycle_mode: Callable[[], str] | None = None) -> int:
     """启动 TUI 会话。turn_fn(line, render, narrate)->dict 跑真正一轮。"""
     tui = ChatTUI(status_fn=status_fn, turn_fn=turn_fn or (lambda *a, **k: {"text": ""}),
-                  render_markdown=render_markdown)
+                  render_markdown=render_markdown, slash_commands=slash_commands,
+                  plan_intent_fn=plan_intent_fn, set_plan_mode=set_plan_mode, cycle_mode=cycle_mode)
     from . import tui as _tui_mod
     _tui_mod.set_active_selector(tui._approve)   # 工具线程的审批 marshal 回本 app
     try:

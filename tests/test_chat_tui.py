@@ -171,6 +171,34 @@ def test_approval_marshaled_from_tool_thread():
         tui_mod.set_active_selector(None)
 
 
+# ---- P4 输入对齐 ----
+def test_handle_submit_routes():
+    from ivyea_agent.cli import _plan_mode_intent
+    tui = chat_tui.ChatTUI(
+        status_fn=lambda: "s", turn_fn=lambda *a, **k: {"text": ""}, render_markdown=lambda s: s,
+        slash_commands=[("/exit", "退出"), ("/plan", "计划"), ("/model", "模型")],
+        plan_intent_fn=_plan_mode_intent,
+        set_plan_mode=lambda on: ("已进入计划模式" if on else "已退出计划模式"),
+        cycle_mode=lambda: "自动接受编辑",
+    )
+    assert tui._handle_submit("/exit") == "exit"
+    tui.blocks = ["x"]
+    assert tui._handle_submit("/clear") == "handled" and tui.blocks == []
+    assert tui._handle_submit("进入计划模式") == "handled"
+    assert "计划模式" in _plain("\n".join(tui.blocks))
+    assert tui._handle_submit("/model") == "handled"           # 其它 slash → P5 提示
+    assert "P5" in _plain("\n".join(tui.blocks))
+    assert tui._handle_submit("帮我分析广告") == "turn"        # 普通 → 跑一轮
+
+
+def test_completer_slash():
+    from prompt_toolkit.document import Document
+    tui = chat_tui.ChatTUI(status_fn=lambda: "s", turn_fn=lambda *a, **k: {"text": ""},
+                           render_markdown=lambda s: s, slash_commands=[("/exit", "退出"), ("/plan", "计划")])
+    cs = list(tui._completer().get_completions(Document("/e"), None))
+    assert [c.text for c in cs] == ["/exit"]
+
+
 def test_approval_ctrl_c_picks_last_abort():
     import threading
     import time

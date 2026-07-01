@@ -1451,18 +1451,19 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         messages = [_sys_msg()]
         print(ui.message("success", "已清空对话上下文")); return True
 
-    def _set_plan_mode(on: bool) -> None:
-        """显式进/出计划模式（/plan 与自然语言共用）。已在目标状态则只提示。"""
+    def _set_plan_mode_msg(on: bool) -> str:
+        """进/出计划模式并返回提示消息（不打印）。/plan、NL、TUI 共用。"""
         if on == ctx.plan_mode:
-            print(ui.message("info", "已在计划模式。" if on else "当前不在计划模式。"))
-            return
+            return ui.message("info", "已在计划模式。" if on else "当前不在计划模式。")
         ctx.plan_mode = on
         messages[0] = _sys_msg()
         if on:
-            print(ui.message("info", "已进入计划模式（只读，不写入；说“退出计划模式”或 /approve 后执行）。"
-                                     "复杂任务建议先 /model 切更强主脑。"))
-        else:
-            print(ui.message("success", "已退出计划模式。"))
+            return ui.message("info", "已进入计划模式（只读，不写入；说“退出计划模式”或 /approve 后执行）。"
+                                      "复杂任务建议先 /model 切更强主脑。")
+        return ui.message("success", "已退出计划模式。")
+
+    def _set_plan_mode(on: bool) -> None:
+        print(_set_plan_mode_msg(on))
 
     def _sh_plan(line):
         _set_plan_mode(not ctx.plan_mode); return True
@@ -1691,7 +1692,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     from . import chat_tui
     if chat_tui.tui_enabled():   # IVYEA_TUI=1 全屏 TUI（分阶段构建）；否则走下面的行式循环
         return chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
-                            render_markdown=markdown.render)
+                            render_markdown=markdown.render,
+                            plan_intent_fn=_plan_mode_intent,
+                            set_plan_mode=_set_plan_mode_msg,
+                            cycle_mode=_cycle_mode)
 
     while True:
         line = ci.read("❯ ")
