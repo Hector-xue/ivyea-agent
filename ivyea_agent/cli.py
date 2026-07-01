@@ -1629,6 +1629,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         "/workspace": _sh_embedded, "/patch": _sh_embedded, "/gitops": _sh_embedded,
     }
 
+    from . import chat_tui
+    if chat_tui.tui_enabled():   # IVYEA_TUI=1 全屏 TUI（分阶段构建）；否则走下面的行式循环
+        return chat_tui.run(_status, SLASH_COMMANDS)
+
     while True:
         line = ci.read("❯ ")
         if line is chat_input.EXIT:
