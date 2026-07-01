@@ -224,16 +224,10 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
 
 def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
                     max_steps: int | None = None, narrate: Callable[[str], None] = print,
-                    render: Callable[[str], None] = None, model: str = "",
-                    cancel_check: Callable[[], bool] | None = None) -> dict:
+                    render: Callable[[str], None] = None, model: str = "") -> dict:
     """流式跑一轮：token 边出边渲染、工具实时叙述、累计用量。
-    返回 {text, usage}（usage 为本轮各步累加）。render(token) 逐字输出助手文本。
-
-    cancel_check 用于 CLI 忙碌输入框在流式 token/工具边界请求取消；返回 True
-    时抛 KeyboardInterrupt，交给上层 chat loop 保留会话并恢复输入框。
-    """
+    返回 {text, usage}（usage 为本轮各步累加）。render(token) 逐字输出助手文本。"""
     render = render or (lambda s: print(s, end="", flush=True))
-    cancel_check = cancel_check or (lambda: False)
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "prompt_cache_hit_tokens": 0}
 
     def _accum(u: dict) -> None:
@@ -247,15 +241,11 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
     max_steps = _resolve_max_steps(max_steps, "chat_max_tool_steps")
     status = TurnStatus(max_steps=max_steps)
     for step_idx in range(max_steps):
-        if cancel_check():
-            raise KeyboardInterrupt
         _maybe_compact(messages, provider, step_idx, narrate)
         status.before_model_step(step_idx, narrate)
         final = {"content": "", "tool_calls": [], "usage": {}}
         printed_any = False
         for ev in provider.stream_chat(messages, tools=TOOL_SCHEMAS):
-            if cancel_check():
-                raise KeyboardInterrupt
             if ev["type"] == "text":
                 printed_any = True
                 render(ev["text"])
@@ -269,8 +259,6 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
             content = final.get("content", "") or ""
             messages.append({"role": "assistant", "content": content})
             return {"text": content, "usage": total_usage}
-        if cancel_check():
-            raise KeyboardInterrupt
         _append_tool_call_msg(messages, final.get("content"), tool_calls)
         _dispatch_tool_calls(ctx, messages, status, tool_calls, step_idx, max_steps, narrate)
     text = _finalize_limit(ctx, messages, status, max_steps, extra_payload={"usage": total_usage})

@@ -5,9 +5,7 @@
 """
 from __future__ import annotations
 
-import os
 import re
-import select
 import shutil
 import sys
 import time
@@ -53,42 +51,29 @@ def _dwidth(s: str) -> int:
 
 
 class _LiveSpinner:
-    """生成时的实时反馈。
-
-    对标 Claude Code / Codex 的终端观感：运行状态不再直接占据最后一行输入位，
-    而是渲染为「状态行 + 底部只读 composer 占位」。这样用户始终能看到底部
-    输入区位置和中断提示；真正输入仍在本轮结束/中断后恢复。
-    设置 IVYEA_BUSY_COMPOSER=0 可回退为旧的单行 spinner。
-    """
+    """生成时的实时反馈：转圈 + 耗时 + 估算 token + **正在生成的正文末尾预览**（单行 \\r 覆盖，零闪烁）。
+    不打印完整正文，收尾仍统一渲染 markdown。"""
     _F = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
-    def __init__(self, *, busy_composer: bool | None = None):
+    def __init__(self):
         self.i = 0
         self.on = False
         self.start = None
         self.chars = 0
         self.tail = ""   # 当前行尾的正文预览
-        self.input_preview = ""
-        if busy_composer is None:
-            busy_composer = os.environ.get("IVYEA_BUSY_COMPOSER", "").strip().lower() not in (
-                "0", "false", "off", "no"
-            )
-        self.busy_composer = busy_composer
 
-    @staticmethod
-    def _clip(text: str, width: int) -> str:
-        text = str(text or "")
-        if width <= 0:
-            return ""
-        clipped = False
-        while _dwidth(text) > width and len(text) > 1:
-            text = text[:-1]
-            clipped = True
-        return text + ("…" if clipped and width > 1 else "")
-
-    def _status_body(self) -> tuple[str, str]:
+    def tick(self, text: str = "") -> None:
+        if self.start is None:
+            self.start = time.time()
+        if text:
+            self.chars += len(text)
+            combined = self.tail + text
+            if "\n" in combined:
+                combined = combined.rsplit("\n", 1)[1]   # 只留最后一行
+            self.tail = combined
+        self.i += 1
         frame = self._F[self.i % len(self._F)]
-        elapsed = int(time.time() - (self.start or time.time()))
+        elapsed = int(time.time() - self.start)
         toks = self.chars // 3   # 中英混排粗估 ~3 字符/token，仅作进度感
         tok_s = f"~{toks / 1000:.1f}k tok" if toks >= 1000 else f"~{toks} tok"
         head = f"生成中 {elapsed}s · {tok_s} · "
@@ -102,132 +87,16 @@ class _LiveSpinner:
             body = head + ("…" + preview if clipped else preview)
         else:
             body = head + "Ctrl-C 中断"
-        return frame, body
-
-    def set_input_preview(self, text: str = "") -> None:
-        self.input_preview = str(text or "")
-
-    def tick(self, text: str = "") -> None:
-        if self.start is None:
-            self.start = time.time()
-        if text:
-            self.chars += len(text)
-            combined = self.tail + text
-            if "\n" in combined:
-                combined = combined.rsplit("\n", 1)[1]   # 只留最后一行
-            self.tail = combined
-        self.i += 1
-        frame, body = self._status_body()
-        if not self.busy_composer:
-            sys.stdout.write(f"\r\033[K{_C['c']}{frame}{_C['x']} {_C['d']}{body}{_C['x']}")
-        else:
-            width = shutil.get_terminal_size((80, 24)).columns
-            composer = self._clip("╭─ 任务运行中 · Ctrl-C/Esc 中断 · 输入文字回车排队", width)
-            prompt_text = f"╰─ ❯ {self.input_preview}" if self.input_preview else "╰─ ❯ "
-            prompt = self._clip(prompt_text, width)
-            if self.on:
-                sys.stdout.write("\r\033[K\033[1B\r\033[K\033[1A\r")
-            sys.stdout.write(
-                f"\r\033[K{_C['c']}{frame}{_C['x']} {_C['d']}{body}{_C['x']}\n"
-                f"\033[K{_C['d']}{composer}\n{prompt}{_C['x']}\033[1A\r"
-            )
+        sys.stdout.write(f"\r\033[K{_C['c']}{frame}{_C['x']} {_C['d']}{body}{_C['x']}")
         sys.stdout.flush()
         self.on = True
 
     def clear(self) -> None:
         if self.on:
-            if self.busy_composer:
-                sys.stdout.write("\r\033[K\033[1B\r\033[K\033[1B\r\033[K\033[2A\r")
-            else:
-                sys.stdout.write("\r\033[K")
+            sys.stdout.write("\r\033[K")
             sys.stdout.flush()
             self.on = False
             self.tail = ""   # 一段叙述/工具行后重置预览
-            self.input_preview = ""
-
-
-class BusyInput:
-    """Best-effort background input while a turn is running.
-
-    It intentionally avoids taking over the full prompt_toolkit Application used by
-    ChatInput. In TTY mode it watches stdin with select/termios and supports:
-    - Ctrl-C / Esc: request cancellation of the current turn.
-    - Enter after typing text: queue that text as the next instruction.
-
-    In non-TTY or unsupported terminals it becomes a no-op, so existing tests and
-    pipes keep their old behavior.
-    """
-
-    def __init__(self, *, enabled: bool | None = None, on_change=None):
-        if enabled is None:
-            enabled = os.environ.get("IVYEA_BUSY_INPUT", "").strip().lower() not in (
-                "0", "false", "off", "no"
-            )
-        self.enabled = enabled and sys.stdin.isatty()
-        self.cancelled = False
-        self.queued: list[str] = []
-        self._buf = ""
-        self.on_change = on_change or (lambda _text: None)
-        self._old_term = None
-        self._active = False
-
-    def __enter__(self):
-        if not self.enabled:
-            return self
-        try:
-            import termios
-            import tty
-            self._old_term = termios.tcgetattr(sys.stdin.fileno())
-            tty.setcbreak(sys.stdin.fileno())
-            self._active = True
-        except Exception:
-            self.enabled = False
-        return self
-
-    def __exit__(self, _exc_type, _exc, _tb):
-        if self._active and self._old_term is not None:
-            try:
-                import termios
-                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._old_term)
-            except Exception:
-                pass
-        self._active = False
-        return False
-
-    def poll(self) -> None:
-        if not self.enabled or self.cancelled:
-            return
-        try:
-            while select.select([sys.stdin], [], [], 0)[0]:
-                ch = sys.stdin.read(1)
-                if not ch:
-                    return
-                if ch in ("\x03", "\x1b"):
-                    self.cancelled = True
-                    return
-                if ch in ("\r", "\n"):
-                    text = self._buf.strip()
-                    self._buf = ""
-                    self.on_change("")
-                    if text:
-                        self.queued.append(text)
-                        self.on_change("已排队：" + text)
-                    return
-                if ch in ("\x7f", "\b"):
-                    self._buf = self._buf[:-1]
-                    self.on_change(self._buf)
-                elif ch.isprintable():
-                    self._buf += ch
-                    self.on_change(self._buf)
-        except Exception:
-            return
-
-    def cancel_check(self) -> bool:
-        self.poll()
-        return self.cancelled
-
-    def pop_queued(self) -> str:
-        return self.queued.pop(0) if self.queued else ""
 
 
 class _StreamPrinter:
