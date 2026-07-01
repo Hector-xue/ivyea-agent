@@ -131,7 +131,8 @@ def test_chat_input_echo_indents_multiline(capsys, monkeypatch):
     ChatInput._echo_submitted("第一行\n第二行")
     ChatInput._echo_submitted("   ")                      # 纯空白不回显
     out = capsys.readouterr().out
-    assert out == "❯ 第一行\n  第二行\n"                  # 续行缩进 2 格、空白被跳过
+    # Claude 风格：> 标记 + 续行缩进 2 格，上下留白；NO_COLOR 无背景带
+    assert out == "\n> 第一行\n  第二行\n\n"
 
 
 def test_ui_icons_fallback_to_ascii_on_non_utf8(monkeypatch):

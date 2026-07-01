@@ -1386,7 +1386,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         sid = sessions.new_id()
     ctx.session_id = sid
     render_md = not getattr(args, "raw", False)   # 默认 markdown 渲染
-    stream_live = bool(cfg.get_setting("stream_live", False))   # 完整流式（opt-in，/stream on）
+    # 完整流式默认开（tty 下逐字出字、收尾重排 markdown，对标 Claude）；/stream 可切、可持久化覆盖
+    stream_live = bool(cfg.get_setting("stream_live", True))
 
     def _persist():
         try:
@@ -1449,7 +1450,15 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         messages[0] = _sys_msg()   # 计划模式影响 system prompt
         return label
 
-    ci = chat_input.ChatInput(SLASH_COMMANDS, _status, mode_cycle_fn=_cycle_mode)
+    def _mode_label() -> str:      # 输入框上边线右端显示的当前模式（对标 Claude）
+        if ctx.plan_mode:
+            return "⏸ 计划模式"
+        if ctx.perm.accept_edits:
+            return "⚡ 自动接受编辑"
+        return ""
+
+    ci = chat_input.ChatInput(SLASH_COMMANDS, _status, mode_cycle_fn=_cycle_mode,
+                              mode_label_fn=_mode_label)
     from . import hooks as _hooks
     _hooks.fire("session_start", {"session_id": sid or "", "cwd": os.getcwd()})
 
@@ -1703,14 +1712,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         out["blocked"] = False
         return out
 
-    def _mode_label() -> str:    # 输入框上边线右端显示的当前模式（对标 Claude）
-        if ctx.plan_mode:
-            return "⏸ 计划模式"
-        if ctx.perm.accept_edits:
-            return "⚡ 自动接受编辑"
-        return ""
-
-    if _tui_on:                  # 全屏 TUI（默认；IVYEA_TUI=0 走下面的行式循环）
+    if _tui_on:                  # 全屏 TUI（opt-in：IVYEA_TUI=1；默认走下面的行式循环）
         return _chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
                              render_markdown=markdown.render,
                              plan_intent_fn=_plan_mode_intent,

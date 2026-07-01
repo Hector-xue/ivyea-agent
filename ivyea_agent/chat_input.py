@@ -19,10 +19,12 @@ EXIT = object()  # 哨兵：用户在框内 Ctrl+C/Ctrl+D 退出
 
 class ChatInput:
     def __init__(self, slash_commands: list, status_fn: Callable[[], str],
-                 mode_cycle_fn: Callable[[], str] | None = None):
+                 mode_cycle_fn: Callable[[], str] | None = None,
+                 mode_label_fn: Callable[[], str] | None = None):
         self.slash = slash_commands
         self.status_fn = status_fn
         self.mode_cycle_fn = mode_cycle_fn   # shift+tab 循环模式：普通→自动接受→计划；返回新模式名
+        self.mode_label_fn = mode_label_fn   # ()->当前模式文字，显示在输入框上边线右端（对标 Claude）
         self._app_factory = None      # 带框 Application（每次新建）
         self._session = None          # 普通 PromptSession 兜底
         self._mode = "plain"
@@ -92,6 +94,8 @@ class ChatInput:
             "frame.border": "ansicyan",
             "hint": "ansibrightblack",
             "prompt": "ansicyan bold",
+            "mode": "ansicyan bold",                      # 输入框边线右端的模式标签
+
             "auto-suggestion": "ansibrightblack",        # 历史建议的灰字 ghost text
             "completion-menu": "#d1d5db",
             "completion-menu.completion": "#d1d5db",
@@ -104,15 +108,27 @@ class ChatInput:
             "bottom-toolbar.text": "ansibrightblack",
         }
 
-    @staticmethod
-    def _rounded_frame(body):
-        """圆角边框（╭╮╰╯），与欢迎框/Claude·Codex 风格统一；ptk 自带 Frame 是方角。"""
+    def _rounded_frame(self, body):
+        """圆角边框（╭╮╰╯），与欢迎框/Claude·Codex 风格统一；ptk 自带 Frame 是方角。
+        顶边线右端嵌当前模式标签（⏸ 计划模式 / ⚡ 自动接受编辑），对标 Claude 边线标签。"""
         from prompt_toolkit.layout.containers import HSplit, VSplit, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
 
         def fill(char, width=None, height=None):
             return Window(char=char, style="class:frame.border", width=width, height=height)
 
-        top = VSplit([fill("╭", 1, 1), fill("─", height=1), fill("╮", 1, 1)], height=1)
+        def _label():
+            m = (self.mode_label_fn() if self.mode_label_fn else "") or ""
+            if not m:
+                return [("class:frame.border", "──")]
+            return [("class:frame.border", "─ "), ("class:mode", m), ("class:frame.border", " ─")]
+
+        top = VSplit([
+            fill("╭", 1, 1),
+            fill("─", height=1),                                              # 左侧铺满
+            Window(FormattedTextControl(_label), height=1, dont_extend_width=True),
+            fill("╮", 1, 1),
+        ], height=1)
         mid = VSplit([fill("│", 1), body, fill("│", 1)])
         bot = VSplit([fill("╰", 1, 1), fill("─", height=1), fill("╯", 1, 1)], height=1)
         return HSplit([top, mid, bot])
@@ -159,6 +175,16 @@ class ChatInput:
             else:
                 buf.cursor_right()
 
+        @kb.add("tab")              # Tab：优先接受 ghost 建议，否则走斜杠补全菜单
+        def _(event):
+            buf = ta.buffer
+            if buf.complete_state:
+                buf.complete_next()
+            elif buf.suggestion and buf.suggestion.text:
+                buf.insert_text(buf.suggestion.text)
+            elif buf.text.startswith("/"):
+                buf.start_completion(select_first=True)
+
         @kb.add("c-c")
         @kb.add("c-d")
         def _(event):
@@ -183,13 +209,27 @@ class ChatInput:
 
     @staticmethod
     def _echo_submitted(text: str) -> None:
+        """把刚提交的指令回显成 Claude 风格：`>` + 淡灰整行背景带，视觉上独立出来。"""
         if not text.strip():
             return
-        marker = "❯" if os.environ.get("NO_COLOR") else "\033[36m❯\033[0m"
         lines = text.split("\n")
-        # 首行带 ❯ 提示，多行输入的续行缩进 2 格与正文对齐
-        body = f"{marker} {lines[0]}" + "".join(f"\n  {ln}" for ln in lines[1:])
-        sys.stdout.write(body + "\n")
+        if os.environ.get("NO_COLOR"):
+            body = "".join((f"> {ln}\n" if i == 0 else f"  {ln}\n") for i, ln in enumerate(lines))
+            sys.stdout.write("\n" + body + "\n"); sys.stdout.flush(); return
+        try:
+            from prompt_toolkit.utils import get_cwidth
+            dw = lambda s: sum(get_cwidth(c) for c in s)   # noqa: E731
+        except Exception:
+            dw = len
+        import shutil
+        width = max(20, shutil.get_terminal_size((80, 24)).columns)
+        BG, MK, FG, X = "\033[48;5;236m", "\033[38;5;45m", "\033[38;5;252m", "\033[0m"
+        sys.stdout.write("\n")   # 与上文留一空行
+        for i, ln in enumerate(lines):
+            head = f"{MK}> {FG}" if i == 0 else f"{FG}  "   # 首行 > 标记，续行缩进对齐
+            pad = " " * max(0, width - 2 - dw(ln))
+            sys.stdout.write(f"{BG}{head}{ln}{pad}{X}\n")
+        sys.stdout.write("\n")   # 指令带与回答之间留白
         sys.stdout.flush()
 
     def read(self, plain_prompt: str = "❯ ") -> object:
