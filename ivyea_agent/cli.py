@@ -1309,18 +1309,23 @@ def _plan_mode_intent(line: str) -> str | None:
     return None
 
 
-def _print_welcome_box(lines: list, width: int = 58) -> None:
-    """Claude Code 风格圆角欢迎框（按显示宽度对齐中英文混排）。"""
+def _welcome_box_str(lines: list, width: int = 58) -> str:
+    """Claude Code 风格圆角欢迎框（按显示宽度对齐中英文混排），返回字符串。"""
     try:
         from prompt_toolkit.utils import get_cwidth
     except Exception:
         def get_cwidth(ch): return 1
     inner, cy, x = width - 2, _C["c"], _C["x"]
-    print(f"{cy}╭{'─' * inner}╮{x}")
+    out = [f"{cy}╭{'─' * inner}╮{x}"]
     for ln in lines:
         w = sum(get_cwidth(ch) for ch in _strip_ansi(ln))
-        print(f"{cy}│{x} {ln}{' ' * max(0, inner - 1 - w)}{cy}│{x}")
-    print(f"{cy}╰{'─' * inner}╯{x}")
+        out.append(f"{cy}│{x} {ln}{' ' * max(0, inner - 1 - w)}{cy}│{x}")
+    out.append(f"{cy}╰{'─' * inner}╯{x}")
+    return "\n".join(out)
+
+
+def _print_welcome_box(lines: list, width: int = 58) -> None:
+    print(_welcome_box_str(lines, width))
 
 
 def _cmd_chat(args: argparse.Namespace) -> int:
@@ -1401,20 +1406,26 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         _n_mcp = len(cfg.load_mcp().get("mcpServers", {}))
     except Exception:
         _n_tools = _n_skills = _n_mcp = 0
-    print(f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}")
-    _print_welcome_box([
+    _welcome_lines = [
         f"{_C['c']}✻{_C['x']} {_C['b']}亚马逊运营 Agent{_C['x']} · 规则引擎+LLM复核+审核制执行 · 自托管",
         f"{_C['d']}主脑 {_label()}（{keyst}）· 执行 {mode}{_C['x']}",
         f"{_C['d']}{_n_tools} 工具 · {_n_skills} skills · {_n_mcp} MCP · 会话 {(sid or '新')[:8]}{_C['x']}",
         f"{_C['d']}/ 命令 · ↑↓+Enter 选择 · Alt+Enter 换行 · /exit 退出{_C['x']}",
-    ], width=64)
-    print()
-
-    # 主脑健康探测（本地，不发网络）：凭据过期/未配时醒目提示并指明出路，避免“开箱即坏”。
+    ]
+    from . import chat_tui as _chat_tui
+    _tui_on = _chat_tui.tui_enabled()
     _health = cfg.main_brain_health()
-    if not _health.get("ok"):
-        print(ui.message("warn", _health.get("hint", "主脑不可用，请用 /model 切换。")))
+    _health_msg = "" if _health.get("ok") else ui.message("warn", _health.get("hint", "主脑不可用，请用 /model 切换。"))
+    # TUI 模式：banner+欢迎框作为 transcript 首块（打印会被 alt-screen 清掉）；行式则直接打印。
+    _intro = f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}\n" + _welcome_box_str(_welcome_lines, width=64)
+    if _health_msg:
+        _intro += "\n" + _health_msg
+    if not _tui_on:
+        print(f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}")
+        _print_welcome_box(_welcome_lines, width=64)
         print()
+        if _health_msg:
+            print(_health_msg + "\n")
 
     from . import chat_input
 
@@ -1692,13 +1703,12 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         out["blocked"] = False
         return out
 
-    from . import chat_tui
-    if chat_tui.tui_enabled():   # IVYEA_TUI=1 全屏 TUI（分阶段构建）；否则走下面的行式循环
-        return chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
-                            render_markdown=markdown.render,
-                            plan_intent_fn=_plan_mode_intent,
-                            set_plan_mode=_set_plan_mode_msg,
-                            cycle_mode=_cycle_mode)
+    if _tui_on:                  # 全屏 TUI（默认；IVYEA_TUI=0 走下面的行式循环）
+        return _chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
+                             render_markdown=markdown.render,
+                             plan_intent_fn=_plan_mode_intent,
+                             set_plan_mode=_set_plan_mode_msg,
+                             cycle_mode=_cycle_mode, intro=_intro)
 
     while True:
         line = ci.read("❯ ")

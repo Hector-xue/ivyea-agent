@@ -59,9 +59,8 @@ def _run_headless(keys: str, status="  ivyea · GPT-5.5 · dry-run "):
 def test_skeleton_sticky_header_and_clean_exit():
     rc, vis = _run_headless("排查任务\r/exit\r")
     assert rc == 0                                   # /exit 干净退出
-    assert "当前指令：排查任务" in vis               # sticky 头部显示最近指令
+    assert "当前指令：排查任务" in vis               # sticky 头部显示最近指令（不再 transcript 重复回显）
     assert "GPT-5.5" in vis                          # footer 显示 status
-    assert "❯ 排查任务" in vis                       # transcript 回显
 
 
 def test_skeleton_ctrl_c_exits():
@@ -90,7 +89,7 @@ def test_turn_streams_and_interleaves_tool_lines():
     assert tui.instruction == "改 greet.py"          # sticky 头部指令
     assert tui.live is None                           # 流式已定稿
     plain = _plain("\n".join(tui.blocks))
-    assert "❯ 改 greet.py" in plain                   # 用户回显
+    assert tui.instruction == "改 greet.py"           # 指令在头部（不再 transcript 回显）
     assert "你好" in plain and "，世界" in plain      # 两段流式文本
     # Claude 式交错：文本 → 工具行 → 继续文本
     assert plain.index("你好") < plain.index("⏺ 读取文件") < plain.index("，世界")
@@ -148,7 +147,8 @@ def test_tui_queue_auto_continues():
     tui.queued = ["第二条"]
     tui._finish({"text": "第一条 done"})    # 结束首轮 → 自动跑排队的下一条
     _wait_idle(tui)
-    assert "❯ 第二条" in _plain("\n".join(tui.blocks))
+    assert tui.instruction == "第二条"                       # 队列已自动继续到第二条
+    assert "答:第二条" in _plain("\n".join(tui.blocks))      # 第二条的回复已渲染
 
 
 # ---- P3 审批 marshal 到 TUI ----
