@@ -1629,9 +1629,69 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         "/workspace": _sh_embedded, "/patch": _sh_embedded, "/gitops": _sh_embedded,
     }
 
+    def _execute_turn(line, render, narrate):
+        """跑一轮对话，输出经 render(token)/narrate(行) 注入 —— 供 TUI 复用（行式循环仍走下方原逻辑）。
+        返回 {text, usage, blocked}。会更新 messages/meter/记忆/上下文压缩。"""
+        nonlocal messages
+        api_key = cfg.get_active_key()
+        cms = cfg.load_settings()
+        if (cms.get("kind") in ("native", "oauth", "login")
+                and cms.get("api_mode") not in ("gemini_native", "gemini_code_assist", "bedrock_converse", "copilot_chat_completions", "codex_responses")):
+            narrate(ui.message("warn", "当前 provider 需原生/OAuth transport，尚未接入。请用 /model 切换。"))
+            return {"text": "", "usage": {}, "blocked": True}
+        if _model_needs_key(cms) and not api_key:
+            narrate(ui.message("warn", f"未配置主脑模型 key（{cms.get('key_env')}）。用 /model 配置。"))
+            return {"text": "", "usage": {}, "blocked": True}
+        _lim = pricing.daily_limit()
+        if _lim > 0 and pricing.today_spend() >= _lim:
+            narrate(ui.message("warn", f"今日已花 ¥{pricing.today_spend():.2f} 达上限 ¥{_lim:.2f}，已暂停。"))
+            return {"text": "", "usage": {}, "blocked": True}
+        from . import engineering_context, knowledge, skills
+        ectx = engineering_context.build(os.getcwd(), line)
+        _inject = bool(getattr(ctx, "asin", "")) or _is_amazon_domain(line) or not _looks_like_code_task(line)
+        kctx, kids = knowledge.context_for_query(line, limit=3) if _inject else ("", [])
+        sctx, sids = skills.context_for_query(line, limit=2) if _inject else ("", [])
+        user_content = line
+        if ectx:
+            user_content += "\n\n[工程上下文]\n" + ectx
+            narrate(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))
+        if sctx:
+            user_content += ("\n\n[Ivyea Skill：本轮相关可复用流程]\n" + sctx
+                             + "\n\n要求：优先按 skill workflow 组织执行步骤；涉及事实依据时再结合知识库。")
+            narrate(ui.message("muted", "已注入 skill: " + ", ".join(sids)))
+        if kctx:
+            user_content += ("\n\n[Ivyea 内置亚马逊知识库：本轮相关摘录]\n" + kctx
+                             + "\n\n要求：使用这些知识时说明依据，若与用户账户记忆冲突，以用户账户记忆为准。")
+            narrate(ui.message("muted", "已注入知识卡: " + ", ".join(kids)))
+        import time as _tt
+        ctx.turn_id = _tt.strftime("%Y%m%d-%H%M%S")
+        from . import hooks as _hooks
+        _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
+        messages[0] = _sys_msg()
+        messages.append({"role": "user", "content": user_content})
+        mcfg = cfg.get_model_config()
+        provider = build_chain(mcfg, api_key, narrate=narrate)
+        ctx.provider = provider
+        out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""),
+                                         render=render, narrate=narrate)
+        c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
+        _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
+        if c:
+            pricing.add_spend(c)
+        memory.index_turn("user", line, sid)
+        memory.index_turn("assistant", out.get("text", ""), sid)
+        if ctx_mod.should_compact(int((out.get("usage") or {}).get("prompt_tokens") or 0)):
+            messages, _s = ctx_mod.compact(messages, provider)
+            if _s:
+                memory.remember_summary(_s, sid)
+                narrate(ui.message("info", "上下文较长，已自动压缩并入库摘要以省 token"))
+        out["blocked"] = False
+        return out
+
     from . import chat_tui
     if chat_tui.tui_enabled():   # IVYEA_TUI=1 全屏 TUI（分阶段构建）；否则走下面的行式循环
-        return chat_tui.run(_status, SLASH_COMMANDS)
+        return chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
+                            render_markdown=markdown.render)
 
     while True:
         line = ci.read("❯ ")

@@ -1,18 +1,25 @@
 """全屏 TUI 聊天界面（对标 Claude Code）。
 
-分阶段构建（见计划）。P0：骨架——固定头部（当前指令置顶）+ 可滚动 transcript
-+ 常驻底部输入框，能渲染与干净退出。完整对话闭环、流式、审批在后续阶段接入。
+分阶段构建（见计划）。
+- P0：骨架（头部/transcript/输入）。
+- P1：核心闭环——提交回显 + sticky 头部 + 后台线程跑一轮 + 助手文本/工具行
+  线程安全 marshal 进 transcript + 状态行 spinner + 贴底跟随/上滚查看。
 
-启用：TTY + IVYEA_TUI=1（opt-in）。非 TTY / 未开 / 依赖缺失时 `tui_enabled()`
-返回 False，调用方回退到现有行式 CLI。
+启用：TTY + IVYEA_TUI=1（opt-in）。非 TTY / 未开 / 依赖缺失 → tui_enabled()
+False，调用方回退现有行式 CLI。审批/补全/中断等见后续阶段。
 """
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import sys
+import threading
+import time
 from typing import Callable
 
 _TRUTHY = ("1", "true", "on", "yes")
+_SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 def tui_enabled() -> bool:
@@ -28,78 +35,190 @@ def tui_enabled() -> bool:
     return True
 
 
-def _style():
-    from prompt_toolkit.styles import Style
-    return Style.from_dict({
-        "hdr": "bold ansicyan",
-        "rule": "ansibrightblack",
-        "ftr": "noreverse ansibrightblack",
-        "prompt": "ansicyan bold",
-        "wip": "ansibrightblack",
-    })
+def _visual_lines(text: str, width: int) -> list[str]:
+    """把（可能含 ANSI 的）文本按显示宽度粗略拆成物理行，用于贴底裁剪。"""
+    from prompt_toolkit.utils import get_cwidth
+    out: list[str] = []
+    for logical in text.split("\n"):
+        plain = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", logical)
+        if get_cwidth(plain) <= width or width <= 0:
+            out.append(logical)
+            continue
+        # 超宽行按显示宽度切（保留原行；仅用于行数估算，颜色可能在切点断，够用）
+        cur, w = "", 0
+        for ch in logical:
+            cw = get_cwidth(ch) if not ch.startswith("\x1b") else 0
+            if w + cw > width:
+                out.append(cur); cur, w = ch, cw
+            else:
+                cur += ch; w += cw
+        out.append(cur)
+    return out
 
 
-def run(status_fn: Callable[[], str], slash_commands: list) -> int:
-    """P0 骨架 TUI。返回退出码（供 _cmd_chat 直接 return）。
+class ChatTUI:
+    """一次 TUI 会话的状态与渲染。turn_fn(line, render, narrate)->dict 跑真正一轮。"""
 
-    后续阶段会把 transcript 模型、后台跑轮、流式 marshal、审批浮层挂进来；
-    P0 只验证全屏外壳（头部/transcript/输入）能渲染并干净退出。
-    """
-    from prompt_toolkit.application import Application
-    from prompt_toolkit.layout import Layout
-    from prompt_toolkit.layout.containers import HSplit, Window
-    from prompt_toolkit.layout.controls import FormattedTextControl
-    from prompt_toolkit.widgets import TextArea
-    from prompt_toolkit.key_binding import KeyBindings
+    def __init__(self, *, status_fn: Callable[[], str], turn_fn: Callable[..., dict],
+                 render_markdown: Callable[[str], str] | None = None):
+        self.status_fn = status_fn
+        self.turn_fn = turn_fn
+        self._md = render_markdown or (lambda s: s)
+        self.instruction = ""
+        self.blocks: list[str] = []          # 已定稿 block（可含 ANSI）
+        self.live: str | None = None         # 当前流式助手文本（未定稿）
+        self.running = False
+        self.scroll = 0                       # 距底部的物理行数；0=贴底跟随
+        self.started = 0.0
+        self.app = None
 
-    state = {
-        "instruction": "",
-        "lines": ["（P0 骨架：完整对话将在后续阶段接入。输入 /exit 退出。）"],
-    }
-
-    def header_text():
-        instr = state["instruction"] or "（还没有指令）"
-        return [("class:hdr", f" ▶ 当前指令：{instr}")]
-
-    def body_text():
-        return [("class:wip", "\n".join(state["lines"]))]
-
-    def footer_text():
-        return [("class:ftr", " " + (status_fn() or ""))]
-
-    ta = TextArea(prompt=[("class:prompt", "❯ ")], multiline=False, height=1)
-    root = HSplit([
-        Window(FormattedTextControl(header_text), height=1, style="class:hdr"),
-        Window(height=1, char="─", style="class:rule"),
-        Window(FormattedTextControl(body_text), wrap_lines=True),   # transcript（P1 起可滚动）
-        Window(height=1, char="─", style="class:rule"),
-        Window(FormattedTextControl(footer_text), height=1, style="class:ftr"),
-        ta,
-    ])
-
-    kb = KeyBindings()
-
-    @kb.add("c-c")
-    @kb.add("c-d")
-    def _(event):
-        event.app.exit(result=0)
-
-    @kb.add("enter")
-    def _(event):
-        text = ta.text.strip()
-        ta.text = ""
-        if text in ("/exit", "/quit"):
-            event.app.exit(result=0)
+    # ---- 供后台线程调用的输出回调（线程安全：仅追加 + invalidate）----
+    def render(self, token: str = "") -> None:
+        if not token:
             return
-        if text:
-            state["instruction"] = text
-            state["lines"].append(f"❯ {text}")
-            state["lines"].append("（P0：对话闭环尚未接入，见 P1）")
+        self.live = (self.live or "") + token
+        self._invalidate()
 
-    app = Application(
-        layout=Layout(root, focused_element=ta),
-        key_bindings=kb, style=_style(),
-        full_screen=True, mouse_support=True,
-    )
-    app.run()
+    def narrate(self, text: str = "") -> None:
+        text = str(text or "")
+        if not text.strip():
+            return
+        self._commit_live()          # 工具行/提示打断当前流式文本，先定稿
+        self.blocks.append(text)
+        self._invalidate()
+
+    def _commit_live(self) -> None:
+        if self.live is not None:
+            body = self.live.strip()
+            if body:
+                self.blocks.append("● " + self._md(body))   # 文本段收尾渲染 markdown
+            self.live = None
+
+    def _invalidate(self) -> None:
+        app = self.app
+        if app is not None:
+            try:
+                app.invalidate()
+            except Exception:
+                pass
+
+    def _body_ansi(self):
+        from prompt_toolkit.formatted_text import ANSI
+        parts = list(self.blocks)
+        if self.live is not None:
+            parts.append("\033[2m" + self.live + "\033[0m")   # 流式中 dim 显示原文
+        text = "\n\n".join(p for p in parts if p) or "（开始对话吧。输入 /exit 退出。）"
+        width = shutil.get_terminal_size((100, 30)).columns
+        rows = shutil.get_terminal_size((100, 30)).lines
+        avail = max(3, rows - 5)                  # 头部+两条分隔+footer+输入 约 5 行
+        lines = _visual_lines(text, width)
+        if len(lines) > avail:
+            end = len(lines) - self.scroll
+            end = max(avail, min(end, len(lines)))
+            lines = lines[end - avail:end]
+        return ANSI("\n".join(lines))
+
+    def _header(self):
+        instr = self.instruction or "（还没有指令）"
+        tail = "  ⟳ 运行中" if self.running else ""
+        return [("class:hdr", f" ▶ 当前指令：{instr}{tail}")]
+
+    def _footer(self):
+        base = self.status_fn() or ""
+        if self.running:
+            frame = _SPIN[int((time.time() - self.started) * 10) % len(_SPIN)]
+            secs = int(time.time() - self.started)
+            return [("class:run", f" {frame} 生成中 {secs}s · Esc 稍后接入中断"), ("class:ftr", " · " + base)]
+        return [("class:ftr", " " + base)]
+
+    def _start_turn(self, line: str) -> None:
+        self.instruction = line
+        self.blocks.append(f"\033[36m❯\033[0m {line}")
+        self.scroll = 0
+        self.running = True
+        self.started = time.time()
+
+        def _worker():
+            try:
+                out = self.turn_fn(line, self.render, self.narrate)
+            except Exception as e:   # noqa: BLE001
+                out = {"text": "", "error": str(e)}
+            self._finish(out)
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self._invalidate()
+
+    def _finish(self, out: dict) -> None:
+        self._commit_live()
+        err = out.get("error")
+        if err:
+            self.blocks.append(f"\033[31m✗ 出错：{err}\033[0m")
+        self.running = False
+        self.scroll = 0
+        self._invalidate()
+
+    def build_app(self):
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.layout import Layout
+        from prompt_toolkit.layout.containers import HSplit, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.widgets import TextArea
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.styles import Style
+
+        ta = TextArea(prompt=[("class:prompt", "❯ ")], multiline=False, height=1)
+        root = HSplit([
+            Window(FormattedTextControl(self._header), height=1, style="class:hdr"),
+            Window(height=1, char="─", style="class:rule"),
+            Window(FormattedTextControl(self._body_ansi), wrap_lines=True),
+            Window(height=1, char="─", style="class:rule"),
+            Window(FormattedTextControl(self._footer), height=1),
+            ta,
+        ])
+        kb = KeyBindings()
+
+        @kb.add("c-c")
+        @kb.add("c-d")
+        def _(event):
+            event.app.exit(result=0)
+
+        @kb.add("enter")
+        def _(event):
+            if self.running:      # P1：运行中先忽略输入（中断/排队见 P2）
+                return
+            text = ta.text.strip()
+            ta.text = ""
+            if text in ("/exit", "/quit"):
+                event.app.exit(result=0)
+                return
+            if text:
+                self._start_turn(text)
+
+        @kb.add("pageup")
+        def _(event):
+            self.scroll += 5
+
+        @kb.add("pagedown")
+        def _(event):
+            self.scroll = max(0, self.scroll - 5)
+
+        style = Style.from_dict({
+            "hdr": "bold ansicyan", "rule": "ansibrightblack",
+            "ftr": "noreverse ansibrightblack", "run": "ansiyellow",
+            "prompt": "ansicyan bold",
+        })
+        self.app = Application(
+            layout=Layout(root, focused_element=ta), key_bindings=kb, style=style,
+            full_screen=True, mouse_support=True, refresh_interval=0.2,
+        )
+        return self.app
+
+
+def run(status_fn: Callable[[], str], slash_commands: list,
+        turn_fn: Callable[..., dict] | None = None,
+        render_markdown: Callable[[str], str] | None = None) -> int:
+    """启动 TUI 会话。turn_fn(line, render, narrate)->dict 跑真正一轮。"""
+    tui = ChatTUI(status_fn=status_fn, turn_fn=turn_fn or (lambda *a, **k: {"text": ""}),
+                  render_markdown=render_markdown)
+    tui.build_app().run()
     return 0
