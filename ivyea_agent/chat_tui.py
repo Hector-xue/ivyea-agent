@@ -66,7 +66,8 @@ class ChatTUI:
                  slash_commands: list | None = None,
                  plan_intent_fn: Callable[[str], str] | None = None,
                  set_plan_mode: Callable[[bool], str] | None = None,
-                 cycle_mode: Callable[[], str] | None = None):
+                 cycle_mode: Callable[[], str] | None = None,
+                 intro: str | None = None):
         self.status_fn = status_fn
         self.turn_fn = turn_fn
         self._md = render_markdown or (lambda s: s)
@@ -75,7 +76,7 @@ class ChatTUI:
         self._set_plan = set_plan_mode        # (on)->msg 或 None
         self._cycle = cycle_mode              # ()->label 或 None
         self.instruction = ""
-        self.blocks: list[str] = []          # 已定稿 block（可含 ANSI）
+        self.blocks: list[str] = [intro] if intro else []   # banner+欢迎框作首块
         self.live: str | None = None         # 当前流式助手文本（未定稿）
         self.running = False
         self.cancel_requested = False        # Esc/Ctrl-C 请求中断当前轮
@@ -216,8 +217,7 @@ class ChatTUI:
         return [("class:ftr", " " + base)]
 
     def _start_turn(self, line: str) -> None:
-        self.instruction = line
-        self.blocks.append(f"\033[36m❯\033[0m {line}")
+        self.instruction = line               # 头部固定显示当前指令；不再在 transcript 里重复回显
         self.scroll = 0
         self.running = True
         self.cancel_requested = False
@@ -289,8 +289,9 @@ class ChatTUI:
             Window(FormattedTextControl(self._header), height=1, style="class:hdr"),
             Window(height=1, char="─", style="class:rule"),
             Window(FormattedTextControl(self._body_ansi), wrap_lines=True),   # transcript
-            ta,                                                              # 输入框（紧贴 transcript 下方）
-            Window(height=1, char="─", style="class:rule"),                  # 分隔线
+            Window(height=1, char="─", style="class:rule"),                  # 输入框上边线
+            ta,                                                              # 输入框（上下有线，像个框）
+            Window(height=1, char="─", style="class:rule"),                  # 输入框下边线
             Window(FormattedTextControl(self._footer), height=1),            # 状态栏（最底部）
         ])
         kb = KeyBindings()
@@ -394,11 +395,13 @@ def run(status_fn: Callable[[], str], slash_commands: list,
         render_markdown: Callable[[str], str] | None = None,
         plan_intent_fn: Callable[[str], str] | None = None,
         set_plan_mode: Callable[[bool], str] | None = None,
-        cycle_mode: Callable[[], str] | None = None) -> int:
+        cycle_mode: Callable[[], str] | None = None,
+        intro: str | None = None) -> int:
     """启动 TUI 会话。turn_fn(line, render, narrate)->dict 跑真正一轮。"""
     tui = ChatTUI(status_fn=status_fn, turn_fn=turn_fn or (lambda *a, **k: {"text": ""}),
                   render_markdown=render_markdown, slash_commands=slash_commands,
-                  plan_intent_fn=plan_intent_fn, set_plan_mode=set_plan_mode, cycle_mode=cycle_mode)
+                  plan_intent_fn=plan_intent_fn, set_plan_mode=set_plan_mode, cycle_mode=cycle_mode,
+                  intro=intro)
     from . import tui as _tui_mod
     _tui_mod.set_active_selector(tui._approve)   # 工具线程的审批 marshal 回本 app
     try:
