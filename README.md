@@ -9,7 +9,7 @@
 - 门户网站：`https://agent.ivyea.com`（静态站点源码在 `site/`）
 - 完整部署指南：[docs/部署指南.md](docs/部署指南.md)
 - 操作文档：[docs/使用与操作文档.md](docs/使用与操作文档.md)
-- 最新 Release：`v1.0.31`（main 分支可能包含尚未打包的新改动）
+- 最新 Release：`v1.0.32`（main 分支可能包含尚未打包的新改动）
 
 ## 三分钟安装
 
@@ -32,11 +32,11 @@ ivyea chat
 固定版本安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v1.0.31 bash
+curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v1.0.32 bash
 ```
 
 ```powershell
-$env:IVYEA_VERSION="v1.0.31"
+$env:IVYEA_VERSION="v1.0.32"
 iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
