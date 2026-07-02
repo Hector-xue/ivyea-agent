@@ -1426,21 +1426,21 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         f"{_C['d']}{_n_tools} 工具 · {_n_skills} skills · {_n_mcp} MCP · 会话 {(sid or '新')[:8]}{_C['x']}",
         f"{_C['d']}/ 命令 · ↑↓+Enter 选择 · Alt+Enter 换行 · /exit 退出{_C['x']}",
     ]
-    from . import chat_tui as _chat_tui
-    _tui_on = _chat_tui.tui_enabled()   # IVYEA_TUI=1 → 全屏 alt-screen
-    # 常驻底部 app（滚动缓冲区）为**默认**：输入框钉底、生成中也在，保留原生滚轮/复制（对标
-    # Claude/Ink）。IVYEA_PLAIN=1 退回旧行式循环；非 TTY / prompt_toolkit 不可用也退回。
-    def _live_default() -> bool:
-        if _tui_on or not (sys.stdin.isatty() and sys.stdout.isatty()):
-            return False
-        if os.environ.get("IVYEA_PLAIN", "").strip().lower() in ("1", "true", "on", "yes"):
-            return False
+    from . import chat_tui as _chat_tui  # noqa: F401
+    # 聊天界面三态：**默认全屏 alt-screen TUI**（输入框彻底钉死、翻历史也在，用户选定）；
+    # IVYEA_LIVE=1 或 IVYEA_TUI=0 → 滚动区常驻底部 app（原生滚轮/复制，输入框仅生成中固定）；
+    # IVYEA_PLAIN=1 / 非 TTY / prompt_toolkit 不可用 → 旧行式循环。
+    _env = lambda k: os.environ.get(k, "").strip().lower()   # noqa: E731
+    _tty_ok = sys.stdin.isatty() and sys.stdout.isatty()
+    if _tty_ok:
         try:
             import prompt_toolkit  # noqa: F401
         except Exception:
-            return False
-        return True
-    _live_on = _live_default()
+            _tty_ok = False
+    _plain = (_env("IVYEA_PLAIN") in ("1", "true", "on", "yes")) or not _tty_ok
+    _live_on = (not _plain) and (_env("IVYEA_LIVE") in ("1", "true", "on", "yes")
+                                 or _env("IVYEA_TUI") in ("0", "false", "off", "no"))
+    _tui_on = (not _plain) and (not _live_on)   # 默认 alt-screen
     _health = cfg.main_brain_health()
     _health_msg = "" if _health.get("ok") else ui.message("warn", _health.get("hint", "主脑不可用，请用 /model 切换。"))
     # TUI 模式：banner+欢迎框作为 transcript 首块（打印会被 alt-screen 清掉）；行式则直接打印。
