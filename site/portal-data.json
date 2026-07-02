@@ -1,6 +1,6 @@
 {
-  "version": "v1.1.2",
-  "generated_at": "2026-07-02T06:15:56+00:00",
+  "version": "v1.1.3",
+  "generated_at": "2026-07-02T06:30:43+00:00",
   "sources": [
     "README.md",
     "docs/部署指南.md",
@@ -11,7 +11,7 @@
     "ivyea config",
     "ivyea chat",
     "iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex",
-    "curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v1.1.1 bash",
+    "curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v1.1.2 bash",
     "ivyea serve --host 127.0.0.1 --port 8765",
     "ivyea self ops-bootstrap",
     "curl -s http://127.0.0.1:8765/v1/chat \\",
