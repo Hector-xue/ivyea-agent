@@ -1197,6 +1197,7 @@ SLASH_COMMANDS = [
     ("/gitops", "Git 工作流：/gitops status|diff|stage|commit|tag"),
     ("/diff", "看工作区改动的彩色 diff（/diff staged 看暂存区）"),
     ("/memory", "记忆：状态/最近巡检；/memory <词> 检索"),
+    ("/profile", "查看/配置运营画像（目标 ACoS/保护词/核心词）"),
     ("/plan", "进入/退出计划模式（只读，不写入）"),
     ("/approve", "批准并退出计划模式，继续执行"),
     ("/cost", "本会话 token 用量与成本估算"),
@@ -1337,11 +1338,52 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
     _oneshot = bool(getattr(args, "print_prompt", None))   # -p 非交互一次性（不打 banner/欢迎/更新提示）
 
-    # 首次运行：无配置 → 先走引导
+    def _profile_configured() -> bool:
+        from . import profiles
+        p = profiles.get("default")
+        return p.get("target_acos") is not None or bool(p.get("protected_terms")) or bool(p.get("core_terms"))
+
+    def _onboard_profile() -> None:
+        """运营画像引导 wizard：设目标 ACoS / 保护词 / 核心词，广告诊断据此判断否词/调价/护栏。
+        用 input()，仅在 chat 循环启动前调用（此时无 TUI，input 安全）。"""
+        from . import profiles
+        try:
+            print(f"{_C['b']}配置运营画像{_C['x']}{_C['d']}（每项可直接回车跳过；之后 /profile 或 `ivyea profile set` 重配）{_C['x']}")
+            acos = input("  目标 ACoS（如 0.3=30%，留空按毛利率自动推）: ").strip()
+            protected = input("  保护词（绝不否定，如 品牌词,核心品类词）: ").strip()
+            core = input("  核心词（重点关注，逗号分隔）: ").strip()
+            site = input("  站点（US/UK/DE…，默认 US）: ").strip().upper()
+        except (EOFError, KeyboardInterrupt):
+            print(); return
+        fields: dict = {}
+        if acos:
+            try:
+                fields["target_acos"] = float(acos)
+            except ValueError:
+                pass
+        if protected:
+            fields["protected_terms"] = [w.strip() for w in protected.split(",") if w.strip()]
+        if core:
+            fields["core_terms"] = [w.strip() for w in core.split(",") if w.strip()]
+        if site:
+            fields["site"] = site
+        if fields:
+            profiles.update("default", **fields)
+            print(ui.message("success", "已保存运营画像，广告诊断会据此判断否词/调价/护栏。"))
+        else:
+            print(f"{_C['d']}（未填，跳过；之后可 /profile 配置）{_C['x']}")
+
+    # 首次运行：无配置 → 先走引导（模型 + 运营画像）
     if not _oneshot and not cfg.SETTINGS_FILE.exists() and not cfg.get_active_key() and sys.stdin.isatty():
         print(f"{_C['d']}（检测到首次运行，先带你配置）{_C['x']}")
         _cmd_onboard(args)
         print()
+        _onboard_profile()
+        print()
+    # 已配模型但没配运营画像：给一行非阻塞提示（不每次弹 wizard，避免打扰）
+    elif not _oneshot and sys.stdin.isatty() and not _profile_configured():
+        print(f"{_C['d']}提示：还没配运营画像（目标 ACoS/保护词），广告诊断会更准 → 输入 /profile 查看，或 "
+              f"`ivyea profile set default --target-acos 0.3 --protected 品牌词`{_C['x']}")
 
     def _label() -> str:
         s = cfg.load_settings()
@@ -1366,6 +1408,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             cp = None
         _checkpoints.append({"n": len(_checkpoints) + 1, "msg_len": len(messages),
                              "cp": cp, "label": (line or "")[:50]})
+    memory.sync_markdown_index()                           # 策展 markdown → FTS，修手改/重装漂移
     instructions = memory.load_instructions(os.getcwd())   # USER.md/AGENTS.md 持久指令
     profile_key = getattr(args, "asin", None) or "default"
     profile_context = profiles.context_text(profiles.resolve(asin=getattr(args, "asin", "") or ""), label=profile_key)
@@ -1748,8 +1791,16 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         _persist()
         print(ui.message("success", f"已回退到 #{c['n']} 之前（对话截断 + 文件恢复）。")); return True
 
+    def _sh_profile(line):
+        from . import profiles
+        print(profiles.render(profiles.get("default"), "default"))
+        if not _profile_configured():
+            print(ui.message("muted", "未配置。示例：`ivyea profile set default --target-acos 0.3 "
+                             "--protected 品牌词,核心品类词 --core 主关键词`（配了广告诊断更准）"))
+        return True
+
     _SLASH_HANDLERS = {
-        "/help": _sh_help, "/": _sh_help, "/?": _sh_help,
+        "/help": _sh_help, "/": _sh_help, "/?": _sh_help, "/profile": _sh_profile,
         "/clear": _sh_clear, "/plan": _sh_plan, "/approve": _sh_approve, "/cost": _sh_cost,
         "/raw": _sh_raw, "/stream": _sh_stream, "/auto-edit": _sh_auto_edit, "/compact": _sh_compact,
         "/diff": _sh_diff, "/init": _sh_init, "/mcp": _sh_mcp, "/knowledge": _sh_knowledge,
@@ -1828,10 +1879,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     if _oneshot:                 # 非交互一次性（-p）：跑一轮该提示 → 结果打到 stdout → 退出
         if getattr(args, "approve_all", False):
             ctx.perm.accept_edits = True       # 无人值守：自动放行写/执行工具
-        _out = _execute_turn(args.print_prompt, lambda t: None, lambda s: None)
+        # --progress：把步骤进度(工具/阶段/注入/todo)打到 stderr，最终答案仍只走 stdout。默认关，
+        # 因为部分调用方(如 IvyeaOps ad_audit 用 stderr=STDOUT)会把 stderr 并入捕获结果——不带
+        # --progress 时保持完全静默、stdout 纯净。人手动跑时加 --progress 即可看到进度。
+        _show_progress = bool(getattr(args, "progress", False))
+        _narrate = (lambda s: print(s, file=sys.stderr, flush=True)) if _show_progress else (lambda s: None)
+        _out = _execute_turn(args.print_prompt, lambda t: None, _narrate)
         if _out.get("blocked"):
             print(ui.message("error", "未配置主脑模型或额度不可用，无法运行。"), file=sys.stderr)
             return 1
+        if _show_progress and _out.get("todos_panel"):
+            print(_out["todos_panel"], file=sys.stderr, flush=True)
         _txt = (_out.get("text") or "").strip()
         print(markdown.render(_txt) if render_md else _txt)
         return 0
@@ -3450,6 +3508,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="非交互一次性：跑一轮该提示、把结果打到 stdout 后退出（供 IvyeaOps 等做 runner）")
     pch.add_argument("--approve-all", action="store_true",
                      help="一次性模式下自动放行写/执行工具（无人值守；配合 -p 用）")
+    pch.add_argument("--progress", action="store_true",
+                     help="-p 模式下把步骤进度(工具调用/阶段/todo)打到 stderr（stdout 仍只放最终结果；"
+                          "默认关，因部分调用方会把 stderr 并入 stdout）")
     pch.set_defaults(func=_cmd_chat)
     return p
 
