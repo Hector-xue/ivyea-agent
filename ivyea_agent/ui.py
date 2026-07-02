@@ -186,6 +186,7 @@ _TOOL_VERBS = {
     "list_dir": "列目录", "glob": "查找文件",
     "grep": "搜索内容", "search_code": "搜索代码", "code_search": "搜索代码",
     "run_command": "执行命令", "run_python": "执行 Python", "run_tests": "运行测试",
+    "bash_output": "查看后台输出", "kill_bash": "终止后台任务",
     "web_search": "联网搜索", "web_fetch": "抓取网页",
     "knowledge_search": "查知识库", "skill_search": "查 skill", "recall": "回忆记忆",
     "todo_write": "更新计划",
