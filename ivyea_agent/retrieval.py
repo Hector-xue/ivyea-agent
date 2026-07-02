@@ -198,7 +198,53 @@ def _memory_hits(query: str, limit: int) -> list[dict[str, Any]]:
             "asin": row.get("asin", ""),
             "ts": row.get("ts"),
         })
+    # 兜底：直接搜策展 markdown 文件本身（MEMORY.md / account/*.md）。FTS 索引只包含经 remember()
+    # 写入的条目，用户手改 MEMORY.md、或重装后 memory.db 丢失而 markdown 仍在时，索引里没有但文件里
+    # 明明有——这一步以文件为真相，保证这些内容也能被回忆到（曾出现"文件里有、recall 却说没有"）。
+    for h in _memory_md_hits(query, limit):
+        if not any(h["snippet"][:120] == e.get("snippet", "")[:120] for e in hits):
+            hits.append(h)
     return hits
+
+
+def _memory_md_hits(query: str, limit: int) -> list[dict[str, Any]]:
+    """直接对策展 markdown 文件做词项匹配（不经 FTS 索引）。按空行分段，保留数据库连接串/schema
+    这类多行块的完整上下文。"""
+    terms = [t.lower() for t in re.findall(r"[\w一-鿿+.-]+", query) if len(t) >= 2]
+    if not terms:
+        return []
+    mem_md = memory.note_path("")          # ~/.ivyea/MEMORY.md
+    paths = [mem_md]
+    acc_dir = mem_md.parent / "account"
+    try:
+        if acc_dir.exists():
+            paths.extend(sorted(acc_dir.glob("*.md")))
+    except Exception:
+        pass
+    hits: list[dict[str, Any]] = []
+    for p in paths:
+        try:
+            text = p.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        is_acc = p.parent.name == "account"
+        for j, block in enumerate(b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()):
+            low = block.lower()
+            matched = [t for t in terms if t in low]
+            if not matched:
+                continue
+            hits.append({
+                "source": "memory",
+                "id": f"memory_md:{p.stem}:{j}",
+                "title": p.stem if is_acc else "MEMORY.md",
+                "snippet": block[:600],
+                "score": 26 + min(40, len(matched) * 12),
+                "asin": p.stem if is_acc else "",
+                "ts": None,
+                "match": matched,
+            })
+    hits.sort(key=lambda h: h["score"], reverse=True)
+    return hits[:limit]
 
 
 def _memory_score(query: str, text: str, rank: int) -> int:

@@ -183,6 +183,23 @@ def instruction_paths(cwd: str = "") -> list:
     return paths
 
 
+def load_memory_digest(limit: int = 3500) -> str:
+    """启动注入用：全局 MEMORY.md 的摘要，让 agent 开箱就知道记忆里有什么、不必每次靠回忆检索
+    （曾出现"文件里明明有、recall 却说没有"）。超长则截断，其余仍可用「回忆记忆」按需检索。"""
+    try:
+        p = note_path("")
+        if not p.exists():
+            return ""
+        text = p.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    if not text:
+        return ""
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "\n…（记忆较长，其余用「回忆记忆」检索）"
+    return text
+
+
 def load_instructions(cwd: str = "", limit: int = 6000) -> str:
     """汇总 USER.md(画像) + AGENTS.md(账户/项目打法)，启动注入 system。"""
     parts = []
