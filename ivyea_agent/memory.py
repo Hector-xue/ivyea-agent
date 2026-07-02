@@ -183,21 +183,58 @@ def instruction_paths(cwd: str = "") -> list:
     return paths
 
 
+def sync_markdown_index() -> None:
+    """把策展 markdown（MEMORY.md + account/*.md）同步进 FTS 索引（幂等）。修复漂移：用户直接手改
+    MEMORY.md（不走 remember 工具）或重装后 memory.db 丢失而 markdown 仍在时，内容进了文件却没进
+    索引→FTS/语义召回抓瞎。以 [档] 前缀标记文件来源行，重建时只清这些行、不动 decision/run/turn/
+    [记忆] 等其它行。每进程调一次即可（文件小，成本低）。"""
+    import re
+    try:
+        paths = [note_path("")]
+        acc = config.IVYEA_DIR / "account"
+        if acc.exists():
+            paths.extend(sorted(acc.glob("*.md")))
+        conn = _conn()
+        conn.execute("DELETE FROM search_fts WHERE text LIKE '[档]%'")
+        for p in paths:
+            try:
+                text = p.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            asin = p.stem if p.parent.name == "account" else ""
+            for block in (b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()):
+                _index(conn, (f"[档] {asin} {block}")[:4000], asin, time.time())
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def load_memory_digest(limit: int = 3500) -> str:
-    """启动注入用：全局 MEMORY.md 的摘要，让 agent 开箱就知道记忆里有什么、不必每次靠回忆检索
-    （曾出现"文件里明明有、recall 却说没有"）。超长则截断，其余仍可用「回忆记忆」按需检索。"""
+    """启动注入用：全局 MEMORY.md 摘要 + 账户记忆索引，让 agent 开箱就知道记忆里有什么、不必每次
+    靠回忆检索（曾出现"文件里明明有、recall 却说没有"）。超长则截断，其余仍可用「回忆记忆」检索。"""
+    parts: list[str] = []
     try:
         p = note_path("")
-        if not p.exists():
-            return ""
-        text = p.read_text(encoding="utf-8").strip()
+        if p.exists():
+            text = p.read_text(encoding="utf-8").strip()
+            if text:
+                if len(text) > limit:
+                    text = text[:limit].rstrip() + "\n…（记忆较长，其余用「回忆记忆」检索）"
+                parts.append(text)
     except Exception:
-        return ""
-    if not text:
-        return ""
-    if len(text) > limit:
-        text = text[:limit].rstrip() + "\n…（记忆较长，其余用「回忆记忆」检索）"
-    return text
+        pass
+    # 账户记忆索引：列出有哪些 account/<asin>.md，agent 知道其存在、可按需「回忆记忆」或读文件
+    try:
+        acc = config.IVYEA_DIR / "account"
+        if acc.exists():
+            asins = sorted(f.stem for f in acc.glob("*.md"))
+            if asins:
+                parts.append("已有账户记忆（account/<asin>.md，需要时用「回忆记忆」或读文件查看）："
+                             + ", ".join(asins))
+    except Exception:
+        pass
+    return "\n\n".join(parts).strip()
 
 
 def load_instructions(cwd: str = "", limit: int = 6000) -> str:
