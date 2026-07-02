@@ -297,9 +297,15 @@ class ChatTUI:
 
         def _call():
             _tui_mod.set_active_selector(None)
+            # patch_stdout 会把 print 的原始 ANSI 转义成字面量；run_in_terminal 已挂起 app，
+            # 临时换回真实终端流让 handler 的原始 ANSI 上色 + 交互输入正常，用完还原。
+            saved = sys.stdout
             try:
+                if self.scrollback and sys.__stdout__ is not None:
+                    sys.stdout = sys.__stdout__
                 handler(text)
             finally:
+                sys.stdout = saved
                 _tui_mod.set_active_selector(self._approve)
 
         if self.scrollback:

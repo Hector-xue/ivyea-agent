@@ -1428,13 +1428,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     ]
     from . import chat_tui as _chat_tui
     _tui_on = _chat_tui.tui_enabled()
+    # 滚动区常驻 app（IVYEA_LIVE=1，opt-in；P5 翻默认）。IVYEA_PLAIN=1 强制旧行式循环。
+    _live_on = (os.environ.get("IVYEA_LIVE", "").strip().lower() in ("1", "true", "on", "yes")
+                and sys.stdin.isatty() and sys.stdout.isatty()
+                and os.environ.get("IVYEA_PLAIN", "").strip().lower() not in ("1", "true", "on", "yes"))
     _health = cfg.main_brain_health()
     _health_msg = "" if _health.get("ok") else ui.message("warn", _health.get("hint", "主脑不可用，请用 /model 切换。"))
     # TUI 模式：banner+欢迎框作为 transcript 首块（打印会被 alt-screen 清掉）；行式则直接打印。
     _intro = f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}\n" + _welcome_box_str(_welcome_lines, width=64)
     if _health_msg:
         _intro += "\n" + _health_msg
-    if not _tui_on:
+    if not _tui_on and not _live_on:   # LIVE/alt-screen 由 chat_tui 打 intro，避免双 banner
         print(f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}")
         _print_welcome_box(_welcome_lines, width=64)
         print()
@@ -1766,11 +1770,6 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         out["blocked"] = False
         return out
 
-    # 常驻底部 app（滚动缓冲区）：输入框钉底、生成中也在，保留原生滚轮/复制（对标 Claude/Ink）。
-    # 开发期 opt-in（IVYEA_LIVE=1），P5 验证后翻默认。IVYEA_PLAIN=1 强制旧行式循环。
-    _live_on = (os.environ.get("IVYEA_LIVE", "").strip().lower() in ("1", "true", "on", "yes")
-                and sys.stdin.isatty() and sys.stdout.isatty()
-                and os.environ.get("IVYEA_PLAIN", "").strip().lower() not in ("1", "true", "on", "yes"))
     if _tui_on or _live_on:      # 全屏 TUI（IVYEA_TUI=1）或滚动区常驻 app（IVYEA_LIVE=1）
         return _chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
                              render_markdown=markdown.render,
