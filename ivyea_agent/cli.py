@@ -1699,7 +1699,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         "/workspace": _sh_embedded, "/patch": _sh_embedded, "/gitops": _sh_embedded,
     }
 
-    def _execute_turn(line, render, narrate, cancel_check=None):
+    def _execute_turn(line, render, narrate, cancel_check=None, render_reasoning=None):
         """跑一轮对话，输出经 render(token)/narrate(行) 注入 —— 供 TUI 复用（行式循环仍走下方原逻辑）。
         cancel_check：运行中请求中断的钩子（TUI 用）。返回 {text, usage, blocked}。"""
         nonlocal messages
@@ -1747,7 +1747,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         provider = build_chain(mcfg, api_key, narrate=narrate)
         ctx.provider = provider
         out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""),
-                                         render=render, narrate=narrate, cancel_check=cancel_check)
+                                         render=render, narrate=narrate, cancel_check=cancel_check,
+                                         render_reasoning=render_reasoning)
         c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
         _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
         if c:
@@ -1765,12 +1766,18 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         out["blocked"] = False
         return out
 
-    if _tui_on:                  # 全屏 TUI（opt-in：IVYEA_TUI=1；默认走下面的行式循环）
+    # 常驻底部 app（滚动缓冲区）：输入框钉底、生成中也在，保留原生滚轮/复制（对标 Claude/Ink）。
+    # 开发期 opt-in（IVYEA_LIVE=1），P5 验证后翻默认。IVYEA_PLAIN=1 强制旧行式循环。
+    _live_on = (os.environ.get("IVYEA_LIVE", "").strip().lower() in ("1", "true", "on", "yes")
+                and sys.stdin.isatty() and sys.stdout.isatty()
+                and os.environ.get("IVYEA_PLAIN", "").strip().lower() not in ("1", "true", "on", "yes"))
+    if _tui_on or _live_on:      # 全屏 TUI（IVYEA_TUI=1）或滚动区常驻 app（IVYEA_LIVE=1）
         return _chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
                              render_markdown=markdown.render,
                              plan_intent_fn=_plan_mode_intent,
                              set_plan_mode=_set_plan_mode_msg,
-                             cycle_mode=_cycle_mode, mode_label_fn=_mode_label, intro=_intro)
+                             cycle_mode=_cycle_mode, mode_label_fn=_mode_label,
+                             slash_handlers=_SLASH_HANDLERS, scrollback=_live_on, intro=_intro)
 
     while True:
         line = ci.read("❯ ")
