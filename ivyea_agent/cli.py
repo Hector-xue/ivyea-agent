@@ -1378,6 +1378,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             content += "\n\n" + profile_context
         if instructions:
             content += "\n\n[长期指令/画像]\n" + instructions
+        memory_digest = memory.load_memory_digest()   # MEMORY.md 摘要，开箱即知记忆内容
+        if memory_digest:
+            content += "\n\n[记忆摘要 / MEMORY.md（其余用「回忆记忆」检索）]\n" + memory_digest
         return {"role": "system", "content": content}
 
     # ── resume / continue ─────────────────────────────────────────────
