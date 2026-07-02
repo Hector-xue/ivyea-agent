@@ -1202,6 +1202,7 @@ SLASH_COMMANDS = [
     ("/cost", "本会话 token 用量与成本估算"),
     ("/compact", "压缩上下文；/compact auto on|off 控制自动压缩"),
     ("/init", "生成账户指令模板 AGENTS.md（长期打法/边界，自动注入）"),
+    ("/paste", "把剪贴板里的图片喂给多模态模型（也可直接 @图片路径）"),
     ("/raw", "切换 Markdown 渲染 / 原始流式输出"),
     ("/stream", "开关完整流式（边生成边出字、收尾渲染 markdown；默认关）"),
     ("/auto-edit", "开关写操作自动放行（/auto-edit on|off；默认逐次审批）"),
@@ -1685,7 +1686,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         kctx, kids = knowledge.context_for_query(line, limit=3) if _inject else ("", [])
         sctx, sids = skills.context_for_query(line, limit=2) if _inject else ("", [])
         from . import mentions as _mentions        # @文件引用：把 @path 文本文件内联给模型
-        user_content, _mention_imgs = _mentions.expand(line, os.getcwd())
+        user_content, _mention_imgs = _mentions.expand(line, os.getcwd(), with_images=True)
         if _mention_imgs:
             narrate(ui.message("muted", "已引用图片: " + ", ".join(os.path.basename(p) for p in _mention_imgs)))
         if ectx:
@@ -1704,7 +1705,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         from . import hooks as _hooks
         _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
         messages[0] = _sys_msg()
-        messages.append({"role": "user", "content": user_content})
+        messages.append({"role": "user", "content": _mentions.build_user_content(user_content, _mention_imgs)})
         mcfg = cfg.get_model_config()
         provider = build_chain(mcfg, api_key, narrate=narrate)
         ctx.provider = provider
@@ -1746,6 +1747,14 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if line in ("/exit", "/quit"):
             print("再见。")
             return 0
+        if line.split()[0] == "/paste":   # 剪贴板图片：存临时文件后改写成 @路径，走正常多模态轮
+            from . import vision as _vision
+            _img = _vision.clipboard_image()
+            if not _img:
+                print(ui.message("warn", "剪贴板里没有图片（网页终端无法访问系统剪贴板；本地终端需 pngpaste/xclip/wl-paste）。")); continue
+            _rest = line[len("/paste"):].strip() or "这张图片里是什么？"
+            print(ui.message("muted", f"已取剪贴板图片 → {_img}"))
+            line = f"@{_img} {_rest}"   # 落到下面的模型轮，由 mentions 收成多模态附件
         _handler = _SLASH_HANDLERS.get(line.split()[0])
         if _handler is not None:
             _handler(line); continue
@@ -1792,7 +1801,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         kctx, kids = knowledge.context_for_query(line, limit=3) if _inject_domain else ("", [])
         sctx, sids = skills.context_for_query(line, limit=2) if _inject_domain else ("", [])
         from . import mentions as _mentions        # @文件引用：把 @path 文本文件内联给模型
-        user_content, _mention_imgs = _mentions.expand(line, os.getcwd())
+        user_content, _mention_imgs = _mentions.expand(line, os.getcwd(), with_images=True)
         if _mention_imgs:
             print(ui.message("muted", "已引用图片: " + ", ".join(os.path.basename(p) for p in _mention_imgs)))
         if ectx:
@@ -1814,7 +1823,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         from . import hooks as _hooks
         _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
         messages[0] = _sys_msg()   # 每轮刷新 system：注入真实当前日期，续接旧会话/跨天也不过时
-        messages.append({"role": "user", "content": user_content})
+        messages.append({"role": "user", "content": _mentions.build_user_content(user_content, _mention_imgs)})
         try:
             mcfg = cfg.get_model_config()
             provider = build_chain(mcfg, api_key, narrate=lambda s: print(s))

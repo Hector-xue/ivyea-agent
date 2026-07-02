@@ -56,3 +56,20 @@ def expand(line: str, cwd: str, *, with_images: bool = False) -> tuple[str, list
     if inlined:
         processed = processed + "\n\n" + "\n\n".join(inlined)
     return processed, images
+
+
+def build_user_content(text: str, image_paths: list[str]):
+    """构造一条 user 消息的 content：无图返回纯文本 str；有图返回 OpenAI 多模态
+    list-content（[{type:text},{type:image_url,image_url:{url:data:...}}]）。
+    各 provider 适配器把 image_url 转成自身格式（codex/anthropic/gemini），
+    不支持多模态的 provider 会安全拍平只取文本。"""
+    if not image_paths:
+        return text
+    from . import image_audit
+    parts: list = [{"type": "text", "text": text}]
+    for p in image_paths:
+        try:
+            parts.append({"type": "image_url", "image_url": {"url": image_audit.data_url(p)}})
+        except Exception:
+            pass   # 单张编码失败(过大/损坏)跳过，不阻塞整轮
+    return parts

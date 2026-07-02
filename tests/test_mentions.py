@@ -33,6 +33,41 @@ def test_truncates_huge_file(tmp_path):
     assert "已截断" in txt and "共 5000 行" in txt
 
 
+def _tiny_png(p):
+    import base64
+    p.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="))
+
+
+def test_build_user_content_multimodal(tmp_path):
+    png = tmp_path / "x.png"
+    _tiny_png(png)
+    assert mentions.build_user_content("hi", []) == "hi"          # 无图=纯文本
+    c = mentions.build_user_content("这是什么", [str(png)])
+    assert isinstance(c, list) and c[0]["type"] == "text"
+    assert any(p.get("type") == "image_url" and p["image_url"]["url"].startswith("data:image/png;base64,")
+               for p in c)
+
+
+def test_providers_accept_multimodal_content(tmp_path):
+    png = tmp_path / "x.png"
+    _tiny_png(png)
+    content = mentions.build_user_content("这是什么", [str(png)])
+    msgs = [{"role": "user", "content": content}]
+    # codex → input_image
+    from ivyea_agent.providers.codex_provider import CodexProvider
+    _, items = CodexProvider.__new__(CodexProvider)._input(msgs)
+    assert any(c.get("type") == "input_image" for it in items for c in it.get("content", []))
+    # anthropic → image 块
+    from ivyea_agent.providers.anthropic_provider import _split_messages
+    _, out = _split_messages(msgs)
+    assert any(b.get("type") == "image" for m in out for b in (m.get("content") or []) if isinstance(b, dict))
+    # gemini → inlineData
+    from ivyea_agent.providers.gemini_provider import _messages_to_gemini
+    _, contents = _messages_to_gemini(msgs)
+    assert any("inlineData" in p for c in contents for p in c.get("parts", []))
+
+
 def test_at_path_completion(tmp_path):
     (tmp_path / "alpha.py").write_text("x", encoding="utf-8")
     (tmp_path / "beta.txt").write_text("y", encoding="utf-8")

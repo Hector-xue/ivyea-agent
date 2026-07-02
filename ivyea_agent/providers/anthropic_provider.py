@@ -60,6 +60,15 @@ def _split_messages(messages: list[dict]) -> tuple[str, list[dict]]:
                 _append_user_block({"type": "text", "text": content})
             elif isinstance(content, list):
                 for b in content:
+                    if isinstance(b, dict) and b.get("type") == "image_url":   # 多模态→Anthropic image 块
+                        iu = b.get("image_url")
+                        url = iu.get("url") if isinstance(iu, dict) else iu
+                        if url and str(url).startswith("data:"):
+                            head, b64 = str(url).split(",", 1)
+                            media = head.split(":", 1)[1].split(";", 1)[0]
+                            _append_user_block({"type": "image", "source": {
+                                "type": "base64", "media_type": media, "data": b64}})
+                        continue
                     _append_user_block(b)
     return "\n\n".join(system_parts), out
 

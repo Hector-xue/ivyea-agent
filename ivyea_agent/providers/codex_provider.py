@@ -263,11 +263,22 @@ class CodexProvider(LLMProvider):
                         "name": fn.get("name", ""),
                         "arguments": arguments,
                     })
-            text = _content_text(msg.get("content"))
+            content = msg.get("content")
+            item_role = "assistant" if role == "assistant" else "user"
+            parts: list[dict[str, Any]] = []
+            if isinstance(content, list) and item_role == "user":   # 多模态：附带图片
+                for it in content:
+                    if isinstance(it, dict) and it.get("type") == "image_url":
+                        iu = it.get("image_url")
+                        url = iu.get("url") if isinstance(iu, dict) else iu
+                        if url:
+                            parts.append({"type": "input_image", "image_url": url})
+            text = _content_text(content)
             if text:
-                item_role = "assistant" if role == "assistant" else "user"
                 text_type = "output_text" if item_role == "assistant" else "input_text"
-                items.append({"role": item_role, "content": [{"type": text_type, "text": text}]})
+                parts.insert(0, {"type": text_type, "text": text})
+            if parts:
+                items.append({"role": item_role, "content": parts})
         return instructions, items
 
     def _post(self, payload: dict, timeout: float) -> dict:
