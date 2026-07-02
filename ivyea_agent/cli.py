@@ -1427,11 +1427,20 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         f"{_C['d']}/ 命令 · ↑↓+Enter 选择 · Alt+Enter 换行 · /exit 退出{_C['x']}",
     ]
     from . import chat_tui as _chat_tui
-    _tui_on = _chat_tui.tui_enabled()
-    # 滚动区常驻 app（IVYEA_LIVE=1，opt-in；P5 翻默认）。IVYEA_PLAIN=1 强制旧行式循环。
-    _live_on = (os.environ.get("IVYEA_LIVE", "").strip().lower() in ("1", "true", "on", "yes")
-                and sys.stdin.isatty() and sys.stdout.isatty()
-                and os.environ.get("IVYEA_PLAIN", "").strip().lower() not in ("1", "true", "on", "yes"))
+    _tui_on = _chat_tui.tui_enabled()   # IVYEA_TUI=1 → 全屏 alt-screen
+    # 常驻底部 app（滚动缓冲区）为**默认**：输入框钉底、生成中也在，保留原生滚轮/复制（对标
+    # Claude/Ink）。IVYEA_PLAIN=1 退回旧行式循环；非 TTY / prompt_toolkit 不可用也退回。
+    def _live_default() -> bool:
+        if _tui_on or not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return False
+        if os.environ.get("IVYEA_PLAIN", "").strip().lower() in ("1", "true", "on", "yes"):
+            return False
+        try:
+            import prompt_toolkit  # noqa: F401
+        except Exception:
+            return False
+        return True
+    _live_on = _live_default()
     _health = cfg.main_brain_health()
     _health_msg = "" if _health.get("ok") else ui.message("warn", _health.get("hint", "主脑不可用，请用 /model 切换。"))
     # TUI 模式：banner+欢迎框作为 transcript 首块（打印会被 alt-screen 清掉）；行式则直接打印。
