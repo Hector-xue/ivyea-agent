@@ -1335,8 +1335,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     from . import agent_loop, agent_tools, config as cfg, pricing, sessions, context as ctx_mod, markdown, memory, profiles
     from .providers import from_settings, build_chain, LLMError
 
+    _oneshot = bool(getattr(args, "print_prompt", None))   # -p 非交互一次性（不打 banner/欢迎/更新提示）
+
     # 首次运行：无配置 → 先走引导
-    if not cfg.SETTINGS_FILE.exists() and not cfg.get_active_key() and sys.stdin.isatty():
+    if not _oneshot and not cfg.SETTINGS_FILE.exists() and not cfg.get_active_key() and sys.stdin.isatty():
         print(f"{_C['d']}（检测到首次运行，先带你配置）{_C['x']}")
         _cmd_onboard(args)
         print()
@@ -1466,7 +1468,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         _intro += "\n" + _health_msg
     if _upd_msg:
         _intro += "\n" + _upd_msg
-    if not _tui_on and not _live_on:   # LIVE/alt-screen 由 chat_tui 打 intro，避免双 banner
+    if not _oneshot and not _tui_on and not _live_on:   # LIVE/alt-screen 由 chat_tui 打 intro，避免双 banner
         print(f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}")
         _print_welcome_box(_welcome_lines, width=64)
         print()
@@ -1819,6 +1821,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 narrate(ui.message("info", "上下文较长，已自动压缩并入库摘要以省 token"))
         out["blocked"] = False
         return out
+
+    if _oneshot:                 # 非交互一次性（-p）：跑一轮该提示 → 结果打到 stdout → 退出
+        if getattr(args, "approve_all", False):
+            ctx.perm.accept_edits = True       # 无人值守：自动放行写/执行工具
+        _out = _execute_turn(args.print_prompt, lambda t: None, lambda s: None)
+        if _out.get("blocked"):
+            print(ui.message("error", "未配置主脑模型或额度不可用，无法运行。"), file=sys.stderr)
+            return 1
+        _txt = (_out.get("text") or "").strip()
+        print(markdown.render(_txt) if render_md else _txt)
+        return 0
 
     if _tui_on or _live_on:      # 全屏 TUI（IVYEA_TUI=1）或滚动区常驻 app（IVYEA_LIVE=1）
         return _chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
@@ -2220,6 +2233,20 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 def _cmd_self(args: argparse.Namespace) -> int:
     from . import permission, self_manage
 
+    if args.action == "update":   # 检测最新版并更新（源码仓 git pull / 否则 pip·pipx）
+        from . import updater
+        uc = updater.check_now()
+        if uc.get("latest") is None:
+            print(ui.message("warn", "无法连接 GitHub 检查更新（离线或超时）。")); return 1
+        if not uc.get("has_update") and not getattr(args, "force", False):
+            print(ui.message("success", f"已是最新版 v{uc['current']}。")); return 0
+        _lat = str(uc.get("latest") or "").lstrip("vV")
+        print(ui.message("info", f"更新到 v{_lat}（当前 v{uc['current']}）…"))
+        ok, out = updater.do_update()
+        if out:
+            print(out[-3000:])
+        print(ui.message("success" if ok else "error", "更新完成，重开生效。" if ok else "更新失败。"))
+        return 0 if ok else 1
     if args.action == "status":
         print(self_manage.render_status())
         return 0
@@ -3045,7 +3072,7 @@ def build_parser() -> argparse.ArgumentParser:
     pself.add_argument("action", choices=[
         "status", "doctor", "ops-bootstrap",
         "service-status", "service-start", "service-stop", "service-logs", "service-autostart",
-        "backup", "upgrade", "uninstall",
+        "backup", "update", "upgrade", "uninstall",
     ])
     pself.add_argument("--output", help="backup 输出路径")
     pself.add_argument("--host", default="127.0.0.1", help="ops-bootstrap 建议服务监听地址")
@@ -3416,6 +3443,10 @@ def build_parser() -> argparse.ArgumentParser:
     pch.add_argument("--resume", nargs="?", const=True, help="续接会话：留空=最近一个，或指定会话ID")
     pch.add_argument("--continue", dest="cont", action="store_true", help="续接最近一个会话")
     pch.add_argument("--raw", action="store_true", help="原始流式输出（默认 Markdown 渲染）")
+    pch.add_argument("-p", "--print", dest="print_prompt", metavar="PROMPT",
+                     help="非交互一次性：跑一轮该提示、把结果打到 stdout 后退出（供 IvyeaOps 等做 runner）")
+    pch.add_argument("--approve-all", action="store_true",
+                     help="一次性模式下自动放行写/执行工具（无人值守；配合 -p 用）")
     pch.set_defaults(func=_cmd_chat)
     return p
 
