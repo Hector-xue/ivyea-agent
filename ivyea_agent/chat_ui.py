@@ -100,11 +100,13 @@ class _LiveSpinner:
 
 
 class _StreamPrinter:
-    """完整流式：边生成边打印正文（dim），收尾按视觉行数擦除最后一段再渲染 markdown。
-    仅在 tty + /stream on 时启用；任何异常/非 tty 由调用方回退到 spinner 路径。"""
+    """渐进式 markdown 流式：正文以 dim 逐字出字；每当一个块（空行分隔）完成，立即擦掉
+    该 dim 块、改打印其 markdown 渲染版（committed），继续流下一块——收尾只剩最后一块要转，
+    避免整段"原文→渲染"的大跳变。仅 tty + /stream 时启用；异常/非 tty 由调用方回退 spinner。"""
     def __init__(self):
-        self.block = ""   # 当前连续正文段（被工具行打断即提交清零）
+        self.block = ""       # 屏上底部当前未定稿的 dim 块
         self.on = False
+        self._emitted = False  # 本轮是否已定稿过块（决定 ● 前缀只加一次）
 
     def render(self, text: str = "") -> None:
         if not text:
@@ -113,9 +115,20 @@ class _StreamPrinter:
         sys.stdout.flush()
         self.block += text
         self.on = True
+        while "\n\n" in self.block:                # 完成的块即时转 markdown
+            completed, remainder = self.block.split("\n\n", 1)
+            self._erase(self.block)                # 擦掉屏上整块 dim（completed+remainder）
+            self._emit_md(completed)
+            self.block = remainder
+            if remainder:                          # 余下部分继续以 dim 挂在底部
+                sys.stdout.write(f"{_C['d']}{remainder}{_C['x']}")
+                sys.stdout.flush()
 
     def commit(self) -> None:
-        """被 narrate（工具行/提示）打断：保留已打印文本，重置当前段。"""
+        """被 narrate（工具行/提示）打断：把当前块定稿为 markdown 再让工具行打印其下。"""
+        if self.block.strip():
+            self._erase(self.block)
+            self._emit_md(self.block)
         self.block = ""
 
     @staticmethod
@@ -126,18 +139,31 @@ class _StreamPrinter:
             n += max(1, -(-w // width)) if w else 1
         return n
 
-    def rerender(self, final_text: str) -> None:
-        """擦除最后一段流式正文，改打印 markdown 渲染版。"""
+    def _erase(self, text: str) -> None:
+        if not (self.on and text):
+            return
+        width = shutil.get_terminal_size((80, 24)).columns
+        lines = self._visual_lines(text, width)
+        sys.stdout.write("\r")
+        if lines > 1:
+            sys.stdout.write(f"\033[{lines - 1}A")
+        sys.stdout.write("\033[J")
+        sys.stdout.flush()
+
+    def _emit_md(self, block: str) -> None:
         from . import markdown
-        if self.on and self.block:
-            width = shutil.get_terminal_size((80, 24)).columns
-            lines = self._visual_lines(self.block, width)
-            sys.stdout.write("\r")
-            if lines > 1:
-                sys.stdout.write(f"\033[{lines - 1}A")
-            sys.stdout.write("\033[J")
-            sys.stdout.flush()
-        print(f"\n{_C['c']}●{_C['x']} " + markdown.render(final_text))   # 回答前留一空行，呼吸感
+        prefix = f"{_C['c']}●{_C['x']} " if not self._emitted else ""   # ● 仅首个定稿块
+        self._emitted = True
+        print(prefix + markdown.render(block.strip()))
+
+    def rerender(self, final_text: str) -> None:
+        """轮末：把最后一个未定稿块转成 markdown；若整段无空行则此处一次性渲染。"""
+        if self.block.strip():
+            self._erase(self.block)
+            self._emit_md(self.block)
+        elif not self._emitted:                    # 从没定稿过（如空回复）→ 兜底渲染全文
+            print(f"{_C['c']}●{_C['x']} " + markdown.render(final_text))
+        self.block = ""
 
 
 class _ReasoningPrinter:
