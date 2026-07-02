@@ -16,6 +16,31 @@ from . import config
 
 EXIT = object()  # 哨兵：用户在框内 Ctrl+C/Ctrl+D 退出
 
+import re as _re
+_AT_RE = _re.compile(r"(?<!\S)@([^\s@]*)$")   # 光标前最后一个 @路径片段（用于补全）
+
+
+def _at_completions(frag: str):
+    """@文件引用的路径补全：按当前片段列出目录下匹配的文件/子目录。"""
+    from prompt_toolkit.completion import Completion
+    base = os.path.dirname(frag)
+    prefix = os.path.basename(frag)
+    listdir = base or "."
+    try:
+        entries = sorted(os.listdir(os.path.expanduser(listdir)))
+    except Exception:
+        return
+    for name in entries:
+        if name.startswith(".") and not prefix.startswith("."):
+            continue
+        if not name.startswith(prefix):
+            continue
+        full = os.path.join(base, name) if base else name
+        is_dir = os.path.isdir(os.path.expanduser(full))
+        disp = full + ("/" if is_dir else "")
+        yield Completion(disp, start_position=-len(frag), display=disp,
+                         display_meta="目录" if is_dir else "文件")
+
 
 class ChatInput:
     def __init__(self, slash_commands: list, status_fn: Callable[[], str],
@@ -38,6 +63,10 @@ class ChatInput:
         class _C(Completer):
             def get_completions(s, document, complete_event):
                 t = document.text_before_cursor
+                m = _AT_RE.search(t)             # @路径补全（@文件引用）
+                if m:
+                    yield from _at_completions(m.group(1))
+                    return
                 if not t.startswith("/"):
                     return
                 seen = set()

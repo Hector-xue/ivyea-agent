@@ -1684,7 +1684,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         _inject = bool(getattr(ctx, "asin", "")) or _is_amazon_domain(line) or not _looks_like_code_task(line)
         kctx, kids = knowledge.context_for_query(line, limit=3) if _inject else ("", [])
         sctx, sids = skills.context_for_query(line, limit=2) if _inject else ("", [])
-        user_content = line
+        from . import mentions as _mentions        # @文件引用：把 @path 文本文件内联给模型
+        user_content, _mention_imgs = _mentions.expand(line, os.getcwd())
+        if _mention_imgs:
+            narrate(ui.message("muted", "已引用图片: " + ", ".join(os.path.basename(p) for p in _mention_imgs)))
         if ectx:
             user_content += "\n\n[工程上下文]\n" + ectx
             narrate(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))
@@ -1788,7 +1791,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         )
         kctx, kids = knowledge.context_for_query(line, limit=3) if _inject_domain else ("", [])
         sctx, sids = skills.context_for_query(line, limit=2) if _inject_domain else ("", [])
-        user_content = line
+        from . import mentions as _mentions        # @文件引用：把 @path 文本文件内联给模型
+        user_content, _mention_imgs = _mentions.expand(line, os.getcwd())
+        if _mention_imgs:
+            print(ui.message("muted", "已引用图片: " + ", ".join(os.path.basename(p) for p in _mention_imgs)))
         if ectx:
             user_content += "\n\n[工程上下文]\n" + ectx
             print(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))
