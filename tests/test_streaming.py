@@ -23,6 +23,35 @@ def test_parse_sse_text_and_tool_calls():
     assert final["usage"]["prompt_tokens"] == 10
 
 
+def test_parse_sse_reasoning():
+    lines = [
+        'data: {"choices":[{"delta":{"reasoning_content":"先想想"}}]}',
+        'data: {"choices":[{"delta":{"content":"答案"}}]}',
+        "data: [DONE]",
+    ]
+    events = list(parse_sse(lines))
+    assert {"type": "reasoning", "text": "先想想"} in events              # 思考流 → reasoning 事件
+    assert any(e["type"] == "text" and e["text"] == "答案" for e in events)
+
+
+def test_run_turn_stream_routes_reasoning():
+    from ivyea_agent import agent_loop
+    from ivyea_agent.agent_tools import ToolContext
+
+    class FakeProv:
+        def stream_chat(self, messages, tools=None):
+            yield {"type": "reasoning", "text": "思考中"}
+            yield {"type": "text", "text": "你好"}
+            yield {"type": "final", "content": "你好", "tool_calls": [], "usage": {}}
+
+    got = {"r": [], "t": []}
+    out = agent_loop.run_turn_stream(
+        FakeProv(), ToolContext(), [{"role": "user", "content": "hi"}],
+        render=lambda t: got["t"].append(t),
+        render_reasoning=lambda t: got["r"].append(t))
+    assert got["r"] == ["思考中"] and out["text"] == "你好"               # 思考单独路由，不混进正文
+
+
 def test_parse_sse_handles_bytes_and_blank():
     lines = [b'data: {"choices":[{"delta":{"content":"hi"}}]}', "", b"data: [DONE]"]
     events = list(parse_sse(lines))

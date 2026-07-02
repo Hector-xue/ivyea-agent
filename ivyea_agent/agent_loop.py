@@ -225,13 +225,16 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
 def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
                     max_steps: int | None = None, narrate: Callable[[str], None] = print,
                     render: Callable[[str], None] = None, model: str = "",
-                    cancel_check: Callable[[], bool] | None = None) -> dict:
+                    cancel_check: Callable[[], bool] | None = None,
+                    render_reasoning: Callable[[str], None] = None) -> dict:
     """流式跑一轮：token 边出边渲染、工具实时叙述、累计用量。
     返回 {text, usage}（usage 为本轮各步累加）。render(token) 逐字输出助手文本。
 
-    cancel_check：TUI 忙碌时请求中断的钩子；在步/流/工具边界返回 True 则抛
-    KeyboardInterrupt，交给上层保留会话并恢复输入。默认无操作，行式循环不受影响。"""
+    render_reasoning(token)：支持思考的模型(deepseek-reasoner/codex/claude/gemini)的
+    思考流；默认无操作(不显示)。cancel_check：TUI 忙碌时请求中断的钩子；在步/流/工具边界
+    返回 True 则抛 KeyboardInterrupt，交给上层保留会话并恢复输入。"""
     render = render or (lambda s: print(s, end="", flush=True))
+    render_reasoning = render_reasoning or (lambda s: None)
     cancel_check = cancel_check or (lambda: False)
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "prompt_cache_hit_tokens": 0}
 
@@ -258,6 +261,8 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
             if ev["type"] == "text":
                 printed_any = True
                 render(ev["text"])
+            elif ev["type"] == "reasoning":
+                render_reasoning(ev.get("text") or "")
             elif ev["type"] == "final":
                 final = ev
         if printed_any:

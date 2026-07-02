@@ -108,6 +108,12 @@ def parse_responses_sse(lines: Iterable[str]) -> Iterator[dict]:
                 yield {"type": "text", "text": delta}
             continue
 
+        if event_type in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+            delta = chunk.get("delta")
+            if isinstance(delta, str) and delta:
+                yield {"type": "reasoning", "text": delta}   # 思考流 → 思考事件
+            continue
+
         if event_type == "response.function_call_arguments.delta":
             slot = tool_slot(chunk.get("output_index"))
             delta = chunk.get("delta")
@@ -344,6 +350,7 @@ class CodexProvider(LLMProvider):
                 "input": input_items,
                 "stream": True,
                 "store": False,
+                "reasoning": {"summary": "auto"},   # GPT-5 思考摘要流（→ reasoning 事件，显示 ✻ 思考）
             }
             if instructions:
                 payload["instructions"] = instructions

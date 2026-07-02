@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import __version__, config, ui
 # chat 展示层 helper 已拆到 chat_ui.py；re-export 保持 cli.X 引用与既有测试兼容。
-from .chat_ui import _is_amazon_domain, _looks_like_code_task, _LiveSpinner, _StreamPrinter
+from .chat_ui import _is_amazon_domain, _looks_like_code_task, _LiveSpinner, _ReasoningPrinter, _StreamPrinter
 
 
 def _ask(prompt: str, default: str = "") -> str:
@@ -1828,19 +1828,26 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             mcfg = cfg.get_model_config()
             provider = build_chain(mcfg, api_key, narrate=lambda s: print(s))
             ctx.provider = provider   # 供 dispatch_subagent 跑只读子 agent 用
+            rp = _ReasoningPrinter()   # 思考流（reasoning 模型）：正文前 dim 显示 ✻ 思考
             if render_md and stream_live and sys.stdout.isatty():
                 # 完整流式：边生成边打印正文，收尾擦除最后一段改渲染 markdown
                 sp = _StreamPrinter()
                 out = agent_loop.run_turn_stream(
                     provider, ctx, messages, model=mcfg.get("model", ""),
-                    render=sp.render, narrate=lambda s: (sp.commit(), print(s)))
+                    render=lambda t: (rp.done(), sp.render(t)),
+                    render_reasoning=rp.render,
+                    narrate=lambda s: (rp.done(), sp.commit(), print(s)))
+                rp.done()
                 sp.rerender(out["text"])
             elif render_md:
                 # 缓冲 + spinner（含流式正文预览），收尾渲染 markdown
                 spin = _LiveSpinner()
                 out = agent_loop.run_turn_stream(
                     provider, ctx, messages, model=mcfg.get("model", ""),
-                    render=spin.tick, narrate=lambda s: (spin.clear(), print(s)))
+                    render=lambda t: (rp.done(), spin.tick(t)),
+                    render_reasoning=rp.render,
+                    narrate=lambda s: (rp.done(), spin.clear(), print(s)))
+                rp.done()
                 spin.clear()
                 print(f"\n{_C['c']}●{_C['x']} " + markdown.render(out["text"]))   # 回答前留一空行
             else:

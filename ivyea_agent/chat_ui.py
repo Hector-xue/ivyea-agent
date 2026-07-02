@@ -138,3 +138,24 @@ class _StreamPrinter:
             sys.stdout.write("\033[J")
             sys.stdout.flush()
         print(f"\n{_C['c']}●{_C['x']} " + markdown.render(final_text))   # 回答前留一空行，呼吸感
+
+
+class _ReasoningPrinter:
+    """思考流（支持 reasoning 的模型）：dim 灰的 ✻ 思考 块，正文开始前收尾。"""
+    def __init__(self):
+        self.on = False
+
+    def render(self, text: str = "") -> None:
+        if not text:
+            return
+        if not self.on:
+            sys.stdout.write(f"\n{_C['d']}✻ 思考\n")
+            self.on = True
+        sys.stdout.write(f"{_C['d']}{text}{_C['x']}")
+        sys.stdout.flush()
+
+    def done(self) -> None:
+        if self.on:
+            sys.stdout.write(f"{_C['x']}\n")
+            sys.stdout.flush()
+            self.on = False
