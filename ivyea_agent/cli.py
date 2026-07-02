@@ -1202,6 +1202,7 @@ SLASH_COMMANDS = [
     ("/cost", "本会话 token 用量与成本估算"),
     ("/compact", "压缩上下文；/compact auto on|off 控制自动压缩"),
     ("/rewind", "回退检查点：截断对话到某轮之前 + 恢复代码文件（对话+代码快照）"),
+    ("/update", "检查并更新到最新版（有新版时自动提示）"),
     ("/init", "生成账户指令模板 AGENTS.md（长期打法/边界，自动注入）"),
     ("/paste", "把剪贴板里的图片喂给多模态模型（也可直接 @图片路径）"),
     ("/raw", "切换 Markdown 渲染 / 原始流式输出"),
@@ -1425,8 +1426,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         _n_knowledge = len(_kb_mod.list_cards())   # 知识文档（内置 + 用户上传）
     except Exception:
         _n_knowledge = 0
+    from . import __version__ as _ver
     _welcome_lines = [
-        f"{_C['c']}✻{_C['x']} {_C['b']}亚马逊运营 Agent{_C['x']} · 规则引擎+LLM复核+审核制执行 · 自托管",
+        f"{_C['c']}✻{_C['x']} {_C['b']}亚马逊运营 Agent{_C['x']} {_C['d']}v{_ver}{_C['x']} · 规则引擎+LLM复核+审核制执行 · 自托管",
         f"{_C['d']}主脑 {_label()}（{keyst}）· 执行 {mode}{_C['x']}",
         f"{_C['d']}{_n_tools} 工具 · {_n_skills} skills · {_n_mcp} MCP · {_n_knowledge} 知识 · 会话 {(sid or '新')[:8]}{_C['x']}",
         f"{_C['d']}/ 命令 · ↑↓+Enter 选择 · Alt+Enter 换行 · /exit 退出{_C['x']}",
@@ -1449,15 +1451,29 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     _health = cfg.main_brain_health()
     _health_msg = "" if _health.get("ok") else ui.message("warn", _health.get("hint", "主脑不可用，请用 /model 切换。"))
     # TUI 模式：banner+欢迎框作为 transcript 首块（打印会被 alt-screen 清掉）；行式则直接打印。
+    _upd_msg = ""
+    try:   # 启动非阻塞检测更新：有新版则提示 /update 一键更新
+        from . import updater as _updater
+        _uc = _updater.check_latest()
+        if _uc.get("has_update"):
+            _lat = str(_uc["latest"]).lstrip("vV")   # tag 已带 v，去掉避免 vv
+            _upd_msg = ui.message("info", f"新版本 v{_lat} 可用（当前 v{_uc['current']}）· 输入 /update 一键更新")
+    except Exception:
+        _upd_msg = ""
+    # TUI 模式：banner+欢迎框作为 transcript 首块（打印会被 alt-screen 清掉）；行式则直接打印。
     _intro = f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}\n" + _welcome_box_str(_welcome_lines, width=64)
     if _health_msg:
         _intro += "\n" + _health_msg
+    if _upd_msg:
+        _intro += "\n" + _upd_msg
     if not _tui_on and not _live_on:   # LIVE/alt-screen 由 chat_tui 打 intro，避免双 banner
         print(f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}")
         _print_welcome_box(_welcome_lines, width=64)
         print()
         if _health_msg:
             print(_health_msg + "\n")
+        if _upd_msg:
+            print(_upd_msg + "\n")
 
     from . import chat_input
 
@@ -1683,6 +1699,26 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             print(ui.message("warn", f"未知模型 id：{mid}。用 /model 看清单。"))
         return True
 
+    def _sh_update(line):
+        """检查最新版并一键更新（源码仓 git pull / 否则 pip·pipx 升级）。"""
+        from . import updater as _updater
+        print(ui.message("info", "正在检查最新版本…"))
+        uc = _updater.check_now()
+        if uc.get("latest") is None:
+            print(ui.message("warn", "无法连接 GitHub 检查更新（离线或超时）。")); return True
+        if not uc.get("has_update"):
+            print(ui.message("success", f"已是最新版 v{uc['current']}。")); return True
+        _lat = str(uc["latest"]).lstrip("vV")
+        print(ui.message("info", f"发现新版本 v{_lat}（当前 v{uc['current']}），开始更新…"))
+        ok, out = _updater.do_update()
+        if out:
+            print(out[-2000:])
+        if ok:
+            print(ui.message("success", "已更新到最新代码。请 /exit 后重开 ivyea chat 生效。"))
+        else:
+            print(ui.message("error", "更新失败，请手动更新（见输出）。"))
+        return True
+
     def _sh_rewind(line):
         """回退检查点：截断对话到某轮之前 + 把代码文件恢复到该轮之前（对标 Claude /rewind）。"""
         nonlocal messages
@@ -1713,7 +1749,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         "/raw": _sh_raw, "/stream": _sh_stream, "/auto-edit": _sh_auto_edit, "/compact": _sh_compact,
         "/diff": _sh_diff, "/init": _sh_init, "/mcp": _sh_mcp, "/knowledge": _sh_knowledge,
         "/skill": _sh_skill, "/tools": _sh_tools, "/memory": _sh_memory, "/status": _sh_status,
-        "/config": _sh_config, "/model": _sh_model, "/rewind": _sh_rewind,
+        "/config": _sh_config, "/model": _sh_model, "/rewind": _sh_rewind, "/update": _sh_update,
         "/workspace": _sh_embedded, "/patch": _sh_embedded, "/gitops": _sh_embedded,
     }
 
