@@ -1420,10 +1420,15 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         _n_mcp = len(cfg.load_mcp().get("mcpServers", {}))
     except Exception:
         _n_tools = _n_skills = _n_mcp = 0
+    try:
+        from . import knowledge as _kb_mod
+        _n_knowledge = len(_kb_mod.list_cards())   # 知识文档（内置 + 用户上传）
+    except Exception:
+        _n_knowledge = 0
     _welcome_lines = [
         f"{_C['c']}✻{_C['x']} {_C['b']}亚马逊运营 Agent{_C['x']} · 规则引擎+LLM复核+审核制执行 · 自托管",
         f"{_C['d']}主脑 {_label()}（{keyst}）· 执行 {mode}{_C['x']}",
-        f"{_C['d']}{_n_tools} 工具 · {_n_skills} skills · {_n_mcp} MCP · 会话 {(sid or '新')[:8]}{_C['x']}",
+        f"{_C['d']}{_n_tools} 工具 · {_n_skills} skills · {_n_mcp} MCP · {_n_knowledge} 知识 · 会话 {(sid or '新')[:8]}{_C['x']}",
         f"{_C['d']}/ 命令 · ↑↓+Enter 选择 · Alt+Enter 换行 · /exit 退出{_C['x']}",
     ]
     from . import chat_tui as _chat_tui  # noqa: F401
