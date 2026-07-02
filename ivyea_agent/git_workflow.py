@@ -41,6 +41,46 @@ def repo_root(path: str | Path = ".") -> Path | None:
     return Path(out).resolve()
 
 
+def checkpoint(root: str | Path = ".") -> dict[str, str] | None:
+    """快照当前工作区（tracked 改动）为独立提交对象，**不动索引/工作区/stash 列表/分支历史**。
+    返回 {head, stash}（stash="" 表示快照时工作区已干净）；非 git 仓返回 None。供 /rewind 用。"""
+    r = repo_root(root)
+    if r is None:
+        return None
+    _, head = _run_git(r, ["rev-parse", "HEAD"])
+    code, stash = _run_git(r, ["stash", "create", "ivyea checkpoint"])
+    return {"head": head.strip(), "stash": stash.strip() if code == 0 else ""}
+
+
+def checkpoint_diffstat(cp: dict | None, root: str | Path = ".") -> str:
+    """预览：从检查点快照恢复会改动哪些 tracked 文件（git diff --stat）。"""
+    r = repo_root(root)
+    if r is None or not cp:
+        return ""
+    target = cp.get("stash") or cp.get("head")
+    if not target:
+        return ""
+    _, out = _run_git(r, ["diff", "--stat", target, "--", "."])
+    return out.strip()
+
+
+def restore_checkpoint(cp: dict | None, root: str | Path = ".") -> tuple[bool, str]:
+    """把 tracked 文件恢复到检查点快照（git checkout <ref> -- .）。返回 (ok, 说明)。
+    只动 tracked 文件、不碰用户分支历史；非 git 仓返回 (False, ...) 只回退对话。"""
+    r = repo_root(root)
+    if r is None:
+        return False, "不在 git 仓库，未改动文件（仅回退了对话）。"
+    if not cp:
+        return False, "无检查点。"
+    target = cp.get("stash") or cp.get("head")
+    if not target:
+        return False, "检查点无效。"
+    code, out = _run_git(r, ["checkout", target, "--", "."])
+    if code != 0:
+        return False, f"文件恢复失败：{out[:200]}"
+    return True, "已把 tracked 文件恢复到检查点。"
+
+
 def status(root: str | Path = ".") -> dict[str, Any]:
     r = repo_root(root)
     if not r:

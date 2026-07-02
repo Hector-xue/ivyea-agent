@@ -1201,6 +1201,7 @@ SLASH_COMMANDS = [
     ("/approve", "批准并退出计划模式，继续执行"),
     ("/cost", "本会话 token 用量与成本估算"),
     ("/compact", "压缩上下文；/compact auto on|off 控制自动压缩"),
+    ("/rewind", "回退检查点：截断对话到某轮之前 + 恢复代码文件（对话+代码快照）"),
     ("/init", "生成账户指令模板 AGENTS.md（长期打法/边界，自动注入）"),
     ("/paste", "把剪贴板里的图片喂给多模态模型（也可直接 @图片路径）"),
     ("/raw", "切换 Markdown 渲染 / 原始流式输出"),
@@ -1351,6 +1352,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         ctx.asin = args.asin
     meter = pricing.UsageMeter()
     _ui = {"ctx": 0}                                        # 状态栏:上下文 token 估算
+    _checkpoints: list = []                                 # /rewind 检查点：每轮前的 {对话长度, 代码快照}
+
+    def _snapshot(line: str) -> None:
+        """turn 开始前记一个检查点（对话截断点 + git 代码快照），供 /rewind 回退。"""
+        from . import git_workflow as _gw
+        try:
+            cp = _gw.checkpoint(os.getcwd())
+        except Exception:
+            cp = None
+        _checkpoints.append({"n": len(_checkpoints) + 1, "msg_len": len(messages),
+                             "cp": cp, "label": (line or "")[:50]})
     instructions = memory.load_instructions(os.getcwd())   # USER.md/AGENTS.md 持久指令
     profile_key = getattr(args, "asin", None) or "default"
     profile_context = profiles.context_text(profiles.resolve(asin=getattr(args, "asin", "") or ""), label=profile_key)
@@ -1653,13 +1665,37 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             print(ui.message("warn", f"未知模型 id：{mid}。用 /model 看清单。"))
         return True
 
+    def _sh_rewind(line):
+        """回退检查点：截断对话到某轮之前 + 把代码文件恢复到该轮之前（对标 Claude /rewind）。"""
+        nonlocal messages
+        from . import git_workflow as _gw, tui as _tuisel
+        if not _checkpoints:
+            print(ui.message("info", "还没有可回退的检查点（本会话尚无对话轮）。")); return True
+        opts = [(str(i), f"#{c['n']} {c['label'] or '(无标签)'}") for i, c in enumerate(_checkpoints)]
+        opts = opts[::-1][:10] + [("cancel", "取消")]
+        sel = _tuisel.select("回退到哪一轮之前？", "会截断此后的对话，并把 tracked 代码文件恢复到该轮之前。", opts)
+        if sel in ("cancel", ""):
+            print(ui.message("muted", "已取消。")); return True
+        c = _checkpoints[int(sel)]
+        stat = _gw.checkpoint_diffstat(c.get("cp"), os.getcwd()) if c.get("cp") else ""
+        preview = stat or "（无 git 仓 / 无 tracked 文件改动，仅回退对话）"
+        if _tuisel.select("确认回退？", preview, [("yes", "确认回退"), ("no", "取消")]) != "yes":
+            print(ui.message("muted", "已取消。")); return True
+        del messages[c["msg_len"]:]                     # 截断对话
+        if c.get("cp"):
+            ok, msg = _gw.restore_checkpoint(c["cp"], os.getcwd())
+            print(ui.message("success" if ok else "warn", msg))
+        del _checkpoints[_checkpoints.index(c):]        # 丢弃此检查点及其后的
+        _persist()
+        print(ui.message("success", f"已回退到 #{c['n']} 之前（对话截断 + 文件恢复）。")); return True
+
     _SLASH_HANDLERS = {
         "/help": _sh_help, "/": _sh_help, "/?": _sh_help,
         "/clear": _sh_clear, "/plan": _sh_plan, "/approve": _sh_approve, "/cost": _sh_cost,
         "/raw": _sh_raw, "/stream": _sh_stream, "/auto-edit": _sh_auto_edit, "/compact": _sh_compact,
         "/diff": _sh_diff, "/init": _sh_init, "/mcp": _sh_mcp, "/knowledge": _sh_knowledge,
         "/skill": _sh_skill, "/tools": _sh_tools, "/memory": _sh_memory, "/status": _sh_status,
-        "/config": _sh_config, "/model": _sh_model,
+        "/config": _sh_config, "/model": _sh_model, "/rewind": _sh_rewind,
         "/workspace": _sh_embedded, "/patch": _sh_embedded, "/gitops": _sh_embedded,
     }
 
@@ -1705,6 +1741,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         from . import hooks as _hooks
         _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
         messages[0] = _sys_msg()
+        _snapshot(line)   # /rewind 检查点（本轮之前的对话+代码状态）
         messages.append({"role": "user", "content": _mentions.build_user_content(user_content, _mention_imgs)})
         mcfg = cfg.get_model_config()
         provider = build_chain(mcfg, api_key, narrate=narrate)
@@ -1823,6 +1860,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         from . import hooks as _hooks
         _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
         messages[0] = _sys_msg()   # 每轮刷新 system：注入真实当前日期，续接旧会话/跨天也不过时
+        _snapshot(line)   # /rewind 检查点（本轮之前的对话+代码状态）
         messages.append({"role": "user", "content": _mentions.build_user_content(user_content, _mention_imgs)})
         try:
             mcfg = cfg.get_model_config()
