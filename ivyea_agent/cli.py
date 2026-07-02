@@ -2233,6 +2233,20 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 def _cmd_self(args: argparse.Namespace) -> int:
     from . import permission, self_manage
 
+    if args.action == "update":   # 检测最新版并更新（源码仓 git pull / 否则 pip·pipx）
+        from . import updater
+        uc = updater.check_now()
+        if uc.get("latest") is None:
+            print(ui.message("warn", "无法连接 GitHub 检查更新（离线或超时）。")); return 1
+        if not uc.get("has_update") and not getattr(args, "force", False):
+            print(ui.message("success", f"已是最新版 v{uc['current']}。")); return 0
+        _lat = str(uc.get("latest") or "").lstrip("vV")
+        print(ui.message("info", f"更新到 v{_lat}（当前 v{uc['current']}）…"))
+        ok, out = updater.do_update()
+        if out:
+            print(out[-3000:])
+        print(ui.message("success" if ok else "error", "更新完成，重开生效。" if ok else "更新失败。"))
+        return 0 if ok else 1
     if args.action == "status":
         print(self_manage.render_status())
         return 0
@@ -3058,7 +3072,7 @@ def build_parser() -> argparse.ArgumentParser:
     pself.add_argument("action", choices=[
         "status", "doctor", "ops-bootstrap",
         "service-status", "service-start", "service-stop", "service-logs", "service-autostart",
-        "backup", "upgrade", "uninstall",
+        "backup", "update", "upgrade", "uninstall",
     ])
     pself.add_argument("--output", help="backup 输出路径")
     pself.add_argument("--host", default="127.0.0.1", help="ops-bootstrap 建议服务监听地址")
