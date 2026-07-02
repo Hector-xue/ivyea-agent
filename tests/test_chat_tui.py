@@ -13,16 +13,18 @@ def _plain(s: str) -> str:
     return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", s)
 
 
-def test_tui_default_off_and_opt_in(monkeypatch):
+def test_tui_default_on_and_opt_out(monkeypatch):
     import types
     monkeypatch.setattr(chat_tui.sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
     monkeypatch.setattr(chat_tui.sys, "stdout", types.SimpleNamespace(isatty=lambda: True))
     monkeypatch.delenv("IVYEA_TUI", raising=False)
-    assert chat_tui.tui_enabled() is False                # 默认走行式（正常滚动缓冲区）
-    for on in ("1", "true", "On", "YES"):
-        monkeypatch.setenv("IVYEA_TUI", on)
-        assert chat_tui.tui_enabled() is True             # IVYEA_TUI=1 才进全屏 TUI（opt-in）
-    monkeypatch.setenv("IVYEA_TUI", "0")
+    monkeypatch.delenv("IVYEA_LIVE", raising=False)
+    assert chat_tui.tui_enabled() is True                 # 默认全屏 alt-screen TUI（输入框钉死）
+    for off in ("0", "false", "Off", "NO"):
+        monkeypatch.setenv("IVYEA_TUI", off)
+        assert chat_tui.tui_enabled() is False            # IVYEA_TUI=0 → 滚动区/行式
+    monkeypatch.delenv("IVYEA_TUI", raising=False)
+    monkeypatch.setenv("IVYEA_LIVE", "1")                 # IVYEA_LIVE=1（要滚动区）→ 不进 alt-screen
     assert chat_tui.tui_enabled() is False
 
 
@@ -30,7 +32,7 @@ def test_tui_disabled_when_not_tty(monkeypatch):
     import types
     monkeypatch.setattr(chat_tui.sys, "stdin", types.SimpleNamespace(isatty=lambda: False))
     monkeypatch.setattr(chat_tui.sys, "stdout", types.SimpleNamespace(isatty=lambda: True))
-    monkeypatch.setenv("IVYEA_TUI", "1")                  # 即便 opt-in，非 TTY 也回退行式
+    monkeypatch.delenv("IVYEA_TUI", raising=False)        # 默认开，但非 TTY 也回退
     assert chat_tui.tui_enabled() is False
 
 

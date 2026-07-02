@@ -20,14 +20,17 @@ import time
 from typing import Callable
 
 _TRUTHY = ("1", "true", "on", "yes")
+_FALSY = ("0", "false", "off", "no")
 _SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 def tui_enabled() -> bool:
-    """是否走全屏 TUI（alt-screen）。默认**关**——走行式（正常滚动缓冲区），
-    这样鼠标滚轮/框选复制原生可用（对标 Claude Code）。仅 `IVYEA_TUI=1/true/on/yes`
-    才进全屏 TUI（opt-in）。非 TTY / prompt_toolkit 不可用时也回退到行式。"""
-    if os.environ.get("IVYEA_TUI", "").strip().lower() not in _TRUTHY:
+    """是否走全屏 alt-screen TUI（输入框彻底钉死、翻历史也在）。**默认开**。
+    `IVYEA_TUI=0/false/off/no` 或 `IVYEA_LIVE=1`（要滚动区）→ 关；
+    非 TTY / prompt_toolkit 不可用时也回退。"""
+    if os.environ.get("IVYEA_LIVE", "").strip().lower() in _TRUTHY:
+        return False
+    if os.environ.get("IVYEA_TUI", "").strip().lower() in _FALSY:
         return False
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return False
@@ -62,6 +65,24 @@ def _visual_lines(text: str, width: int) -> list[str]:
                 cur += ch; w += cw
         out.append(cur)
     return out
+
+
+def _make_scroll_control(get_text, on_scroll):
+    """FormattedTextControl + 鼠标滚轮处理（alt-screen 下 transcript 被裁到末屏、内容不溢出，
+    需自己接滚轮）。SCROLL_UP/DOWN → on_scroll(delta)。Shift+拖选仍由终端原生处理（复制）。"""
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    class _C(FormattedTextControl):
+        def mouse_handler(self, mouse_event):
+            et = mouse_event.event_type
+            if et == MouseEventType.SCROLL_UP:
+                on_scroll(-3); return None
+            if et == MouseEventType.SCROLL_DOWN:
+                on_scroll(3); return None
+            return super().mouse_handler(mouse_event)
+
+    return _C(get_text)
 
 
 def _ptprint(s: str) -> None:
@@ -488,8 +509,8 @@ class ChatTUI:
                 Window(FormattedTextControl(self._footer), height=1),        # 状态栏（生成中也在）
             ])
         else:
-            # alt-screen：内部 transcript（末屏裁剪+贴底+键盘滚动；审批面板在 _body_ansi 末尾）
-            self._body_window = Window(FormattedTextControl(self._body_ansi), wrap_lines=True)
+            # alt-screen：内部 transcript（末屏裁剪+贴底+键盘/鼠标滚轮滚动；审批面板在 _body_ansi 末尾）
+            self._body_window = Window(_make_scroll_control(self._body_ansi, self._scroll_by), wrap_lines=True)
             root = HSplit([
                 self._body_window,
                 top_border,
@@ -609,11 +630,11 @@ class ChatTUI:
             "run": "ansiyellow", "prompt": "ansicyan bold",
             "mode": "ansicyan bold", "auto-suggestion": "ansibrightblack",
         })
-        # mouse_support=False：不抢鼠标，终端原生选中/复制可用。scrollback 模式 full_screen=False
-        # （常驻底部 app，输出经 patch_stdout 落滚动缓冲区）；alt-screen 模式 full_screen=True。
+        # alt-screen：mouse_support=True → 鼠标滚轮滚 transcript；Shift+拖选仍走终端原生选中(复制)。
+        # scrollback：mouse_support=False → 完全交给终端(原生滚轮+框选复制)，full_screen=False。
         self.app = Application(
             layout=Layout(root, focused_element=ta), key_bindings=kb, style=style,
-            full_screen=not self.scrollback, mouse_support=False, refresh_interval=0.3,
+            full_screen=not self.scrollback, mouse_support=not self.scrollback, refresh_interval=0.3,
         )
         return self.app
 
