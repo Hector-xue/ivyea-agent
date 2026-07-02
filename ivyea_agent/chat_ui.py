@@ -162,6 +162,7 @@ class _StreamPrinter:
             self._erase(self.block)
             self._emit_md(self.block)
         elif not self._emitted:                    # 从没定稿过（如空回复）→ 兜底渲染全文
+            from . import markdown
             print(f"{_C['c']}●{_C['x']} " + markdown.render(final_text))
         self.block = ""
 

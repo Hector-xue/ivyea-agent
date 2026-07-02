@@ -8,15 +8,15 @@
 """
 from __future__ import annotations
 
-import sys
 import os
+import re as _re
+import sys
 from typing import Callable
 
 from . import config
 
 EXIT = object()  # 哨兵：用户在框内 Ctrl+C/Ctrl+D 退出
 
-import re as _re
 _AT_RE = _re.compile(r"(?<!\S)@([^\s@]*)$")   # 光标前最后一个 @路径片段（用于补全）
 
 
