@@ -112,8 +112,21 @@ def _messages_to_gemini(messages: list[dict]) -> tuple[str, list[dict[str, Any]]
             })
             continue
 
-        text = _content_text(msg.get("content"))
-        contents.append({"role": "user", "parts": [{"text": text}]})
+        content = msg.get("content")
+        parts_u: list[dict[str, Any]] = []
+        text = _content_text(content)
+        if text:
+            parts_u.append({"text": text})
+        if isinstance(content, list):                     # 多模态→Gemini inlineData
+            for it in content:
+                if isinstance(it, dict) and it.get("type") == "image_url":
+                    iu = it.get("image_url")
+                    url = iu.get("url") if isinstance(iu, dict) else iu
+                    if url and str(url).startswith("data:"):
+                        head, b64 = str(url).split(",", 1)
+                        mime = head.split(":", 1)[1].split(";", 1)[0]
+                        parts_u.append({"inlineData": {"mimeType": mime, "data": b64}})
+        contents.append({"role": "user", "parts": parts_u or [{"text": ""}]})
 
     return "\n\n".join(system_parts), contents
 

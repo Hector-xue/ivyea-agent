@@ -18,7 +18,7 @@ from .providers import LLMProvider
 
 SYSTEM_PROMPT = """你是 Ivyea Agent：既是资深亚马逊运营专家，也是合格的编码/工程助手——两类任务都是你的一等本职。按用户当前需求自然切换：运营就按运营流程走，写代码就按工程流程走。
 广告：run_patrol(巡检) → propose_actions(看动作) → execute_actions(逐条人工审批执行) → 必要时 rollback。
-通用：read_file/list_dir/web_fetch/web_search 读取信息；write_file/edit_file 产出文件；run_python(可用 pandas/openpyxl 读 Excel、算数)、run_command 执行——这些写/执行操作都会弹人工审批。
+通用：read_file/list_dir/web_fetch/web_search 读取信息；write_file/edit_file 产出文件；run_python(可用 pandas/openpyxl 读 Excel、算数)、run_command 执行——这些写/执行操作都会弹人工审批。长任务（dev server、watch、长构建等不会很快结束的命令）用 run_command 的 run_in_background=true 后台跑、立即拿 bash_id，再用 bash_output 轮询输出，别在前台干等。
 代码：先 grep(内容正则)/glob(按文件名找文件)/code_search(找相关文件)/code_symbols/code_impact 定位，再 read_file 看真实内容（改前必读，别瞎猜路径）。改代码按场景选一个写工具：改单个文件的某一处→edit_file(唯一 old→new)；新建或整体重写文件→write_file；跨多文件/多处关联改动或要顺带跑测试→code_apply_patch(一次提交全部 ops)。每个写工具都是一次调用即审批落盘——**一次逻辑改动只用一个工具，不要先 dry-run 再 execute、也不要同一处既 edit_file 又 code_apply_patch 重复弹审批**。改完测试失败用 run_tests/code_repair 闭环修复。
 委派：需要多角度/独立的调研，可用 dispatch_subagent 派只读子 agent 并行查清，避免主线被探索细节塞满。
 MCP：用户接了 MCP 服务器时，用 mcp_list_tools/mcp_list_resources/mcp_list_prompts 发现，mcp_read_resource/mcp_get_prompt 取内容，mcp_call_tool 调用工具（写类会审批）。
@@ -225,13 +225,16 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
 def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
                     max_steps: int | None = None, narrate: Callable[[str], None] = print,
                     render: Callable[[str], None] = None, model: str = "",
-                    cancel_check: Callable[[], bool] | None = None) -> dict:
+                    cancel_check: Callable[[], bool] | None = None,
+                    render_reasoning: Callable[[str], None] = None) -> dict:
     """流式跑一轮：token 边出边渲染、工具实时叙述、累计用量。
     返回 {text, usage}（usage 为本轮各步累加）。render(token) 逐字输出助手文本。
 
-    cancel_check：TUI 忙碌时请求中断的钩子；在步/流/工具边界返回 True 则抛
-    KeyboardInterrupt，交给上层保留会话并恢复输入。默认无操作，行式循环不受影响。"""
+    render_reasoning(token)：支持思考的模型(deepseek-reasoner/codex/claude/gemini)的
+    思考流；默认无操作(不显示)。cancel_check：TUI 忙碌时请求中断的钩子；在步/流/工具边界
+    返回 True 则抛 KeyboardInterrupt，交给上层保留会话并恢复输入。"""
     render = render or (lambda s: print(s, end="", flush=True))
+    render_reasoning = render_reasoning or (lambda s: None)
     cancel_check = cancel_check or (lambda: False)
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "prompt_cache_hit_tokens": 0}
 
@@ -258,6 +261,8 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
             if ev["type"] == "text":
                 printed_any = True
                 render(ev["text"])
+            elif ev["type"] == "reasoning":
+                render_reasoning(ev.get("text") or "")
             elif ev["type"] == "final":
                 final = ev
         if printed_any:

@@ -18,6 +18,40 @@ DEFAULT_MODELS = {
     "gemini": "gemini-2.5-flash",
 }
 
+
+def clipboard_image() -> str | None:
+    """从系统剪贴板取图片，保存为临时 png，返回路径；无图/不支持返回 None。
+    best-effort 三平台：macOS(pngpaste)、Linux(xclip/wl-paste)、Windows(PowerShell)。
+    仅本地真终端可用；网页终端无法访问系统剪贴板。"""
+    import subprocess
+    import sys
+    import tempfile
+    from . import config
+    try:
+        config.ensure_dirs()
+        out = str(Path(tempfile.mkdtemp(prefix="ivyea-paste-")) / "clip.png")
+    except Exception:
+        out = str(Path(tempfile.gettempdir()) / "ivyea-clip.png")
+    plat = sys.platform
+    cmds: list[list[str]] = []
+    if plat == "darwin":
+        cmds = [["pngpaste", out]]
+    elif plat.startswith("linux"):
+        cmds = [["bash", "-lc", f"wl-paste --type image/png > {out!r}"],
+                ["bash", "-lc", f"xclip -selection clipboard -t image/png -o > {out!r}"]]
+    elif plat.startswith("win"):
+        ps = ("$img=Get-Clipboard -Format Image; if($img){{$img.Save('{p}')}} "
+              "else {{exit 3}}").format(p=out)
+        cmds = [["powershell", "-NoProfile", "-Command", ps]]
+    for cmd in cmds:
+        try:
+            r = subprocess.run(cmd, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            continue
+        if r.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 0:
+            return out
+    return None
+
 API_ENV_KEYS = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",

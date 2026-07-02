@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import __version__, config, ui
 # chat 展示层 helper 已拆到 chat_ui.py；re-export 保持 cli.X 引用与既有测试兼容。
-from .chat_ui import _is_amazon_domain, _looks_like_code_task, _LiveSpinner, _StreamPrinter
+from .chat_ui import _is_amazon_domain, _looks_like_code_task, _LiveSpinner, _ReasoningPrinter, _StreamPrinter
 
 
 def _ask(prompt: str, default: str = "") -> str:
@@ -1201,7 +1201,9 @@ SLASH_COMMANDS = [
     ("/approve", "批准并退出计划模式，继续执行"),
     ("/cost", "本会话 token 用量与成本估算"),
     ("/compact", "压缩上下文；/compact auto on|off 控制自动压缩"),
+    ("/rewind", "回退检查点：截断对话到某轮之前 + 恢复代码文件（对话+代码快照）"),
     ("/init", "生成账户指令模板 AGENTS.md（长期打法/边界，自动注入）"),
+    ("/paste", "把剪贴板里的图片喂给多模态模型（也可直接 @图片路径）"),
     ("/raw", "切换 Markdown 渲染 / 原始流式输出"),
     ("/stream", "开关完整流式（边生成边出字、收尾渲染 markdown；默认关）"),
     ("/auto-edit", "开关写操作自动放行（/auto-edit on|off；默认逐次审批）"),
@@ -1350,6 +1352,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         ctx.asin = args.asin
     meter = pricing.UsageMeter()
     _ui = {"ctx": 0}                                        # 状态栏:上下文 token 估算
+    _checkpoints: list = []                                 # /rewind 检查点：每轮前的 {对话长度, 代码快照}
+
+    def _snapshot(line: str) -> None:
+        """turn 开始前记一个检查点（对话截断点 + git 代码快照），供 /rewind 回退。"""
+        from . import git_workflow as _gw
+        try:
+            cp = _gw.checkpoint(os.getcwd())
+        except Exception:
+            cp = None
+        _checkpoints.append({"n": len(_checkpoints) + 1, "msg_len": len(messages),
+                             "cp": cp, "label": (line or "")[:50]})
     instructions = memory.load_instructions(os.getcwd())   # USER.md/AGENTS.md 持久指令
     profile_key = getattr(args, "asin", None) or "default"
     profile_context = profiles.context_text(profiles.resolve(asin=getattr(args, "asin", "") or ""), label=profile_key)
@@ -1414,14 +1427,27 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         f"{_C['d']}/ 命令 · ↑↓+Enter 选择 · Alt+Enter 换行 · /exit 退出{_C['x']}",
     ]
     from . import chat_tui as _chat_tui
-    _tui_on = _chat_tui.tui_enabled()
+    _tui_on = _chat_tui.tui_enabled()   # IVYEA_TUI=1 → 全屏 alt-screen
+    # 常驻底部 app（滚动缓冲区）为**默认**：输入框钉底、生成中也在，保留原生滚轮/复制（对标
+    # Claude/Ink）。IVYEA_PLAIN=1 退回旧行式循环；非 TTY / prompt_toolkit 不可用也退回。
+    def _live_default() -> bool:
+        if _tui_on or not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return False
+        if os.environ.get("IVYEA_PLAIN", "").strip().lower() in ("1", "true", "on", "yes"):
+            return False
+        try:
+            import prompt_toolkit  # noqa: F401
+        except Exception:
+            return False
+        return True
+    _live_on = _live_default()
     _health = cfg.main_brain_health()
     _health_msg = "" if _health.get("ok") else ui.message("warn", _health.get("hint", "主脑不可用，请用 /model 切换。"))
     # TUI 模式：banner+欢迎框作为 transcript 首块（打印会被 alt-screen 清掉）；行式则直接打印。
     _intro = f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}\n" + _welcome_box_str(_welcome_lines, width=64)
     if _health_msg:
         _intro += "\n" + _health_msg
-    if not _tui_on:
+    if not _tui_on and not _live_on:   # LIVE/alt-screen 由 chat_tui 打 intro，避免双 banner
         print(f"{_C['c']}{_C['b']}{_BANNER}{_C['x']}")
         _print_welcome_box(_welcome_lines, width=64)
         print()
@@ -1652,17 +1678,41 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             print(ui.message("warn", f"未知模型 id：{mid}。用 /model 看清单。"))
         return True
 
+    def _sh_rewind(line):
+        """回退检查点：截断对话到某轮之前 + 把代码文件恢复到该轮之前（对标 Claude /rewind）。"""
+        nonlocal messages
+        from . import git_workflow as _gw, tui as _tuisel
+        if not _checkpoints:
+            print(ui.message("info", "还没有可回退的检查点（本会话尚无对话轮）。")); return True
+        opts = [(str(i), f"#{c['n']} {c['label'] or '(无标签)'}") for i, c in enumerate(_checkpoints)]
+        opts = opts[::-1][:10] + [("cancel", "取消")]
+        sel = _tuisel.select("回退到哪一轮之前？", "会截断此后的对话，并把 tracked 代码文件恢复到该轮之前。", opts)
+        if sel in ("cancel", ""):
+            print(ui.message("muted", "已取消。")); return True
+        c = _checkpoints[int(sel)]
+        stat = _gw.checkpoint_diffstat(c.get("cp"), os.getcwd()) if c.get("cp") else ""
+        preview = stat or "（无 git 仓 / 无 tracked 文件改动，仅回退对话）"
+        if _tuisel.select("确认回退？", preview, [("yes", "确认回退"), ("no", "取消")]) != "yes":
+            print(ui.message("muted", "已取消。")); return True
+        del messages[c["msg_len"]:]                     # 截断对话
+        if c.get("cp"):
+            ok, msg = _gw.restore_checkpoint(c["cp"], os.getcwd())
+            print(ui.message("success" if ok else "warn", msg))
+        del _checkpoints[_checkpoints.index(c):]        # 丢弃此检查点及其后的
+        _persist()
+        print(ui.message("success", f"已回退到 #{c['n']} 之前（对话截断 + 文件恢复）。")); return True
+
     _SLASH_HANDLERS = {
         "/help": _sh_help, "/": _sh_help, "/?": _sh_help,
         "/clear": _sh_clear, "/plan": _sh_plan, "/approve": _sh_approve, "/cost": _sh_cost,
         "/raw": _sh_raw, "/stream": _sh_stream, "/auto-edit": _sh_auto_edit, "/compact": _sh_compact,
         "/diff": _sh_diff, "/init": _sh_init, "/mcp": _sh_mcp, "/knowledge": _sh_knowledge,
         "/skill": _sh_skill, "/tools": _sh_tools, "/memory": _sh_memory, "/status": _sh_status,
-        "/config": _sh_config, "/model": _sh_model,
+        "/config": _sh_config, "/model": _sh_model, "/rewind": _sh_rewind,
         "/workspace": _sh_embedded, "/patch": _sh_embedded, "/gitops": _sh_embedded,
     }
 
-    def _execute_turn(line, render, narrate, cancel_check=None):
+    def _execute_turn(line, render, narrate, cancel_check=None, render_reasoning=None):
         """跑一轮对话，输出经 render(token)/narrate(行) 注入 —— 供 TUI 复用（行式循环仍走下方原逻辑）。
         cancel_check：运行中请求中断的钩子（TUI 用）。返回 {text, usage, blocked}。"""
         nonlocal messages
@@ -1684,7 +1734,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         _inject = bool(getattr(ctx, "asin", "")) or _is_amazon_domain(line) or not _looks_like_code_task(line)
         kctx, kids = knowledge.context_for_query(line, limit=3) if _inject else ("", [])
         sctx, sids = skills.context_for_query(line, limit=2) if _inject else ("", [])
-        user_content = line
+        from . import mentions as _mentions        # @文件引用：把 @path 文本文件内联给模型
+        user_content, _mention_imgs = _mentions.expand(line, os.getcwd(), with_images=True)
+        if _mention_imgs:
+            narrate(ui.message("muted", "已引用图片: " + ", ".join(os.path.basename(p) for p in _mention_imgs)))
         if ectx:
             user_content += "\n\n[工程上下文]\n" + ectx
             narrate(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))
@@ -1701,12 +1754,14 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         from . import hooks as _hooks
         _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
         messages[0] = _sys_msg()
-        messages.append({"role": "user", "content": user_content})
+        _snapshot(line)   # /rewind 检查点（本轮之前的对话+代码状态）
+        messages.append({"role": "user", "content": _mentions.build_user_content(user_content, _mention_imgs)})
         mcfg = cfg.get_model_config()
         provider = build_chain(mcfg, api_key, narrate=narrate)
         ctx.provider = provider
         out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""),
-                                         render=render, narrate=narrate, cancel_check=cancel_check)
+                                         render=render, narrate=narrate, cancel_check=cancel_check,
+                                         render_reasoning=render_reasoning)
         c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
         _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
         if c:
@@ -1724,12 +1779,13 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         out["blocked"] = False
         return out
 
-    if _tui_on:                  # 全屏 TUI（opt-in：IVYEA_TUI=1；默认走下面的行式循环）
+    if _tui_on or _live_on:      # 全屏 TUI（IVYEA_TUI=1）或滚动区常驻 app（IVYEA_LIVE=1）
         return _chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
                              render_markdown=markdown.render,
                              plan_intent_fn=_plan_mode_intent,
                              set_plan_mode=_set_plan_mode_msg,
-                             cycle_mode=_cycle_mode, mode_label_fn=_mode_label, intro=_intro)
+                             cycle_mode=_cycle_mode, mode_label_fn=_mode_label,
+                             slash_handlers=_SLASH_HANDLERS, scrollback=_live_on, intro=_intro)
 
     while True:
         line = ci.read("❯ ")
@@ -1743,6 +1799,14 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if line in ("/exit", "/quit"):
             print("再见。")
             return 0
+        if line.split()[0] == "/paste":   # 剪贴板图片：存临时文件后改写成 @路径，走正常多模态轮
+            from . import vision as _vision
+            _img = _vision.clipboard_image()
+            if not _img:
+                print(ui.message("warn", "剪贴板里没有图片（网页终端无法访问系统剪贴板；本地终端需 pngpaste/xclip/wl-paste）。")); continue
+            _rest = line[len("/paste"):].strip() or "这张图片里是什么？"
+            print(ui.message("muted", f"已取剪贴板图片 → {_img}"))
+            line = f"@{_img} {_rest}"   # 落到下面的模型轮，由 mentions 收成多模态附件
         _handler = _SLASH_HANDLERS.get(line.split()[0])
         if _handler is not None:
             _handler(line); continue
@@ -1788,7 +1852,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         )
         kctx, kids = knowledge.context_for_query(line, limit=3) if _inject_domain else ("", [])
         sctx, sids = skills.context_for_query(line, limit=2) if _inject_domain else ("", [])
-        user_content = line
+        from . import mentions as _mentions        # @文件引用：把 @path 文本文件内联给模型
+        user_content, _mention_imgs = _mentions.expand(line, os.getcwd(), with_images=True)
+        if _mention_imgs:
+            print(ui.message("muted", "已引用图片: " + ", ".join(os.path.basename(p) for p in _mention_imgs)))
         if ectx:
             user_content += "\n\n[工程上下文]\n" + ectx
             print(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))
@@ -1808,24 +1875,32 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         from . import hooks as _hooks
         _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
         messages[0] = _sys_msg()   # 每轮刷新 system：注入真实当前日期，续接旧会话/跨天也不过时
-        messages.append({"role": "user", "content": user_content})
+        _snapshot(line)   # /rewind 检查点（本轮之前的对话+代码状态）
+        messages.append({"role": "user", "content": _mentions.build_user_content(user_content, _mention_imgs)})
         try:
             mcfg = cfg.get_model_config()
             provider = build_chain(mcfg, api_key, narrate=lambda s: print(s))
             ctx.provider = provider   # 供 dispatch_subagent 跑只读子 agent 用
+            rp = _ReasoningPrinter()   # 思考流（reasoning 模型）：正文前 dim 显示 ✻ 思考
             if render_md and stream_live and sys.stdout.isatty():
                 # 完整流式：边生成边打印正文，收尾擦除最后一段改渲染 markdown
                 sp = _StreamPrinter()
                 out = agent_loop.run_turn_stream(
                     provider, ctx, messages, model=mcfg.get("model", ""),
-                    render=sp.render, narrate=lambda s: (sp.commit(), print(s)))
+                    render=lambda t: (rp.done(), sp.render(t)),
+                    render_reasoning=rp.render,
+                    narrate=lambda s: (rp.done(), sp.commit(), print(s)))
+                rp.done()
                 sp.rerender(out["text"])
             elif render_md:
                 # 缓冲 + spinner（含流式正文预览），收尾渲染 markdown
                 spin = _LiveSpinner()
                 out = agent_loop.run_turn_stream(
                     provider, ctx, messages, model=mcfg.get("model", ""),
-                    render=spin.tick, narrate=lambda s: (spin.clear(), print(s)))
+                    render=lambda t: (rp.done(), spin.tick(t)),
+                    render_reasoning=rp.render,
+                    narrate=lambda s: (rp.done(), spin.clear(), print(s)))
+                rp.done()
                 spin.clear()
                 print(f"\n{_C['c']}●{_C['x']} " + markdown.render(out["text"]))   # 回答前留一空行
             else:

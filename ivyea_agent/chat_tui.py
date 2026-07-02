@@ -64,6 +64,73 @@ def _visual_lines(text: str, width: int) -> list[str]:
     return out
 
 
+def _ptprint(s: str) -> None:
+    """打印带 ANSI 的一段到滚动缓冲区。patch_stdout 下必须走 print_formatted_text(ANSI())，
+    直接 print 原始 ANSI 会被当字面量（显示成 ?[36m）。"""
+    from prompt_toolkit import print_formatted_text
+    from prompt_toolkit.formatted_text import ANSI
+    print_formatted_text(ANSI(s))
+
+
+class _ScrollEmitter:
+    """滚动缓冲区输出器（patch_stdout 安全、无光标 erase）。assistant 文本按块（空行边界）缓冲
+    → 渲染 markdown 打印；工具行/思考直接打印。对标 Claude/Ink：完成内容落到正常滚动缓冲区，
+    底部输入框由 app 常驻重绘。所有输出走 _ptprint（print_formatted_text(ANSI)）。"""
+    def __init__(self, render_markdown):
+        self._md = render_markdown or (lambda s: s)
+        self._buf = ""            # 当前 assistant 文本块缓冲
+        self._emitted = False     # 本轮是否已定稿过块（● 仅首块）
+        self._reason_buf = ""      # 思考缓冲（收尾/被打断时一次性 dim 打印）
+
+    def text(self, token: str) -> None:
+        self._buf += token
+        while "\n\n" in self._buf:
+            block, self._buf = self._buf.split("\n\n", 1)
+            self._emit(block)
+
+    def _emit(self, block: str) -> None:
+        if not block.strip():
+            return
+        self._flush_reason()
+        prefix = "\033[36m●\033[0m " if not self._emitted else ""
+        self._emitted = True
+        _ptprint(prefix + self._md(block.strip()))
+
+    def flush_text(self) -> None:
+        if self._buf.strip():
+            self._emit(self._buf)
+        self._buf = ""
+
+    def line(self, text: str) -> None:
+        """工具行 / stage / 提示：先把当前文本块定稿，再直接打印。"""
+        self.flush_text()
+        self._flush_reason()
+        _ptprint(text)
+
+    def echo(self, line: str) -> None:
+        """把用户指令回显成 Claude 风格灰底带（打到滚动缓冲区）。"""
+        import shutil
+        try:
+            from prompt_toolkit.utils import get_cwidth
+            dw = lambda s: sum(get_cwidth(c) for c in s)   # noqa: E731
+        except Exception:
+            dw = len
+        width = max(20, shutil.get_terminal_size((80, 24)).columns)
+        BG, MK, FG = "\033[48;5;236m", "\033[38;5;45m", "\033[38;5;252m"
+        for i, ln in enumerate(str(line).split("\n")):
+            head = f"{MK}> {FG}" if i == 0 else f"{FG}  "
+            pad = " " * max(0, width - 2 - dw(ln))
+            _ptprint(f"{BG}{head}{ln}{pad}\033[0m")
+
+    def reasoning(self, token: str) -> None:
+        self._reason_buf += token or ""
+
+    def _flush_reason(self) -> None:
+        if self._reason_buf.strip():
+            _ptprint("\033[2m✻ 思考\n" + self._reason_buf.strip() + "\033[0m")
+        self._reason_buf = ""
+
+
 class ChatTUI:
     """一次 TUI 会话的状态与渲染。turn_fn(line, render, narrate)->dict 跑真正一轮。"""
 
@@ -74,11 +141,16 @@ class ChatTUI:
                  set_plan_mode: Callable[[bool], str] | None = None,
                  cycle_mode: Callable[[], str] | None = None,
                  mode_label_fn: Callable[[], str] | None = None,
+                 slash_handlers: dict | None = None,
+                 scrollback: bool = False,
                  intro: str | None = None):
         self.status_fn = status_fn
         self.turn_fn = turn_fn
         self._md = render_markdown or (lambda s: s)
         self.slash_commands = slash_commands or []
+        self._slash_handlers = slash_handlers or {}   # {"/model": fn, ...} 全量斜杠命令
+        self.scrollback = scrollback                  # True=常驻底部 app+patch_stdout（默认体验）
+        self._emitter = _ScrollEmitter(self._md) if scrollback else None
         self._mode_label_fn = mode_label_fn   # ()->当前模式文字 或 None
         self._plan_intent = plan_intent_fn or (lambda _t: None)
         self._set_plan = set_plan_mode        # (on)->msg 或 None
@@ -101,13 +173,32 @@ class ChatTUI:
     def render(self, token: str = "") -> None:
         if not token:
             return
+        if self.scrollback:          # 打到正常滚动缓冲区上方（输入框由 app 常驻钉底）
+            self._emitter.text(token)
+            return
         self.live = (self.live or "") + token
         self._scroll_to_bottom()     # 新内容 → 贴底跟随
         self._invalidate()
 
+    def render_reasoning(self, token: str = "") -> None:
+        if self.scrollback and token:
+            self._emitter.reasoning(token)
+
+    def _emit_line(self, text: str) -> None:
+        """一次性提示行（排队/模式切换/斜杠提示）：滚动区 print，alt-screen 进 transcript。"""
+        if self.scrollback:
+            _ptprint(text)
+        else:
+            self.blocks.append(text)
+            self._scroll_to_bottom()
+            self._invalidate()
+
     def narrate(self, text: str = "") -> None:
         text = str(text or "")
         if not text.strip():
+            return
+        if self.scrollback:
+            self._emitter.line(text)
             return
         self._commit_live()          # 工具行/提示打断当前流式文本，先定稿
         self.blocks.append(text)
@@ -182,16 +273,52 @@ class ChatTUI:
             self.blocks = []
             self.live = None
             self._scroll_to_bottom()
+            if self.scrollback:
+                self._emit_line("\033[2m（已清空对话上下文）\033[0m")
             return "handled"
         pi = self._plan_intent(text)                       # 自然语言进/出计划模式
         if pi is not None:
             if self._set_plan is not None:
-                self.blocks.append("\033[2m" + self._set_plan(pi == "enter") + "\033[0m")
+                self._emit_line("\033[2m" + self._set_plan(pi == "enter") + "\033[0m")
             return "handled"
-        if text.startswith("/"):                           # 其它斜杠命令：P5 再接全，先提示
-            self.blocks.append(f"\033[2m（{text}：该命令暂请退出 TUI 后在行式界面使用；完整接入见 P5）\033[0m")
+        head = text.split()[0] if text.split() else text
+        handler = self._slash_handlers.get(head)           # 全量斜杠命令（/model /compact /rewind /paste …）
+        if handler is not None:
+            self._run_slash(handler, text)
             return "handled"
+        if text.startswith("/"):                           # 未识别的斜杠命令 → 当普通轮/展开交给 turn_fn
+            return "turn"
         return "turn"
+
+    def _run_slash(self, handler, text: str) -> None:
+        """执行斜杠命令：滚动区模式下挂起 app 到终端跑（handler 多为 print/可能交互），避免嵌套 app。
+        运行期临时清空审批 marshal——否则 handler 里的 tui.select 会被 marshal 到已挂起的主 app 造成死锁。"""
+        from . import tui as _tui_mod
+
+        def _call():
+            _tui_mod.set_active_selector(None)
+            # patch_stdout 会把 print 的原始 ANSI 转义成字面量；run_in_terminal 已挂起 app，
+            # 临时换回真实终端流让 handler 的原始 ANSI 上色 + 交互输入正常，用完还原。
+            saved = sys.stdout
+            try:
+                if self.scrollback and sys.__stdout__ is not None:
+                    sys.stdout = sys.__stdout__
+                handler(text)
+            finally:
+                sys.stdout = saved
+                _tui_mod.set_active_selector(self._approve)
+
+        if self.scrollback:
+            try:
+                from prompt_toolkit.application import run_in_terminal
+                run_in_terminal(_call)
+                return
+            except Exception:
+                pass
+        try:
+            _call()
+        except Exception as e:   # noqa: BLE001
+            self._emit_line(f"\033[31m命令出错：{e}\033[0m")
 
     def _body_height(self) -> int:
         """transcript 可用物理行数（终端高 - 输入框上线/输入/下线/状态栏 4 行）。"""
@@ -240,47 +367,70 @@ class ChatTUI:
 
     def _footer(self):
         base = self.status_fn() or ""
-        if self.running:   # "生成中" 已移到 transcript 内容处；footer 只留控制提示 + 状态
+        if self.running:
             q = f" · 已排队 {len(self.queued)}" if self.queued else ""
             hint = "中断中…" if self.cancel_requested else "Esc/Ctrl-C 中断 · 回车排队下一条"
+            if self.scrollback:   # 滚动区模式：footer 是唯一的"生成中"指示（带转圈+耗时）
+                frame = _SPIN[int((time.time() - self.started) * 10) % len(_SPIN)]
+                secs = int(time.time() - self.started)
+                return [("class:run", f" {frame} 生成中 {secs}s · {hint}{q}"), ("class:ftr", " · " + base)]
             return [("class:run", f" {hint}{q}"), ("class:ftr", " · " + base)]
         return [("class:ftr", " " + base)]
 
     def _start_turn(self, line: str) -> None:
         self.instruction = line
-        self.blocks.append(f"\033[36m❯\033[0m {line}")   # 问题内联回显（正常 Q/A 流，滚动可见）
+        if self.scrollback:                              # 指令回显成 Claude 风格灰底带，打到滚动区
+            self._emitter.echo(line)
+        else:
+            self.blocks.append(f"\033[36m❯\033[0m {line}")   # 内联回显（alt-screen transcript）
         self._scroll_to_bottom()
         self.running = True
         self.cancel_requested = False
         self.started = time.time()
 
+        def _call(**extra):
+            return self.turn_fn(line, self.render, self.narrate, **extra)
+
         def _worker():
-            try:
-                out = self.turn_fn(line, self.render, self.narrate,
-                                   cancel_check=lambda: self.cancel_requested)
-            except KeyboardInterrupt:
-                out = {"text": "", "cancelled": True}
-            except TypeError:
-                # turn_fn 不接受 cancel_check（如测试假函数）→ 退化重试
+            # 逐步退化匹配 turn_fn 签名（测试假函数可能不接受新 kwargs）；每级都兜住中断/异常
+            for extra in ({"cancel_check": lambda: self.cancel_requested,
+                           "render_reasoning": self.render_reasoning},
+                          {"cancel_check": lambda: self.cancel_requested},
+                          {}):
                 try:
-                    out = self.turn_fn(line, self.render, self.narrate)
+                    out = _call(**extra)
+                except KeyboardInterrupt:
+                    out = {"text": "", "cancelled": True}
+                except TypeError:
+                    continue   # 签名不匹配 → 试更少的参数
                 except Exception as e:   # noqa: BLE001
                     out = {"text": "", "error": str(e)}
-            except Exception as e:   # noqa: BLE001
-                out = {"text": "", "error": str(e)}
-            self._finish(out)
+                self._finish(out)
+                return
+            self._finish({"text": "", "error": "turn_fn 签名不兼容"})
 
         threading.Thread(target=_worker, daemon=True).start()
         self._invalidate()
 
     def _finish(self, out: dict) -> None:
-        self._commit_live()
-        if out.get("todos_panel"):           # 轮末计划面板（与行式对齐）
-            self.blocks.append(out["todos_panel"])
-        if out.get("cancelled"):
-            self.blocks.append("\033[33m⛔ 已中断（会话已保留，可继续输入）\033[0m")
-        elif out.get("error"):
-            self.blocks.append(f"\033[31m✗ 出错：{out['error']}\033[0m")
+        if self.scrollback:
+            self._emitter.flush_text()               # 定稿最后一个文本块
+            self._emitter._flush_reason()
+            if out.get("todos_panel"):
+                _ptprint(out["todos_panel"])
+            if out.get("cancelled"):
+                _ptprint("\033[33m⛔ 已中断（会话已保留，可继续输入）\033[0m")
+            elif out.get("error"):
+                _ptprint(f"\033[31m✗ 出错：{out['error']}\033[0m")
+            self._emitter._emitted = False           # 下一轮重新从 ● 首块开始
+        else:
+            self._commit_live()
+            if out.get("todos_panel"):           # 轮末计划面板（与行式对齐）
+                self.blocks.append(out["todos_panel"])
+            if out.get("cancelled"):
+                self.blocks.append("\033[33m⛔ 已中断（会话已保留，可继续输入）\033[0m")
+            elif out.get("error"):
+                self.blocks.append(f"\033[31m✗ 出错：{out['error']}\033[0m")
         self.running = False
         self.cancel_requested = False
         self._scroll_to_bottom()
@@ -316,21 +466,37 @@ class ChatTUI:
         ta = TextArea(prompt=[("class:prompt", "❯ ")], multiline=False, height=1,
                       completer=self._completer(), complete_while_typing=True,
                       auto_suggest=AutoSuggestFromHistory(), history=history)
-        from prompt_toolkit.layout.containers import VSplit
-        # transcript：末屏裁剪(贴底) + 键盘滚动。无固定头部——问题/回答正常内联流。
-        self._body_window = Window(FormattedTextControl(self._body_ansi), wrap_lines=True)
+        from prompt_toolkit.layout.containers import VSplit, ConditionalContainer
+        from prompt_toolkit.formatted_text import ANSI
         # 输入框上边线：右端显示当前模式（计划模式/自动接受编辑），对标 Claude 边线上的标签
         top_border = VSplit([
             Window(height=1, char="─", style="class:rule"),                  # 左侧铺满的线
             Window(FormattedTextControl(self._mode_label), height=1, dont_extend_width=True),
         ])
-        root = HSplit([
-            self._body_window,                                               # transcript
-            top_border,                                                      # 输入框上边线（右端带模式）
-            ta,                                                              # 输入框
-            Window(height=1, char="─", style="class:rule"),                  # 输入框下边线
-            Window(FormattedTextControl(self._footer), height=1),            # 状态栏（最底部）
-        ])
+        # 审批面板（有 pending 时显示在输入框上方；两模式共用）
+        approval_win = ConditionalContainer(
+            Window(FormattedTextControl(lambda: ANSI("\n".join(self._approval_lines()))), wrap_lines=True),
+            filter=approving)
+        if self.scrollback:
+            # 常驻底部 app：无内部 transcript（输出经 patch_stdout 落到正常滚动缓冲区上方）
+            self._body_window = None
+            root = HSplit([
+                approval_win,
+                top_border,                                                  # 输入框上边线（右端带模式）
+                ta,                                                          # 输入框（钉底）
+                Window(height=1, char="─", style="class:rule"),             # 输入框下边线
+                Window(FormattedTextControl(self._footer), height=1),        # 状态栏（生成中也在）
+            ])
+        else:
+            # alt-screen：内部 transcript（末屏裁剪+贴底+键盘滚动；审批面板在 _body_ansi 末尾）
+            self._body_window = Window(FormattedTextControl(self._body_ansi), wrap_lines=True)
+            root = HSplit([
+                self._body_window,
+                top_border,
+                ta,
+                Window(height=1, char="─", style="class:rule"),
+                Window(FormattedTextControl(self._footer), height=1),
+            ])
         kb = KeyBindings()
 
         @kb.add("c-c")
@@ -366,7 +532,7 @@ class ChatTUI:
                     event.app.exit(result=0)
                     return
                 self.queued.append(text)
-                self.blocks.append(f"\033[2m⋯ 已排队：{text}\033[0m")
+                self._emit_line(f"\033[2m⋯ 已排队：{text}\033[0m")
                 self._invalidate()
                 return
             action = self._handle_submit(text)   # /exit /clear /plan / 计划模式 NL / 其它斜杠 / 普通轮
@@ -382,7 +548,7 @@ class ChatTUI:
             if self.running or self.pending is not None or self._cycle is None:
                 return
             label = self._cycle()
-            self.blocks.append(f"\033[2m⇄ 模式：{label}\033[0m")
+            self._emit_line(f"\033[2m⇄ 模式：{label}\033[0m")
             self._invalidate()
 
         # 键盘滚动 transcript（mouse_support=False 为了原生框选复制，滚动走键盘）。
@@ -443,10 +609,11 @@ class ChatTUI:
             "run": "ansiyellow", "prompt": "ansicyan bold",
             "mode": "ansicyan bold", "auto-suggestion": "ansibrightblack",
         })
-        # mouse_support=False：不抢鼠标，终端原生选中/复制可用；滚动走键盘(PgUp/PgDn/Ctrl-U/B/N)
+        # mouse_support=False：不抢鼠标，终端原生选中/复制可用。scrollback 模式 full_screen=False
+        # （常驻底部 app，输出经 patch_stdout 落滚动缓冲区）；alt-screen 模式 full_screen=True。
         self.app = Application(
             layout=Layout(root, focused_element=ta), key_bindings=kb, style=style,
-            full_screen=True, mouse_support=False, refresh_interval=0.3,
+            full_screen=not self.scrollback, mouse_support=False, refresh_interval=0.3,
         )
         return self.app
 
@@ -458,16 +625,27 @@ def run(status_fn: Callable[[], str], slash_commands: list,
         set_plan_mode: Callable[[bool], str] | None = None,
         cycle_mode: Callable[[], str] | None = None,
         mode_label_fn: Callable[[], str] | None = None,
+        slash_handlers: dict | None = None,
+        scrollback: bool = False,
         intro: str | None = None) -> int:
-    """启动 TUI 会话。turn_fn(line, render, narrate)->dict 跑真正一轮。"""
+    """启动 TUI 会话。scrollback=True → 常驻底部 app + 输出落正常滚动缓冲区（默认体验，
+    保留原生滚轮/复制）；False → alt-screen 全屏 TUI。turn_fn 跑真正一轮。"""
     tui = ChatTUI(status_fn=status_fn, turn_fn=turn_fn or (lambda *a, **k: {"text": ""}),
                   render_markdown=render_markdown, slash_commands=slash_commands,
                   plan_intent_fn=plan_intent_fn, set_plan_mode=set_plan_mode, cycle_mode=cycle_mode,
-                  mode_label_fn=mode_label_fn, intro=intro)
+                  mode_label_fn=mode_label_fn, slash_handlers=slash_handlers,
+                  scrollback=scrollback, intro=intro)
     from . import tui as _tui_mod
     _tui_mod.set_active_selector(tui._approve)   # 工具线程的审批 marshal 回本 app
+    if scrollback and intro:
+        _ptprint(intro)                          # banner/欢迎框打到滚动缓冲区（输入框在其下方钉底）
     try:
-        tui.build_app().run()
+        if scrollback:
+            from prompt_toolkit.patch_stdout import patch_stdout
+            with patch_stdout():                 # 让后台/工具线程的 print 落在输入框上方
+                tui.build_app().run()
+        else:
+            tui.build_app().run()
     finally:
         _tui_mod.set_active_selector(None)
     return 0

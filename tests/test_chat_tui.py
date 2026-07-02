@@ -195,20 +195,23 @@ def test_approval_marshaled_from_tool_thread():
 # ---- P4 输入对齐 ----
 def test_handle_submit_routes():
     from ivyea_agent.cli import _plan_mode_intent
+    called = {}
     tui = chat_tui.ChatTUI(
         status_fn=lambda: "s", turn_fn=lambda *a, **k: {"text": ""}, render_markdown=lambda s: s,
         slash_commands=[("/exit", "退出"), ("/plan", "计划"), ("/model", "模型")],
         plan_intent_fn=_plan_mode_intent,
         set_plan_mode=lambda on: ("已进入计划模式" if on else "已退出计划模式"),
         cycle_mode=lambda: "自动接受编辑",
+        slash_handlers={"/model": lambda line: called.__setitem__("model", line)},
     )
     assert tui._handle_submit("/exit") == "exit"
     tui.blocks = ["x"]
     assert tui._handle_submit("/clear") == "handled" and tui.blocks == []
     assert tui._handle_submit("进入计划模式") == "handled"
     assert "计划模式" in _plain("\n".join(tui.blocks))
-    assert tui._handle_submit("/model") == "handled"           # 其它 slash → P5 提示
-    assert "P5" in _plain("\n".join(tui.blocks))
+    assert tui._handle_submit("/model gpt") == "handled"       # 有 handler → 执行
+    assert called.get("model") == "/model gpt"
+    assert tui._handle_submit("/unknown") == "turn"            # 无 handler 的 slash → 交给 turn_fn 展开/提示
     assert tui._handle_submit("帮我分析广告") == "turn"        # 普通 → 跑一轮
 
 

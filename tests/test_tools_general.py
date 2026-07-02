@@ -48,6 +48,32 @@ def test_write_blocked_in_plan_mode(tmp_path):
     assert "计划模式" in r and not f.exists()
 
 
+# ── 后台 bash（Phase 1）──
+def test_run_command_background_and_output(tmp_path):
+    import re
+    import time
+    ctx = _ctx(tmp_path, allow=["run_command"])
+    r = tg.t_run_command({"command": "echo hello-bg", "run_in_background": True}, ctx)
+    assert "bash_id=" in r
+    bid = re.search(r"bash_id=(bg-\d+)", r).group(1)
+    out = ""
+    for _ in range(50):
+        out = tg.t_bash_output({"bash_id": bid}, ctx)
+        if "已结束" in out:
+            break
+        time.sleep(0.1)
+    assert "hello-bg" in out and "已结束" in out       # 轮询到输出 + 退出状态
+
+
+def test_kill_bash(tmp_path):
+    import re
+    ctx = _ctx(tmp_path, allow=["run_command"])
+    r = tg.t_run_command({"command": "sleep 30", "run_in_background": True}, ctx)
+    bid = re.search(r"bash_id=(bg-\d+)", r).group(1)
+    assert "已终止" in tg.t_kill_bash({"bash_id": bid}, ctx)
+    assert "没有该后台任务" in tg.t_bash_output({"bash_id": "bg-9999"}, ctx)
+
+
 # ── edit_file ──
 def test_edit_unique(tmp_path):
     f = tmp_path / "e.txt"

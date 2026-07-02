@@ -636,6 +636,80 @@ def _run(cmd, args, ctx, kind: str, preview: str, *, auto_ok: bool = False) -> s
     return head + (_truncate(out) if out else "（无输出）")
 
 
+# ── 后台/长任务 bash：非阻塞 Popen + 输出轮询（对标 Claude Code 的后台 bash）──
+_BG_PROCS: dict = {}   # bash_id -> {proc, logpath, cmd, read_pos, started}
+_BG_SEQ = [0]
+
+
+def _run_background(cmd, args, ctx, preview: str, *, auto_ok: bool) -> str:
+    """在后台起进程，立即返回 bash_id；输出写临时日志，供 bash_output 轮询。"""
+    if not auto_ok:
+        ok, msg = _gate(ctx, "run_command", preview)
+        if not ok:
+            return msg
+    workdir = getattr(ctx, "workspace", "") or os.getcwd()
+    import tempfile
+    _BG_SEQ[0] += 1
+    bash_id = f"bg-{_BG_SEQ[0]}"
+    logf = tempfile.NamedTemporaryFile(prefix=f"ivyea-{bash_id}-", suffix=".log", delete=False)
+    try:
+        proc = subprocess.Popen(cmd, cwd=workdir, stdout=logf, stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8", errors="replace",
+                                preexec_fn=_make_preexec(0) if os.name != "nt" else None)
+    except Exception as e:  # noqa: BLE001
+        logf.close()
+        return f"后台启动失败：{e}"
+    logf.close()
+    _BG_PROCS[bash_id] = {"proc": proc, "logpath": logf.name,
+                          "cmd": (args.get("command") or "")[:200], "read_pos": 0}
+    return (f"已在后台启动：bash_id={bash_id}（pid {proc.pid}）。"
+            f"用 bash_output(bash_id=\"{bash_id}\") 查看输出/状态，kill_bash 终止。")
+
+
+def t_bash_output(args: dict, ctx) -> str:
+    """读取某后台 bash 自上次以来的新增输出 + 运行状态（只读，自动放行）。"""
+    bash_id = str(args.get("bash_id") or "").strip()
+    rec = _BG_PROCS.get(bash_id)
+    if not rec:
+        running = ", ".join(k for k, v in _BG_PROCS.items() if v["proc"].poll() is None)
+        return f"没有该后台任务：{bash_id}。" + (f"运行中的：{running}" if running else "当前无运行中的后台任务。")
+    proc = rec["proc"]
+    try:
+        with open(rec["logpath"], "r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(rec["read_pos"])
+            chunk = fh.read()
+            rec["read_pos"] = fh.tell()
+    except Exception as e:  # noqa: BLE001
+        chunk = f"(读日志失败：{e})"
+    code = proc.poll()
+    status = "运行中" if code is None else f"已结束（退出码 {code}）"
+    body = _truncate(chunk) if chunk else "（无新增输出）"
+    return f"[{bash_id} · {status}]\n{body}"
+
+
+def t_kill_bash(args: dict, ctx) -> str:
+    """终止某后台 bash（写操作，需审批）。"""
+    bash_id = str(args.get("bash_id") or "").strip()
+    rec = _BG_PROCS.get(bash_id)
+    if not rec:
+        return f"没有该后台任务：{bash_id}。"
+    ok, msg = _gate(ctx, "run_command", f"终止后台任务 {bash_id}：{rec['cmd']}")
+    if not ok:
+        return msg
+    proc = rec["proc"]
+    if proc.poll() is not None:
+        return f"{bash_id} 已经结束（退出码 {proc.poll()}）。"
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    except Exception as e:  # noqa: BLE001
+        return f"终止失败：{e}"
+    return f"已终止 {bash_id}。"
+
+
 def t_run_python(args: dict, ctx) -> str:
     import sys
     code = args.get("code", "")
@@ -658,7 +732,10 @@ def t_run_command(args: dict, ctx) -> str:
     import os as _os
     shell = ["cmd", "/c", command] if _os.name == "nt" else ["bash", "-lc", command]
     auto_ok = policy.is_readonly_command(command)   # 只读命令自动放行，省去逐次审批
-    return _run(shell, args, ctx, "run_command", "运行命令：" + _truncate(command, 400), auto_ok=auto_ok)
+    preview = "运行命令：" + _truncate(command, 400)
+    if args.get("run_in_background"):   # 长任务(dev server/watch/构建)：后台非阻塞，返回 bash_id
+        return _run_background(shell, args, ctx, preview, auto_ok=auto_ok)
+    return _run(shell, args, ctx, "run_command", preview, auto_ok=auto_ok)
 
 
 def t_todo_write(args: dict, ctx) -> str:
@@ -768,8 +845,17 @@ GENERAL_TOOL_SCHEMAS = [
         ["path", "old", "new"]),
     _fn("run_python", "在沙箱(限工作目录/超时)运行 Python 代码取 stdout（执行，会弹审批）。可用 pandas/openpyxl 等。",
         {"code": {"type": "string"}, "timeout": {"type": "integer", "description": "秒，默认30"}}, ["code"]),
-    _fn("run_command", "在沙箱运行 shell 命令取输出（执行，会弹审批）。",
-        {"command": {"type": "string"}, "timeout": {"type": "integer"}}, ["command"]),
+    _fn("run_command", "在沙箱运行 shell 命令取输出（执行，会弹审批）。长任务（dev server/watch/"
+        "长构建等不会很快结束的命令）设 run_in_background=true 后台运行，立即返回 bash_id，再用 "
+        "bash_output 轮询输出，别在前台阻塞等待。",
+        {"command": {"type": "string"}, "timeout": {"type": "integer"},
+         "run_in_background": {"type": "boolean", "description": "true=后台非阻塞运行，返回 bash_id"}},
+        ["command"]),
+    _fn("bash_output", "读取某后台 bash 自上次以来的新增输出与运行状态（只读，自动放行）。配合 "
+        "run_command(run_in_background=true) 轮询长任务进展。",
+        {"bash_id": {"type": "string", "description": "run_command 后台返回的 bash_id"}}, ["bash_id"]),
+    _fn("kill_bash", "终止某个后台 bash 任务（写操作，会弹审批）。",
+        {"bash_id": {"type": "string"}}, ["bash_id"]),
     _fn("web_fetch", "抓取一个 URL 的文本内容（GET，只读，自动放行）。",
         {"url": {"type": "string"}}, ["url"]),
     _fn("web_search", "网页搜索关键词（尽力而为，无 key）。",
@@ -843,6 +929,7 @@ GENERAL_DISPATCH = {
     "read_file": t_read_file, "list_dir": t_list_dir,
     "write_file": t_write_file, "edit_file": t_edit_file,
     "run_python": t_run_python, "run_command": t_run_command,
+    "bash_output": t_bash_output, "kill_bash": t_kill_bash,
     "web_fetch": t_web_fetch, "web_search": t_web_search,
     "grep": t_grep, "glob": t_glob, "code_search": t_code_search,
     "code_symbols": t_code_symbols, "code_impact": t_code_impact,

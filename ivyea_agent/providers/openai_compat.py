@@ -47,6 +47,8 @@ def parse_sse(lines: Iterable[str]) -> Iterator[dict]:
         if not choices:
             continue
         delta = choices[0].get("delta") or {}
+        if delta.get("reasoning_content"):   # deepseek-reasoner 等的思考流 → 思考事件
+            yield {"type": "reasoning", "text": delta["reasoning_content"]}
         if delta.get("content"):
             content_parts.append(delta["content"])
             yield {"type": "text", "text": delta["content"]}
