@@ -22,6 +22,15 @@ from . import __version__, config, ui
 from .chat_ui import _is_amazon_domain, _looks_like_code_task, _LiveSpinner, _ReasoningPrinter, _StreamPrinter
 
 
+def _isatty(stream) -> bool:
+    """None 安全的 isatty —— 冻结的无控制台 GUI exe（如 IvyeaOpsServer.exe 跑 `ivyea`）里
+    sys.stdin/stdout/stderr 可能是 None，直接 .isatty() 会 AttributeError 崩溃。"""
+    try:
+        return bool(stream) and stream.isatty()
+    except Exception:
+        return False
+
+
 def _ask(prompt: str, default: str = "") -> str:
     """问一行；回车=用默认。"""
     suffix = f" [{default}]" if default else ""
@@ -925,7 +934,7 @@ def _patrol_lingxing(args: argparse.Namespace) -> int:
     except LingXingError as e:
         print(ui.message("error", f"领星错误: {e}"), file=sys.stderr)
         return 1
-    print(lrep.render(result, color=sys.stdout.isatty()))
+    print(lrep.render(result, color=_isatty(sys.stdout)))
     out_dir = args.output_dir or str(config.IVYEA_DIR / "patrol_out")
     md_path = report.write_md(lrep.render_md(result), out_dir, asin=f"sid{args.sid}")
     print("\n" + ui.message("success", f"报告已保存: {md_path}"), file=sys.stderr)
@@ -1374,14 +1383,14 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             print(f"{_C['d']}（未填，跳过；之后可 /profile 配置）{_C['x']}")
 
     # 首次运行：无配置 → 先走引导（模型 + 运营画像）
-    if not _oneshot and not cfg.SETTINGS_FILE.exists() and not cfg.get_active_key() and sys.stdin.isatty():
+    if not _oneshot and not cfg.SETTINGS_FILE.exists() and not cfg.get_active_key() and _isatty(sys.stdin):
         print(f"{_C['d']}（检测到首次运行，先带你配置）{_C['x']}")
         _cmd_onboard(args)
         print()
         _onboard_profile()
         print()
     # 已配模型但没配运营画像：给一行非阻塞提示（不每次弹 wizard，避免打扰）
-    elif not _oneshot and sys.stdin.isatty() and not _profile_configured():
+    elif not _oneshot and _isatty(sys.stdin) and not _profile_configured():
         print(f"{_C['d']}提示：还没配运营画像（目标 ACoS/保护词），广告诊断会更准 → 输入 /profile 查看，或 "
               f"`ivyea profile set default --target-acos 0.3 --protected 品牌词`{_C['x']}")
 
@@ -1486,7 +1495,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     # IVYEA_LIVE=1 或 IVYEA_TUI=0 → 滚动区常驻底部 app（原生滚轮/复制，输入框仅生成中固定）；
     # IVYEA_PLAIN=1 / 非 TTY / prompt_toolkit 不可用 → 旧行式循环。
     _env = lambda k: os.environ.get(k, "").strip().lower()   # noqa: E731
-    _tty_ok = sys.stdin.isatty() and sys.stdout.isatty()
+    _tty_ok = _isatty(sys.stdin) and _isatty(sys.stdout)
     if _tty_ok:
         try:
             import prompt_toolkit  # noqa: F401
@@ -1618,7 +1627,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         nonlocal stream_live
         stream_live = (not stream_live) if line == "/stream" else line.endswith(" on")
         cfg.set_setting("stream_live", stream_live)
-        if stream_live and not sys.stdout.isatty():
+        if stream_live and not _isatty(sys.stdout):
             print(ui.message("warn", "完整流式需要交互终端；当前非 tty，仍用收尾渲染。"))
         else:
             print(ui.message("success", f"完整流式已{'开启（边生成边出字，收尾渲染 markdown）' if stream_live else '关闭（用 spinner+流式预览）'}。"))
@@ -1669,7 +1678,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         elif not (data.get("patch") or "").strip():
             print(ui.message("info", f"{'暂存区' if staged else '工作区'}没有改动。"))
         else:
-            print(_panels.colorize_patch(data["patch"], color=sys.stdout.isatty()))
+            print(_panels.colorize_patch(data["patch"], color=_isatty(sys.stdout)))
             if data.get("truncated"):
                 print(ui.message("muted", "（diff 较长已截断，完整看 git diff）"))
         return True
@@ -1997,7 +2006,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             provider = build_chain(mcfg, api_key, narrate=lambda s: print(s))
             ctx.provider = provider   # 供 dispatch_subagent 跑只读子 agent 用
             rp = _ReasoningPrinter()   # 思考流（reasoning 模型）：正文前 dim 显示 ✻ 思考
-            if render_md and stream_live and sys.stdout.isatty():
+            if render_md and stream_live and _isatty(sys.stdout):
                 # 完整流式：边生成边打印正文，收尾擦除最后一段改渲染 markdown
                 sp = _StreamPrinter()
                 out = agent_loop.run_turn_stream(
@@ -2027,7 +2036,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 pricing.add_spend(c)   # 仍记账（今日累计存 spend.json）；正文不再刷花费行，累计花费看底部状态栏
             from . import panels
             if ctx.todos:
-                print(panels.render_todos(ctx.todos, color=sys.stdout.isatty()))
+                print(panels.render_todos(ctx.todos, color=_isatty(sys.stdout)))
             print()
             # 记忆：会话转录入库 + 自策展提示
             memory.index_turn("user", line, sid)
