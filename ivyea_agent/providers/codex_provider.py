@@ -66,6 +66,28 @@ def _model_candidates(model: str) -> list[str]:
     return out
 
 
+def _normalize_usage(u: dict) -> dict:
+    """Responses API 的 usage（input_tokens/output_tokens/input_tokens_details.cached_tokens）
+    归一成内部契约的 chat-completions 形状（prompt_tokens/completion_tokens/
+    prompt_cache_hit_tokens）——否则 agent_loop 的用量累计/stream-json 的 result
+    统计读不到字段，全显示 0。已是 chat-completions 形状则原样返回。"""
+    if not isinstance(u, dict) or not u:
+        return {}
+    if "prompt_tokens" in u or "completion_tokens" in u:
+        return u
+    cached = ((u.get("input_tokens_details") or {}).get("cached_tokens")
+              or (u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+    try:
+        return {
+            "prompt_tokens": int(u.get("input_tokens") or 0),
+            "completion_tokens": int(u.get("output_tokens") or 0),
+            "prompt_cache_hit_tokens": int(cached or 0),
+            "prompt_tokens_details": {"cached_tokens": int(cached or 0)},
+        }
+    except (TypeError, ValueError):
+        return {}
+
+
 def parse_responses_sse(lines: Iterable[str]) -> Iterator[dict]:
     """Parse OpenAI Responses SSE events into Ivyea stream events."""
     content_parts: list[str] = []
@@ -171,7 +193,7 @@ def parse_responses_sse(lines: Iterable[str]) -> Iterator[dict]:
         "type": "final",
         "content": "".join(content_parts),
         "tool_calls": final_tools,
-        "usage": usage,
+        "usage": _normalize_usage(usage),
     }
 
 
