@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Ivyea Agent · 安装指南</title>
-<meta name="description" content="Ivyea Agent Windows、macOS、Linux 一键安装、固定版本、手动安装、离线部署和故障排查。" />
+<meta name="description" content="Ivyea Agent 一键安装：Windows / macOS / Linux 三平台，自动装 pipx、拉 Release wheel，装完 ivyea onboard 即可对话。含固定版本、pipx 手动、离线内网部署、验证维护与故障排查。" />
 <style>
   :root{
     --bg:#f4f8f5; --line:rgba(12,40,26,.09); --line2:rgba(12,40,26,.15); --line3:rgba(12,40,26,.24);
@@ -55,9 +55,14 @@
   .doc{min-width:0}
   .eyebrow{font-size:10px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--text3);margin-bottom:10px}
   .doc h1{font-size:clamp(30px,4vw,42px);font-weight:800;letter-spacing:-.035em;line-height:1.1;margin-bottom:14px}
-  .doc-intro{font-size:15.5px;color:var(--text2);line-height:1.75;max-width:660px;margin-bottom:8px}
-  .doc h2{font-size:23px;font-weight:700;letter-spacing:-.02em;margin:46px 0 14px;padding-top:22px;border-top:1px solid var(--line)}
+  .doc-intro{font-size:15.5px;color:var(--text2);line-height:1.75;max-width:680px;margin-bottom:8px}
+  .doc h2{font-size:23px;font-weight:700;letter-spacing:-.02em;margin:52px 0 8px;padding-top:24px;border-top:1px solid var(--line)}
+  .doc .lead{font-size:14px;color:var(--text2);line-height:1.75;margin:8px 0 4px;max-width:680px}
   .doc p{font-size:14px;color:var(--text2);line-height:1.75;margin:10px 0;max-width:680px}
+  .doc ul{margin:10px 0 10px 2px;max-width:680px;list-style:none}
+  .doc li{font-size:14px;color:var(--text2);line-height:1.7;padding-left:20px;position:relative;margin:5px 0}
+  .doc li::before{content:"";position:absolute;left:4px;top:10px;width:6px;height:6px;border-radius:50%;
+    background:var(--green);opacity:.55}
   .doc code{font-family:var(--mono);font-size:12.5px;background:rgba(34,197,94,.10);color:#0a7a3e;
     padding:1px 6px;border-radius:4px;border:1px solid rgba(34,197,94,.16)}
   .doc pre{background:#0c1410;border:1px solid rgba(34,197,94,.18);border-radius:8px;
@@ -65,6 +70,9 @@
     font-family:var(--mono);font-size:13px;line-height:1.8;color:#cfe6d8;
     box-shadow:0 18px 44px -28px rgba(12,40,26,.5)}
   .doc pre code{background:none;border:none;color:inherit;padding:0;font-size:inherit}
+  .note{border-left:3px solid var(--green);background:rgba(34,197,94,.06);border-radius:0 6px 6px 0;
+    padding:11px 16px;margin:16px 0;max-width:680px;font-size:13px;color:var(--text2);line-height:1.7}
+  .note b{color:var(--text)}
 
   table{border-collapse:collapse;width:100%;max-width:760px;margin:16px 0;font-size:13.5px;
     border:1px solid var(--line);border-radius:8px;overflow:hidden}
@@ -74,12 +82,46 @@
   tbody tr:last-child td{border-bottom:none}
   tbody td code{white-space:nowrap}
 
-  .install-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0;max-width:760px}
-  .cmd-box{border:1px solid rgba(34,197,94,.18);border-radius:8px;overflow:hidden;background:#0c1410;
-    box-shadow:0 18px 44px -28px rgba(12,40,26,.5)}
-  .cmd-box .cmd-title{font-size:11px;font-weight:600;color:#4ade80;
-    padding:9px 14px;border-bottom:1px solid rgba(255,255,255,.07);font-family:"Inter",sans-serif}
-  .cmd-box pre{margin:0;border:none;border-radius:0;box-shadow:none;font-size:11.5px;line-height:1.7}
+  /* ── Terminal figure (与首页一致的招牌图示) ── */
+  .term{position:relative;min-width:0;margin:16px 0;max-width:760px;background:#0c1410;border-radius:8px;overflow:hidden;
+    border:1px solid rgba(34,197,94,.18);
+    box-shadow:0 30px 64px -32px rgba(12,40,26,.42), 0 0 48px -22px rgba(34,197,94,.3)}
+  .term-bar{display:flex;align-items:center;flex-wrap:wrap;gap:7px;padding:11px 14px;border-bottom:1px solid rgba(255,255,255,.06)}
+  .term-bar .d{width:11px;height:11px;border-radius:50%}
+  .term-bar .t{font-size:11px;color:rgba(255,255,255,.4);margin-left:8px;font-family:"Inter",sans-serif}
+  .term-os-sep{width:1px;height:14px;background:rgba(255,255,255,.14);margin:0 1px}
+  .term-os-tabs{display:inline-flex;gap:4px;margin-left:8px}
+  .term-os{font-size:11px;color:rgba(255,255,255,.4);padding:3px 9px;border-radius:4px;
+    border:1px solid transparent;transition:all .15s;font-family:"Inter",sans-serif}
+  .term-os:hover{color:rgba(255,255,255,.75)}
+  .term-os.active{color:#e8f5ec;background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.12)}
+  .term-copy{margin-left:auto;display:inline-flex;align-items:center;gap:5px;
+    padding:4px 10px;font-size:10px;color:rgba(255,255,255,.55);font-family:"Inter",sans-serif;
+    background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:3px;transition:all .2s}
+  .term-copy:hover{background:rgba(255,255,255,.12);color:#fff}
+  .term-body{padding:18px 18px 16px;font-family:var(--mono);
+    font-size:12.5px;line-height:1.85;color:rgba(200,224,208,.78);overflow-x:auto}
+  .tl{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+  .tl .c{color:rgba(120,200,150,.5)}
+  .tl .p{color:#4ade80;user-select:none}
+  .tl .cmd{color:#e8f5ec}
+  .tl .ok{color:#4ade80}
+  .tl .warn{color:#fbbf24}
+  .tl .dim{color:rgba(200,224,208,.4)}
+  .term-steps{display:flex;gap:16px;padding:12px 18px 16px;border-top:1px solid rgba(255,255,255,.06);flex-wrap:wrap}
+  .term-step{display:flex;align-items:center;gap:7px;font-size:11px;color:rgba(200,224,208,.5);
+    font-family:"Inter",sans-serif}
+  .term-step .n{width:18px;height:18px;border-radius:50%;display:inline-flex;align-items:center;
+    justify-content:center;font-size:10px;font-weight:700;background:var(--green);color:#fff}
+  .term-step .arw{color:rgba(200,224,208,.28)}
+
+  /* ── Flow band：脚本自动做的四步 ── */
+  .flow{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);
+    border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:18px 0;max-width:760px}
+  .flow .step{background:var(--bg);padding:18px 16px}
+  .flow .step .k{font-size:11px;font-weight:700;color:var(--green);letter-spacing:.04em;margin-bottom:8px}
+  .flow .step h4{font-size:13.5px;font-weight:600;margin-bottom:5px;letter-spacing:-.01em}
+  .flow .step p{font-size:12px;color:var(--text3);line-height:1.55;margin:0;max-width:none}
 
   footer{position:relative;z-index:2;border-top:1px solid var(--line);margin-top:20px}
   .foot{max-width:var(--max);margin:0 auto;padding:28px 24px 36px;display:flex;
@@ -98,6 +140,7 @@
     .toc .toc-h{display:none}
     .toc a{border-left:none;border:1px solid var(--line2);border-radius:20px;padding:5px 12px}
     .toc a.active{border-color:var(--green)}
+    .flow{grid-template-columns:1fr 1fr}
   }
   @media(max-width:640px){
     .wrap,.foot{padding-left:16px;padding-right:16px}
@@ -107,7 +150,9 @@
     .nav-links.open{display:flex;position:fixed;top:52px;left:0;right:0;flex-direction:column;gap:0;
       background:var(--bg);padding:8px 16px 12px;border-bottom:1px solid var(--line);z-index:150}
     .nav-links.open a{padding:11px 0;font-size:14px;border-bottom:1px solid var(--line)}
-    .install-grid{grid-template-columns:1fr}
+    .term-os{padding:3px 7px;font-size:10px}
+    .term-os-tabs{margin-left:4px;gap:3px}
+    .flow{grid-template-columns:1fr}
   }
 </style>
 </head>
@@ -137,87 +182,248 @@
     <aside class="toc" id="toc">
       <div class="toc-h">安装目录</div>
       <a href="#quick">最快安装</a>
-      <a href="#platforms">系统要求</a>
+      <a href="#what">脚本做了什么</a>
+      <a href="#requirements">系统要求</a>
       <a href="#version">固定版本</a>
-      <a href="#manual">手动安装</a>
-      <a href="#offline">离线部署</a>
-      <a href="#first-run">首次配置</a>
+      <a href="#manual">pipx / 手动安装</a>
+      <a href="#onboard">首次配置</a>
+      <a href="#verify">验证与维护</a>
+      <a href="#offline">离线内网部署</a>
       <a href="#trouble">故障排查</a>
     </aside>
 
     <article class="doc">
       <p class="eyebrow">Install guide · v1.2.1</p>
       <h1>安装 Ivyea Agent</h1>
-      <p class="doc-intro">推荐使用 pipx 安装。它会把 <code>ivyea</code> 作为独立命令放进 PATH，不污染系统 Python，也方便升级和卸载。</p>
+      <p class="doc-intro">一条命令装完，三步就能对话。安装脚本会自动检测 Python、装好 pipx、拉取最新 Release，把 <code>ivyea</code> 作为独立命令放进 PATH——不污染系统 Python，升级卸载都干净。Windows / macOS / Linux 三平台，CI 全绿。</p>
 
+      <!-- ── 最快安装 ── -->
       <h2 id="quick">最快安装</h2>
-      <div class="install-grid">
-        <div class="cmd-box">
-          <div class="cmd-title">Linux / macOS</div>
-          <pre><code>curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash</code></pre>
+      <p class="lead">选择你的系统与方式，复制整段运行即可。<b>一键脚本</b>是最省心的方式；已经装好 pipx 的用 <b>pipx</b> 直装源码。</p>
+
+      <div class="term">
+        <div class="term-bar">
+          <span class="d" style="background:#ff5f57"></span>
+          <span class="d" style="background:#febc2e"></span>
+          <span class="d" style="background:#28c840"></span>
+          <span class="term-os-tabs">
+            <button class="term-os active" data-os="linux">Linux / macOS</button>
+            <button class="term-os" data-os="windows">Windows</button>
+          </span>
+          <span class="term-os-sep"></span>
+          <span class="term-os-tabs">
+            <button class="term-os active" data-method="script">一键脚本</button>
+            <button class="term-os" data-method="pipx">pipx</button>
+          </span>
+          <button class="term-copy" id="copyBtn">⧉ 复制</button>
         </div>
-        <div class="cmd-box">
-          <div class="cmd-title">Windows PowerShell</div>
-          <pre><code>iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</code></pre>
+        <div class="term-body">
+<div class="os-pane" data-pane="linux-script">
+<div class="tl"><span class="c"># 1 · 一键安装（自动装 pipx，拉最新 Release wheel）</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash</span></div>
+<div class="tl"><span class="dim">[ivyea] 使用 Python 3.11.9</span></div>
+<div class="tl"><span class="dim">[ivyea] 安装 ivyea-agent（来源：Release wheel v1.2.1）…</span></div>
+<div class="tl"><span class="ok">[ivyea] ✓ 安装完成。</span></div>
+<div class="tl"><span class="c"># 2 · 首次引导：选模型 → 配 key（可选接领星）</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">ivyea onboard</span></div>
+<div class="tl"><span class="c"># 3 · 开始对话</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">ivyea chat</span></div>
+<div class="tl"><span class="ok">→ 对话式运营 Agent 就绪</span>  <span class="ok">✓</span></div>
+</div>
+<div class="os-pane" data-pane="windows-script" hidden>
+<div class="tl"><span class="c"># 1 · 一键安装（PowerShell，自动装 pipx / 拉 Release）</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</span></div>
+<div class="tl"><span class="dim">[ivyea] 安装 ivyea-agent（来源：Release wheel v1.2.1）…</span></div>
+<div class="tl"><span class="ok">[ivyea] ✓ 安装完成。若 ivyea 不能直接执行，请重开 PowerShell。</span></div>
+<div class="tl"><span class="c"># 2 · 首次引导：选模型 → 配 key</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">ivyea onboard</span></div>
+<div class="tl"><span class="c"># 3 · 开始对话</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">ivyea chat</span></div>
+<div class="tl"><span class="ok">→ 对话式运营 Agent 就绪</span>  <span class="ok">✓</span></div>
+</div>
+<div class="os-pane" data-pane="linux-pipx" hidden>
+<div class="tl"><span class="c"># 1 · 用 pipx 从源码安装（已装 pipx 时）</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">pipx install git+https://github.com/Hector-xue/ivyea-agent.git</span></div>
+<div class="tl"><span class="c"># 2 · 首次引导</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">ivyea onboard</span></div>
+<div class="tl"><span class="c"># 3 · 开始对话</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">ivyea chat</span></div>
+<div class="tl"><span class="ok">→ 对话式运营 Agent 就绪</span>  <span class="ok">✓</span></div>
+</div>
+<div class="os-pane" data-pane="windows-pipx" hidden>
+<div class="tl"><span class="c"># 1 · 用 pipx 从源码安装（已装 pipx 时）</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">pipx install git+https://github.com/Hector-xue/ivyea-agent.git</span></div>
+<div class="tl"><span class="c"># 2 · 首次引导</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">ivyea onboard</span></div>
+<div class="tl"><span class="c"># 3 · 开始对话</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">ivyea chat</span></div>
+<div class="tl"><span class="ok">→ 对话式运营 Agent 就绪</span>  <span class="ok">✓</span></div>
+</div>
+        </div>
+        <div class="term-steps">
+          <span class="term-step"><span class="n">1</span>安装</span><span class="term-step arw">→</span>
+          <span class="term-step"><span class="n">2</span>配置模型</span><span class="term-step arw">→</span>
+          <span class="term-step"><span class="n">3</span>对话</span>
         </div>
       </div>
-      <p>安装完成后重开终端，执行：</p>
-      <pre><code>ivyea onboard
-ivyea chat</code></pre>
+      <div class="note">看不到 <code>ivyea</code> 命令？多半是 PATH 还没刷新。<b>重开一个终端</b>即可；Linux/macOS 也可先临时执行 <code>export PATH="$HOME/.local/bin:$PATH"</code>。</div>
 
-      <h2 id="platforms">系统要求</h2>
+      <!-- ── 脚本做了什么 ── -->
+      <h2 id="what">一键脚本做了什么</h2>
+      <p class="lead">脚本是幂等的——重复运行就是升级到最新版。全过程只做这四件事，任何一步失败都会给出明确提示：</p>
+      <div class="flow">
+        <div class="step"><div class="k">01</div><h4>检测 Python</h4><p>找 Python 3.9+，缺失时按系统包管理器（apt/dnf/yum/apk/brew）尝试自动安装。</p></div>
+        <div class="step"><div class="k">02</div><h4>准备 pipx</h4><p>没有 pipx 就装一个，并把 <code>~/.local/bin</code> 加入 PATH，隔离运行环境。</p></div>
+        <div class="step"><div class="k">03</div><h4>拉 Release</h4><p>从 GitHub Release 直链下载 wheel（绕开 API 限流）；不可用时回退 git 源码。</p></div>
+        <div class="step"><div class="k">04</div><h4>装好自检</h4><p><code>pipx install</code> 后跑 <code>self doctor</code>，并初始化本地检索索引。</p></div>
+      </div>
+
+      <!-- ── 系统要求 ── -->
+      <h2 id="requirements">系统要求</h2>
       <table>
         <thead><tr><th>项目</th><th>要求</th></tr></thead>
         <tbody>
-          <tr><td>Python</td><td>Python 3.9 或更高版本。</td></tr>
-          <tr><td>系统</td><td>Windows、macOS、Linux（CI 三平台 × py3.9/3.11/3.12 全绿）。</td></tr>
-          <tr><td>安装器</td><td>脚本自动安装 pipx；也可手动安装。</td></tr>
-          <tr><td>模型</td><td>可使用 DeepSeek、OpenAI 兼容模型、Anthropic、Gemini 等配置。</td></tr>
+          <tr><td>Python</td><td>3.9 或更高（脚本会自动检测，必要时尝试自动安装）。</td></tr>
+          <tr><td>系统</td><td>Windows、macOS、Linux。CI 三平台 × Python 3.9 / 3.11 / 3.12 全绿。</td></tr>
+          <tr><td>网络</td><td>在线安装需能访问 GitHub。国内可设 <code>PIP_INDEX_URL</code> 走镜像，私有仓库设 <code>GITHUB_TOKEN</code>；完全离线见「离线内网部署」。</td></tr>
+          <tr><td>模型</td><td>DeepSeek、OpenAI 兼容、Anthropic、Gemini、OpenAI Codex 等任选其一作主脑，<code>ivyea onboard</code> 里配置。</td></tr>
         </tbody>
       </table>
 
+      <!-- ── 固定版本 ── -->
       <h2 id="version">固定版本安装</h2>
-      <p>团队内建议固定版本，避免不同成员安装到不同 Release。</p>
-      <pre><code>curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v1.2.1 bash</code></pre>
-      <pre><code>$env:IVYEA_VERSION="v1.2.1"
-iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</code></pre>
+      <p class="lead">团队协作时建议固定版本，避免不同成员装到不同 Release。用 <code>IVYEA_VERSION</code> 指定标签即可。</p>
+      <div class="term">
+        <div class="term-bar">
+          <span class="d" style="background:#ff5f57"></span>
+          <span class="d" style="background:#febc2e"></span>
+          <span class="d" style="background:#28c840"></span>
+          <span class="t">固定 v1.2.1</span>
+        </div>
+        <div class="term-body">
+<div class="tl"><span class="c"># Linux / macOS</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v1.2.1 bash</span></div>
+<div class="tl">&nbsp;</div>
+<div class="tl"><span class="c"># Windows PowerShell</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">$env:IVYEA_VERSION="v1.2.1"</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</span></div>
+</div>
+      </div>
 
-      <h2 id="manual">手动安装</h2>
-      <pre><code>pipx install git+https://github.com/Hector-xue/ivyea-agent.git</code></pre>
-      <p>开发者可用 editable 模式：</p>
-      <pre><code>git clone https://github.com/Hector-xue/ivyea-agent.git
-cd ivyea-agent
-python -m venv .venv
-. .venv/bin/activate
-pip install -e ".[dev,anthropic]"</code></pre>
+      <!-- ── pipx / 手动 ── -->
+      <h2 id="manual">pipx / 手动安装</h2>
+      <p class="lead">不想跑脚本，或想直接从源码装，用 pipx 一行即可。开发者用 editable 模式跑本地改动。</p>
+      <div class="term">
+        <div class="term-bar">
+          <span class="d" style="background:#ff5f57"></span>
+          <span class="d" style="background:#febc2e"></span>
+          <span class="d" style="background:#28c840"></span>
+          <span class="t">pipx / venv</span>
+        </div>
+        <div class="term-body">
+<div class="tl"><span class="c"># A · pipx 从源码直装（推荐给已有 pipx 的人）</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">pipx install git+https://github.com/Hector-xue/ivyea-agent.git</span></div>
+<div class="tl">&nbsp;</div>
+<div class="tl"><span class="c"># B · 开发者：clone + editable，改代码即时生效</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">git clone https://github.com/Hector-xue/ivyea-agent.git</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">cd ivyea-agent</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">python -m venv .venv &amp;&amp; . .venv/bin/activate</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">pip install -e ".[dev,anthropic]"</span></div>
+</div>
+      </div>
+      <div class="note">需要<b>本地语义检索</b>（sentence-transformers）时，一键脚本加 <code>IVYEA_WITH_SEMANTIC=1</code>，或 pipx 装完执行 <code>pipx inject ivyea-agent "sentence-transformers>=3.0"</code>。不装也能用，默认回退本地 hash 索引。</div>
 
-      <h2 id="offline">离线部署</h2>
-      <p>在有外网的发版机上生成离线包（含 wheelhouse 与启动器），复制到内网后解压安装，全程不下载 Python 包：</p>
-      <pre><code>python scripts/build_offline_bundle.py
-# 产物在 dist/offline/：
-#   ivyea-agent-offline-1.0.19.tar.gz   (Linux / macOS)
-#   ivyea-agent-offline-1.0.19.zip      (Windows)
-# 内网解压后：
-bash install.sh            # Linux / macOS
-# 或 powershell -ExecutionPolicy Bypass -File .\install.ps1   (Windows)</code></pre>
-      <p>要把本地语义检索依赖或 embedding 模型也放进离线包，加 <code>--with-semantic</code>（详见 README）。</p>
+      <!-- ── 首次配置 ── -->
+      <h2 id="onboard">首次配置</h2>
+      <p class="lead"><code>ivyea onboard</code> 是交互式引导：选主脑模型、填 API key、可选接入领星 OpenAPI、生成 <code>AGENTS.md</code> 持久指令。全程回车即用默认值。</p>
+      <div class="term">
+        <div class="term-bar">
+          <span class="d" style="background:#ff5f57"></span>
+          <span class="d" style="background:#febc2e"></span>
+          <span class="d" style="background:#28c840"></span>
+          <span class="t">ivyea onboard</span>
+        </div>
+        <div class="term-body">
+<div class="tl"><span class="p">$ </span><span class="cmd">ivyea onboard</span></div>
+<div class="tl"><span class="dim">选择主脑模型：</span></div>
+<div class="tl"><span class="ok">  ›</span> deepseek · openai · anthropic · gemini · openai-codex …</div>
+<div class="tl"><span class="dim">填入 API key（留空可稍后 ivyea config 补）：</span> <span class="cmd">••••••••</span></div>
+<div class="tl"><span class="dim">接入领星 OpenAPI 广告数据？(y/N)：</span> <span class="cmd">N</span></div>
+<div class="tl"><span class="ok">✓ 已写入 ~/.ivyea/settings.json 与 .env</span></div>
+<div class="tl"><span class="ok">✓ 已生成 AGENTS.md（持久运营指令）</span></div>
+<div class="tl"><span class="dim">下一步：ivyea chat</span></div>
+</div>
+      </div>
+      <p>之后随时可用这些命令查看或修改配置：</p>
+      <pre><code>ivyea config show            # 查看当前配置
+ivyea config set key value   # 改单项
+ivyea model                  # 查看 / 切换主脑模型（交互）</code></pre>
+      <div class="note">配置、记忆与知识库默认都在 <code>~/.ivyea/</code>：<code>settings.json</code>、<code>.env</code>、<code>mcp.json</code>、<code>memory.db</code> 和用户知识库。备份这个目录就是备份全部状态。</div>
 
-      <h2 id="first-run">首次配置</h2>
-      <pre><code>ivyea onboard      # 引导：选模型 → 配 key → 可选领星 → AGENTS.md
-ivyea model list
-ivyea doctor</code></pre>
-      <p>配置和记忆默认在 <code>~/.ivyea/</code>，包括 <code>.env</code>、<code>settings.json</code>、<code>mcp.json</code>、<code>memory.db</code> 和用户知识库。</p>
+      <!-- ── 验证与维护 ── -->
+      <h2 id="verify">验证与维护</h2>
+      <p class="lead"><code>ivyea doctor</code> 一键体检：配置、依赖、知识库、磁盘、领星 / MCP 连接。装完跑一次确认无红灯。</p>
+      <div class="term">
+        <div class="term-bar">
+          <span class="d" style="background:#ff5f57"></span>
+          <span class="d" style="background:#febc2e"></span>
+          <span class="d" style="background:#28c840"></span>
+          <span class="t">ivyea doctor</span>
+        </div>
+        <div class="term-body">
+<div class="tl"><span class="p">$ </span><span class="cmd">ivyea doctor</span></div>
+<div class="tl"><span class="ok">✓</span> Python 3.11.9 · ivyea-agent 1.2.1</div>
+<div class="tl"><span class="ok">✓</span> 主脑模型已配置 · API key 就绪</div>
+<div class="tl"><span class="ok">✓</span> 知识库 · 本地检索索引已建</div>
+<div class="tl"><span class="ok">✓</span> 数据目录 ~/.ivyea 可写 · 磁盘空间充足</div>
+<div class="tl"><span class="dim">○</span> <span class="dim">领星 OpenAPI 未接入（可选，ivyea lingxing setup）</span></div>
+</div>
+      </div>
+      <p>升级与卸载都走 <code>ivyea self</code>（默认 dry-run，加 <code>--execute</code> 才真正执行）：</p>
+      <pre><code>ivyea self upgrade --execute              # 升级到最新 Release
+ivyea self upgrade --version v1.2.1 --execute   # 升到指定版本
+ivyea self uninstall --execute            # 卸载（保留数据）
+ivyea self uninstall --remove-data --execute    # 卸载并删除 ~/.ivyea</code></pre>
+      <p>重新跑一键安装脚本也会把已装的 ivyea 升级到最新版，效果等同 <code>self upgrade</code>。</p>
 
+      <!-- ── 离线部署 ── -->
+      <h2 id="offline">离线内网部署</h2>
+      <p class="lead">内网或无外网机器：在有网的机器上打一个离线包（含 wheelhouse 与启动器），复制进内网解压安装，全程不下载任何 Python 包。</p>
+      <div class="term">
+        <div class="term-bar">
+          <span class="d" style="background:#ff5f57"></span>
+          <span class="d" style="background:#febc2e"></span>
+          <span class="d" style="background:#28c840"></span>
+          <span class="t">离线包</span>
+        </div>
+        <div class="term-body">
+<div class="tl"><span class="c"># 有网机器：生成离线包</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">python scripts/build_offline_bundle.py</span></div>
+<div class="tl"><span class="dim">产物在 dist/offline/：</span></div>
+<div class="tl"><span class="dim">  ivyea-agent-offline-1.2.1.tar.gz   (Linux / macOS)</span></div>
+<div class="tl"><span class="dim">  ivyea-agent-offline-1.2.1.zip      (Windows)</span></div>
+<div class="tl">&nbsp;</div>
+<div class="tl"><span class="c"># 内网机器：解压后安装（不联网）</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">bash install.sh</span>  <span class="dim"># Windows: powershell -ExecutionPolicy Bypass -File .\install.ps1</span></div>
+<div class="tl"><span class="ok">[ivyea] ✓ 离线安装完成。</span></div>
+</div>
+      </div>
+      <div class="note">要把<b>本地语义检索依赖或 embedding 模型</b>也打进离线包，加 <code>--with-semantic</code>（可选 <code>--semantic-model-dir</code> 指定预下载的模型目录），详见 README。</div>
+
+      <!-- ── 故障排查 ── -->
       <h2 id="trouble">故障排查</h2>
       <table>
-        <thead><tr><th>问题</th><th>处理方式</th></tr></thead>
+        <thead><tr><th>现象</th><th>处理方式</th></tr></thead>
         <tbody>
-          <tr><td>找不到 <code>ivyea</code></td><td>运行 <code>pipx ensurepath</code> 后重开终端。</td></tr>
-          <tr><td>Python 版本太低</td><td>安装 Python 3.9+；Windows 安装时勾选 Add Python to PATH。</td></tr>
-          <tr><td>Release 读取失败</td><td>私有仓库设置 <code>GITHUB_TOKEN</code>，或设置 <code>IVYEA_REF=main</code> 从 git 安装。</td></tr>
-          <tr><td>中文 CSV 乱码</td><td>优先使用 <code>.xlsx</code>，或把 CSV 另存为 UTF-8。</td></tr>
+          <tr><td>装完找不到 <code>ivyea</code></td><td>PATH 未刷新。重开终端；或执行 <code>pipx ensurepath</code> 后重开，Linux/macOS 也可 <code>export PATH="$HOME/.local/bin:$PATH"</code>。</td></tr>
+          <tr><td>Python 版本太低</td><td>安装 Python 3.9+。Windows 从 python.org 安装时务必勾选 <b>Add Python to PATH</b>。</td></tr>
+          <tr><td>Release 读取失败 / 403</td><td>多为 GitHub API 限流或私有仓库。设 <code>GITHUB_TOKEN</code>，或设 <code>IVYEA_REF=main</code> 从 git 源码安装。</td></tr>
+          <tr><td>pip 下载太慢</td><td>设镜像：<code>PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple</code>（放在安装命令前）。</td></tr>
+          <tr><td>Windows 报执行策略限制</td><td>当前会话放行：<code>Set-ExecutionPolicy -Scope Process Bypass</code>，再运行安装命令。</td></tr>
+          <tr><td>中文 CSV 乱码</td><td>优先用 <code>.xlsx</code>，或把 CSV 另存为 UTF-8 编码。</td></tr>
         </tbody>
       </table>
+      <p style="margin-top:20px">还有问题？到 <a href="https://github.com/Hector-xue/ivyea-agent" target="_blank" rel="noreferrer" style="color:var(--green);font-weight:600">GitHub</a> 提 issue，或看 <a href="docs.html" style="color:var(--green);font-weight:600">完整文档</a> 与 <a href="docs.html#deploy" style="color:var(--green);font-weight:600">服务器部署</a>。</p>
     </article>
   </div>
 </div>
@@ -238,6 +444,32 @@ ivyea doctor</code></pre>
 <script>
 document.getElementById("menuToggle").onclick=()=>document.getElementById("navLinks").classList.toggle("open");
 document.querySelectorAll("#navLinks a").forEach(a=>a.onclick=()=>document.getElementById("navLinks").classList.remove("open"));
+
+// ── 顶部安装终端：OS × 方法 切换 + 复制 ──
+const OS_CMDS={
+  "linux-script":"curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash\nivyea onboard\nivyea chat",
+  "windows-script":"iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex\nivyea onboard\nivyea chat",
+  "linux-pipx":"pipx install git+https://github.com/Hector-xue/ivyea-agent.git\nivyea onboard\nivyea chat",
+  "windows-pipx":"pipx install git+https://github.com/Hector-xue/ivyea-agent.git\nivyea onboard\nivyea chat",
+};
+let curOS="linux",curMethod="script";
+function applyTabs(){
+  document.querySelectorAll(".term-os[data-os]").forEach(x=>x.classList.toggle("active",x.dataset.os===curOS));
+  document.querySelectorAll(".term-os[data-method]").forEach(x=>x.classList.toggle("active",x.dataset.method===curMethod));
+  const key=curOS+"-"+curMethod;
+  document.querySelectorAll(".os-pane").forEach(p=>{p.hidden=p.dataset.pane!==key;});
+}
+document.querySelectorAll(".term-os[data-os]").forEach(b=>b.onclick=()=>{curOS=b.dataset.os;applyTabs();});
+document.querySelectorAll(".term-os[data-method]").forEach(b=>b.onclick=()=>{curMethod=b.dataset.method;applyTabs();});
+applyTabs();
+document.getElementById("copyBtn").onclick=async(e)=>{
+  const btn=e.currentTarget,CMDS=OS_CMDS[curOS+"-"+curMethod];
+  try{await navigator.clipboard.writeText(CMDS);}
+  catch{const t=document.createElement("textarea");t.value=CMDS;document.body.appendChild(t);t.select();document.execCommand("copy");t.remove();}
+  btn.textContent="✓ 已复制";setTimeout(()=>{btn.textContent="⧉ 复制";},1600);
+};
+
+// ── TOC 高亮 ──
 const links=[...document.querySelectorAll("#toc a")];
 const map=new Map(links.map(a=>[a.getAttribute("href").slice(1),a]));
 const io=new IntersectionObserver(es=>{
