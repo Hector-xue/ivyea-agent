@@ -1895,8 +1895,11 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     # session_end 钩子：try/finally 保证 /exit、EOF、Ctrl-C、异常、-p 各种退出路径都触发
     try:
         if _oneshot:                 # 非交互一次性（-p）：跑一轮该提示 → 结果打到 stdout → 退出
-            if getattr(args, "approve_all", False):
+            _pm = getattr(args, "permission_mode", "default") or "default"
+            if getattr(args, "approve_all", False) or _pm == "approve-all":
                 ctx.perm.accept_edits = True       # 无人值守：自动放行写/执行工具
+            elif _pm == "policy":
+                ctx.perm.policy_auto = True        # 中间档：按 policy.json 判定放行/拒绝，单工具拒绝不终止整轮
             # --progress：把步骤进度(工具/阶段/注入/todo)打到 stderr，最终答案仍只走 stdout。默认关，
             # 因为部分调用方(如 IvyeaOps ad_audit 用 stderr=STDOUT)会把 stderr 并入捕获结果——不带
             # --progress 时保持完全静默、stdout 纯净。人手动跑时加 --progress 即可看到进度。
@@ -3550,7 +3553,11 @@ def build_parser() -> argparse.ArgumentParser:
     pch.add_argument("-p", "--print", dest="print_prompt", metavar="PROMPT",
                      help="非交互一次性：跑一轮该提示、把结果打到 stdout 后退出（供 IvyeaOps 等做 runner）")
     pch.add_argument("--approve-all", action="store_true",
-                     help="一次性模式下自动放行写/执行工具（无人值守；配合 -p 用）")
+                     help="一次性模式下自动放行写/执行工具（无人值守；配合 -p 用；等价 --permission-mode approve-all）")
+    pch.add_argument("--permission-mode", dest="permission_mode",
+                     choices=["default", "policy", "approve-all"], default="default",
+                     help="-p 无人值守审批档位：default=写工具即终止（现状）；policy=按 ~/.ivyea/policy.json "
+                          "的 allow/deny 自动判定（单工具拒绝不终止整轮）；approve-all=全放行")
     pch.add_argument("--progress", action="store_true",
                      help="-p 模式下把步骤进度(工具调用/阶段/todo)打到 stderr（stdout 仍只放最终结果；"
                           "默认关，因部分调用方会把 stderr 并入 stdout）")

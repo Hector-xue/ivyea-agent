@@ -20,6 +20,29 @@ class PermissionState:
     session_allow: set = field(default_factory=set)   # 本会话已"允许此类"的动作 kind
     aborted: bool = False
     accept_edits: bool = False                         # opt-in：本会话所有写操作自动放行（/auto-edit on）
+    policy_auto: bool = False                          # --permission-mode policy：无人值守下按 policy.json
+    #                                                    allow/deny 自动判定，不弹交互、永不 ABORT
+
+
+def _policy_decide(intent: dict) -> str:
+    """policy 档的无人值守判定：run_command 走 assess_command（deny 名单/高风险拦截），
+    文件写走 check_path 写根校验；其余写类（execute_actions/领星写/run_python 等）一律 DENY。
+    只返回 APPROVE/DENY——单工具拒绝不终止整轮（对比默认档非 tty 下首个写工具即 abort 全轮）。"""
+    from . import policy
+    op = str(intent.get("op_type") or "")
+    if op == "run_command":
+        cmd = str(intent.get("command") or "")
+        if not cmd:
+            return DENY
+        return APPROVE if policy.assess_command(cmd).get("ok") else DENY
+    if op in ("write_file", "edit_file", "code_apply_patch"):
+        paths = [str(p) for p in (intent.get("paths") or []) if str(p)]
+        if intent.get("path"):
+            paths.append(str(intent["path"]))
+        if not paths:
+            return DENY
+        return APPROVE if all(policy.check_path(p, "write")[0] for p in paths) else DENY
+    return DENY
 
 
 def preview(a: Action) -> str:
@@ -46,6 +69,8 @@ def request(a: Action, state: PermissionState,
         return ABORT
     if state.accept_edits or a.kind in state.session_allow:
         return APPROVE
+    if state.policy_auto:
+        return DENY   # policy 档不放行广告等域写动作（Action 类），且不弹交互
 
     options = [("approve", "批准本次"), ("session", "本会话同类都批准"),
                ("deny", "拒绝"), ("edit", "修改"), ("abort", "全部停止")]
@@ -77,6 +102,8 @@ def request_intent(intent: dict, preview_text: str, state: PermissionState,
     op_type = intent.get("op_type", "")
     if state.accept_edits or op_type in state.session_allow:
         return APPROVE
+    if state.policy_auto:
+        return _policy_decide(intent)   # 无人值守：按 policy.json 判定，不弹交互
     has_edit = edit_fn is not None
     options = [("approve", "批准本次"), ("session", "本会话同类都批准"), ("deny", "拒绝")]
     if has_edit:

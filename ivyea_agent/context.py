@@ -54,15 +54,28 @@ def should_warn_compact(last_prompt_tokens: int, threshold: Optional[int] = None
     return last_prompt_tokens > th
 
 
+def _est_text(s: str) -> float:
+    """按字符类估 token：CJK ≈ 0.75 token/字（chars//3 会低估近一半，防溢出方向不安全），
+    其余（英文/代码/空白）≈ 3.8 字/token。"""
+    cjk = sum(1 for ch in s if "一" <= ch <= "鿿")
+    return cjk * 0.75 + (len(s) - cjk) / 3.8
+
+
 def estimate_tokens(messages: list[dict]) -> int:
-    """轮内粗略 token 估算（无需 provider 用量回报）。中英混排偏保守取 ~3 字/token。"""
-    chars = 0
+    """轮内粗略 token 估算（无需 provider 用量回报），CJK/其它分开计。"""
+    total = 0.0
     for m in messages:
-        chars += len(m.get("content") or "")
+        content = m.get("content")
+        if isinstance(content, str):
+            total += _est_text(content)
+        elif isinstance(content, list):   # 多模态：只计文本块（图片按 base64 长度算会高估几十倍）
+            for b in content:
+                if isinstance(b, dict) and isinstance(b.get("text"), str):
+                    total += _est_text(b["text"])
         for tc in m.get("tool_calls") or []:
             args = (tc.get("function") or {}).get("arguments") or ""
-            chars += len(args if isinstance(args, str) else json.dumps(args, ensure_ascii=False))
-    return chars // 3
+            total += _est_text(args if isinstance(args, str) else json.dumps(args, ensure_ascii=False))
+    return int(total)
 
 
 def should_compact_midturn(est_tokens: int, threshold: Optional[int] = None) -> bool:

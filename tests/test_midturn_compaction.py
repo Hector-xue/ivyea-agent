@@ -10,7 +10,9 @@ class FakeProvider:
 
 
 def test_estimate_tokens_rough():
-    assert context.estimate_tokens([{"role": "user", "content": "x" * 300}]) == 100
+    # CJK/其它分开计：300 英文字符 ≈ 79 tok，300 汉字 ≈ 225 tok（旧 chars//3 对中文低估近半）
+    assert 70 <= context.estimate_tokens([{"role": "user", "content": "x" * 300}]) <= 90
+    assert 200 <= context.estimate_tokens([{"role": "user", "content": "中" * 300}]) <= 250
 
 
 def test_hard_ceiling_triggers_even_with_auto_compact_off(monkeypatch):
