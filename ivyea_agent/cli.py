@@ -1818,9 +1818,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         "/workspace": _sh_embedded, "/patch": _sh_embedded, "/gitops": _sh_embedded,
     }
 
-    def _execute_turn(line, render, narrate, cancel_check=None, render_reasoning=None):
+    def _execute_turn(line, render, narrate, cancel_check=None, render_reasoning=None, emit=None):
         """跑一轮对话，输出经 render(token)/narrate(行) 注入 —— 供 TUI 复用（行式循环仍走下方原逻辑）。
-        cancel_check：运行中请求中断的钩子（TUI 用）。返回 {text, usage, blocked}。"""
+        cancel_check：运行中请求中断的钩子（TUI 用）。emit(event)：stream-json 结构化事件回调。
+        返回 {text, usage, cost, blocked}。"""
         nonlocal messages
         api_key = cfg.get_active_key()
         cms = cfg.load_settings()
@@ -1867,8 +1868,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         ctx.provider = provider
         out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""),
                                          render=render, narrate=narrate, cancel_check=cancel_check,
-                                         render_reasoning=render_reasoning)
+                                         render_reasoning=render_reasoning, emit=emit)
         c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
+        out["cost"] = c or 0.0
         _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
         if c:
             pricing.add_spend(c)
@@ -1893,13 +1895,30 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         # --progress 时保持完全静默、stdout 纯净。人手动跑时加 --progress 即可看到进度。
         _show_progress = bool(getattr(args, "progress", False))
         _narrate = (lambda s: print(s, file=sys.stderr, flush=True)) if _show_progress else (lambda s: None)
-        _out = _execute_turn(args.print_prompt, lambda t: None, _narrate)
-        if _out.get("blocked"):
-            print(ui.message("error", "未配置主脑模型或额度不可用，无法运行。"), file=sys.stderr)
-            return 1
+        # --output-format stream-json：stdout 全部是逐行 NDJSON 事件（对齐 Claude Code），
+        # 供 IvyeaOps 等消费方做工具调用可视化；人读输出（含最终答案）不再混入 stdout。
+        from . import stream_json as _sj_mod
+        _sj = getattr(args, "output_format", "text") == "stream-json"
+        _t0 = time.time()
+        if _sj:
+            _sj_mod.emit_line(_sj_mod.init_event(
+                sid, cfg.get_model_config().get("model", ""), os.getcwd(),
+                [t["function"]["name"] for t in agent_tools.TOOL_SCHEMAS],
+                "acceptEdits" if ctx.perm.accept_edits else "default"))
+        _out = _execute_turn(args.print_prompt, lambda t: None, _narrate,
+                             emit=_sj_mod.emit_line if _sj else None)
+        _persist()               # -p 也落盘会话：session_id 可供 --resume 真续接
         if _show_progress and _out.get("todos_panel"):
             print(_out["todos_panel"], file=sys.stderr, flush=True)
         _txt = (_out.get("text") or "").strip()
+        if _sj:
+            _sj_mod.emit_line(_sj_mod.result_event(
+                sid, _txt, _out.get("usage") or {}, _out.get("cost") or 0.0,
+                int((time.time() - _t0) * 1000), num_turns=1, is_error=bool(_out.get("blocked"))))
+            return 1 if _out.get("blocked") else 0
+        if _out.get("blocked"):
+            print(ui.message("error", "未配置主脑模型或额度不可用，无法运行。"), file=sys.stderr)
+            return 1
         print(markdown.render(_txt) if render_md else _txt)
         return 0
 
@@ -3520,6 +3539,10 @@ def build_parser() -> argparse.ArgumentParser:
     pch.add_argument("--progress", action="store_true",
                      help="-p 模式下把步骤进度(工具调用/阶段/todo)打到 stderr（stdout 仍只放最终结果；"
                           "默认关，因部分调用方会把 stderr 并入 stdout）")
+    pch.add_argument("--output-format", dest="output_format", choices=["text", "stream-json"],
+                     default="text",
+                     help="-p 输出格式：text=最终答案纯文本（默认）；stream-json=逐行 NDJSON 事件"
+                          "（system/init→assistant→tool_result→result，对齐 Claude Code，供程序消费）")
     pch.set_defaults(func=_cmd_chat)
     return p
 

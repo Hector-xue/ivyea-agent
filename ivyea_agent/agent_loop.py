@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable
 
-from . import config, context, traces, ui
+from . import config, context, stream_json, traces, ui
 from .agent_tools import PARALLEL_SAFE, TOOL_SCHEMAS, ToolContext, dispatch_result
 from .providers import LLMProvider
 
@@ -131,8 +131,19 @@ def _append_tool_call_msg(messages: list, content, tool_calls: list) -> None:
     })
 
 
+def _emit_safe(emit: Callable[[dict], None] | None, ev: dict) -> None:
+    """结构化事件回调（stream-json 等）：best-effort，消费端断管/异常不打断主循环。"""
+    if emit is None:
+        return
+    try:
+        emit(ev)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _record_tool_result(ctx: ToolContext, messages: list, tc: dict, res, duration_ms: int,
-                        narrate: Callable[[str], None]) -> None:
+                        narrate: Callable[[str], None],
+                        emit: Callable[[dict], None] | None = None) -> None:
     result = res.text
     payload = {"arguments": tc.get("arguments") or {}}
     if res.error:
@@ -142,6 +153,8 @@ def _record_tool_result(ctx: ToolContext, messages: list, tc: dict, res, duratio
         "tool_call", tc["name"], ok=res.ok, duration_ms=duration_ms,
         summary=result[:300], payload=payload)
     narrate(ui.tool_result(result))
+    _emit_safe(emit, stream_json.tool_result_event(
+        getattr(ctx, "session_id", ""), tc["id"], result, not res.ok))
     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
 
 
@@ -152,7 +165,8 @@ def _run_one(tc: dict, ctx: ToolContext):
 
 
 def _dispatch_tool_calls(ctx: ToolContext, messages: list, status: TurnStatus, tool_calls: list,
-                         step_idx: int, max_steps: int, narrate: Callable[[str], None]) -> None:
+                         step_idx: int, max_steps: int, narrate: Callable[[str], None],
+                         emit: Callable[[dict], None] | None = None) -> None:
     """派发本步所有工具调用：叙述、执行、记 trace、把结果按原顺序回灌到 messages。
     当本步全部是只读且并行安全的工具时并发执行（降延迟）；否则顺序执行（保留审批/写入语义）。"""
     parallel = len(tool_calls) > 1 and all(tc["name"] in PARALLEL_SAFE for tc in tool_calls)
@@ -163,13 +177,13 @@ def _dispatch_tool_calls(ctx: ToolContext, messages: list, status: TurnStatus, t
         with ThreadPoolExecutor(max_workers=min(len(tool_calls), 8)) as ex:
             outcomes = list(ex.map(lambda tc: _run_one(tc, ctx), tool_calls))
         for tc, (res, dur) in zip(tool_calls, outcomes):
-            _record_tool_result(ctx, messages, tc, res, dur, narrate)
+            _record_tool_result(ctx, messages, tc, res, dur, narrate, emit=emit)
         return
     for tc in tool_calls:
         status.record_tool_call()
         narrate(ui.tool_call(tc["name"], tc.get("arguments") or {}))
         res, dur = _run_one(tc, ctx)
-        _record_tool_result(ctx, messages, tc, res, dur, narrate)
+        _record_tool_result(ctx, messages, tc, res, dur, narrate, emit=emit)
 
 
 def _finalize_limit(ctx: ToolContext, messages: list, status: TurnStatus, max_steps: int,
@@ -226,13 +240,16 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
                     max_steps: int | None = None, narrate: Callable[[str], None] = print,
                     render: Callable[[str], None] = None, model: str = "",
                     cancel_check: Callable[[], bool] | None = None,
-                    render_reasoning: Callable[[str], None] = None) -> dict:
+                    render_reasoning: Callable[[str], None] = None,
+                    emit: Callable[[dict], None] | None = None) -> dict:
     """流式跑一轮：token 边出边渲染、工具实时叙述、累计用量。
     返回 {text, usage}（usage 为本轮各步累加）。render(token) 逐字输出助手文本。
 
     render_reasoning(token)：支持思考的模型(deepseek-reasoner/codex/claude/gemini)的
     思考流；默认无操作(不显示)。cancel_check：TUI 忙碌时请求中断的钩子；在步/流/工具边界
-    返回 True 则抛 KeyboardInterrupt，交给上层保留会话并恢复输入。"""
+    返回 True 则抛 KeyboardInterrupt，交给上层保留会话并恢复输入。
+    emit(event)：结构化事件回调（stream-json），每个模型步发一条 assistant 事件、
+    每个工具结果发一条 tool_result 事件；默认 None 零开销。"""
     render = render or (lambda s: print(s, end="", flush=True))
     render_reasoning = render_reasoning or (lambda s: None)
     cancel_check = cancel_check or (lambda: False)
@@ -269,6 +286,8 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
             render("\n")
         _accum(final.get("usage") or {})
         tool_calls = final.get("tool_calls") or []
+        _emit_safe(emit, stream_json.assistant_event(
+            getattr(ctx, "session_id", ""), final.get("content") or "", tool_calls))
         if not tool_calls:
             content = final.get("content", "") or ""
             messages.append({"role": "assistant", "content": content})
@@ -276,6 +295,6 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
         if cancel_check():
             raise KeyboardInterrupt
         _append_tool_call_msg(messages, final.get("content"), tool_calls)
-        _dispatch_tool_calls(ctx, messages, status, tool_calls, step_idx, max_steps, narrate)
+        _dispatch_tool_calls(ctx, messages, status, tool_calls, step_idx, max_steps, narrate, emit=emit)
     text = _finalize_limit(ctx, messages, status, max_steps, extra_payload={"usage": total_usage})
     return {"text": text, "usage": total_usage}
