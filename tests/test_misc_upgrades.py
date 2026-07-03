@@ -1,11 +1,14 @@
 """第 6 批小项：run_command 输出落盘 / --permission-mode policy / estimate_tokens 校准。"""
 from __future__ import annotations
 
+import os
+
 import pytest
 
 
 # ── 6a run_command 超长输出全量落盘 ──
 
+@pytest.mark.skipif(os.name == "nt", reason="命令用 python3，Windows 上无该别名")
 def test_run_command_long_output_spilled_to_disk(ivyea_home):
     from ivyea_agent import tools_general as tg
     from ivyea_agent.agent_tools import ToolContext

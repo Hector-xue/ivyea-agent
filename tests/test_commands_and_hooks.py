@@ -2,8 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
+
+import pytest
 
 from ivyea_agent import commands, config, hooks
+
+_posix_only = pytest.mark.skipif(os.name == "nt", reason="钩子命令用了 bash 语法（; / 引号转义），cmd 不等价")
 
 
 def _use_home(tmp_path, monkeypatch):
@@ -71,6 +76,7 @@ def _write_hooks(home, cfg: dict):
     hooks.reload()
 
 
+@_posix_only
 def test_fire_decision_exit2_blocks_with_stderr_reason(tmp_path, monkeypatch):
     home = _use_home(tmp_path, monkeypatch)
     _write_hooks(home, {"pre_tool_use": [
@@ -80,6 +86,7 @@ def test_fire_decision_exit2_blocks_with_stderr_reason(tmp_path, monkeypatch):
     assert ok is False and "denied by guard" in reason
 
 
+@_posix_only
 def test_fire_decision_stdout_json_block(tmp_path, monkeypatch):
     home = _use_home(tmp_path, monkeypatch)
     _write_hooks(home, {"pre_tool_use": [
@@ -116,6 +123,7 @@ def test_matcher_regex_scopes_tools(tmp_path, monkeypatch):
     assert hooks.fire_decision("pre_tool_use", {}, tool_name="run_command", readonly=False)[0] is True
 
 
+@_posix_only
 def test_dispatch_result_pre_hook_blocks_and_post_hook_fires(tmp_path, monkeypatch):
     """dispatch_result 集成：pre 拒绝短路；未拦工具照常执行且触发 post_tool_use。"""
     home = _use_home(tmp_path, monkeypatch)
