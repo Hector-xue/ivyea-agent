@@ -13,7 +13,8 @@ DB_PATH = config.IVYEA_DIR / "traces.db"
 
 def _conn() -> sqlite3.Connection:
     config.ensure_dirs()
-    conn = sqlite3.connect(str(DB_PATH))
+    # timeout=5：并行子 agent/只读工具多线程各自写时等文件锁，而非立刻 database is locked
+    conn = sqlite3.connect(str(DB_PATH), timeout=5)
     conn.row_factory = sqlite3.Row
     conn.execute("""CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,16 +35,19 @@ def _conn() -> sqlite3.Connection:
 def record(session_id: str, turn_id: str, event: str, name: str = "",
            ok: bool = True, duration_ms: int = 0, summary: str = "",
            payload: dict[str, Any] | None = None) -> None:
-    conn = _conn()
-    conn.execute(
-        "INSERT INTO events (session_id, turn_id, event, name, ok, duration_ms, summary, payload, ts) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
-        (session_id or "", turn_id or "", event, name, 1 if ok else 0, int(duration_ms or 0),
-         security.redact_text(summary)[:1000], json.dumps(security.redact_obj(payload or {}), ensure_ascii=False),
-         time.time()),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn = _conn()
+        conn.execute(
+            "INSERT INTO events (session_id, turn_id, event, name, ok, duration_ms, summary, payload, ts) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (session_id or "", turn_id or "", event, name, 1 if ok else 0, int(duration_ms or 0),
+             security.redact_text(summary)[:1000], json.dumps(security.redact_obj(payload or {}), ensure_ascii=False),
+             time.time()),
+        )
+        conn.commit()
+        conn.close()
+    except sqlite3.OperationalError:
+        return   # trace 是 best-effort：极端并发下锁等待超时宁可丢一条也不炸工具调用
 
 
 def recent(limit: int = 20, session_id: str = "") -> list[dict[str, Any]]:

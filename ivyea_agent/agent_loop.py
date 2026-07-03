@@ -241,7 +241,8 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
                     render: Callable[[str], None] = None, model: str = "",
                     cancel_check: Callable[[], bool] | None = None,
                     render_reasoning: Callable[[str], None] = None,
-                    emit: Callable[[dict], None] | None = None) -> dict:
+                    emit: Callable[[dict], None] | None = None,
+                    tools: list | None = None) -> dict:
     """流式跑一轮：token 边出边渲染、工具实时叙述、累计用量。
     返回 {text, usage}（usage 为本轮各步累加）。render(token) 逐字输出助手文本。
 
@@ -249,7 +250,9 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
     思考流；默认无操作(不显示)。cancel_check：TUI 忙碌时请求中断的钩子；在步/流/工具边界
     返回 True 则抛 KeyboardInterrupt，交给上层保留会话并恢复输入。
     emit(event)：结构化事件回调（stream-json），每个模型步发一条 assistant 事件、
-    每个工具结果发一条 tool_result 事件；默认 None 零开销。"""
+    每个工具结果发一条 tool_result 事件；默认 None 零开销。
+    tools：受限工具子集（与 run_turn 对齐）；默认全量 TOOL_SCHEMAS。"""
+    tool_schemas = tools or TOOL_SCHEMAS
     render = render or (lambda s: print(s, end="", flush=True))
     render_reasoning = render_reasoning or (lambda s: None)
     cancel_check = cancel_check or (lambda: False)
@@ -272,7 +275,7 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
         status.before_model_step(step_idx, narrate)
         final = {"content": "", "tool_calls": [], "usage": {}}
         printed_any = False
-        for ev in provider.stream_chat(messages, tools=TOOL_SCHEMAS):
+        for ev in provider.stream_chat(messages, tools=tool_schemas):
             if cancel_check():
                 raise KeyboardInterrupt
             if ev["type"] == "text":
