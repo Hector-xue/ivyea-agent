@@ -77,11 +77,12 @@ def _require_read(ctx, paths) -> str:
             f"请先 read_file 看真实内容、确认 old 唯一匹配，再重试本次编辑。")
 
 
-def _gate(ctx, kind: str, preview: str) -> tuple[bool, str]:
-    """写/执行前门控：计划模式拒绝；否则人工审批。返回 (放行?, 拒绝消息)。"""
+def _gate(ctx, kind: str, preview: str, detail: dict | None = None) -> tuple[bool, str]:
+    """写/执行前门控：计划模式拒绝；否则人工审批。返回 (放行?, 拒绝消息)。
+    detail：给 policy 档无人值守判定用的结构化信息（command/path），并入 intent。"""
     if getattr(ctx, "plan_mode", False):
         return False, f"计划模式（只读）：不执行 {kind}。请先给计划，/approve 后再做。"
-    decision = permission.request_intent({"op_type": kind}, preview, ctx.perm)
+    decision = permission.request_intent({"op_type": kind, **(detail or {})}, preview, ctx.perm)
     if decision == permission.APPROVE:
         return True, ""
     if decision == permission.ABORT:
@@ -332,7 +333,8 @@ def t_code_apply_patch(args: dict, ctx) -> str:
             pass
     preview = "\n".join(lines)
     # 3) 一次审批
-    ok, msg = _gate(ctx, "code_apply_patch", preview)
+    _paths = [str((Path(root) / o.get("path", "")).resolve()) for o in ops if isinstance(o, dict)]
+    ok, msg = _gate(ctx, "code_apply_patch", preview, detail={"paths": _paths})
     if not ok:
         return msg
     # 4) 落盘 + 跑测试
@@ -538,7 +540,7 @@ def t_write_file(args: dict, ctx) -> str:
             preview += "\n" + panels.render_diff(p.read_text(encoding="utf-8"), content, p.name)
         except Exception:
             pass
-    ok, msg = _gate(ctx, "write_file", preview)
+    ok, msg = _gate(ctx, "write_file", preview, detail={"path": str(p)})
     if not ok:
         return msg
     try:
@@ -575,7 +577,7 @@ def t_edit_file(args: dict, ctx) -> str:
     if blocked:
         return blocked
     preview = f"编辑 {_disp(p)}：替换 1 处\n" + panels.render_diff(old, new, p.name)
-    ok, msg = _gate(ctx, "edit_file", preview)
+    ok, msg = _gate(ctx, "edit_file", preview, detail={"path": str(p)})
     if not ok:
         return msg
     try:
@@ -615,9 +617,29 @@ def _make_preexec(timeout: int):
     return _apply
 
 
-def _run(cmd, args, ctx, kind: str, preview: str, *, auto_ok: bool = False) -> str:
+_SPILL_SEQ = [0]
+
+
+def _spill_output(ctx, out: str) -> str:
+    """超长命令输出全量落盘（先脱敏），返回路径；失败返回空串。
+    按会话分目录存 ~/.ivyea/outputs/<session>/，暂无自动清理（体量小，后续可入 doctor）。"""
+    try:
+        import time as _t
+        sess = getattr(ctx, "session_id", "") or "nosession"
+        d = config.IVYEA_DIR / "outputs" / sess
+        d.mkdir(parents=True, exist_ok=True)
+        _SPILL_SEQ[0] += 1
+        p = d / f"{_t.strftime('%Y%m%d-%H%M%S')}-{_SPILL_SEQ[0]:03d}.txt"
+        p.write_text(security.redact_text(out), encoding="utf-8")
+        return str(p)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _run(cmd, args, ctx, kind: str, preview: str, *, auto_ok: bool = False,
+         detail: dict | None = None) -> str:
     if not auto_ok:   # 只读命令(auto_ok)免审批，也可在计划模式下跑（本就只读）
-        ok, msg = _gate(ctx, kind, preview)
+        ok, msg = _gate(ctx, kind, preview, detail=detail)
         if not ok:
             return msg
     workdir = getattr(ctx, "workspace", "") or os.getcwd()
@@ -633,7 +655,14 @@ def _run(cmd, args, ctx, kind: str, preview: str, *, auto_ok: bool = False) -> s
         return f"执行失败：{e}"
     out = proc.stdout or ""
     head = f"[退出码 {proc.returncode}]\n"
-    return head + (_truncate(out) if out else "（无输出）")
+    if not out:
+        return head + "（无输出）"
+    body = _truncate(out)
+    if len(out) > _MAX_OUT:   # 被截断：全量落盘，模型可 read_file 续读剩余部分
+        saved = _spill_output(ctx, out)
+        if saved:
+            body += f"\n（完整输出已保存：{saved}，需要剩余部分时用 read_file 带 offset/limit 读该文件）"
+    return head + body
 
 
 # ── 后台/长任务 bash：非阻塞 Popen + 输出轮询（对标 Claude Code 的后台 bash）──
@@ -641,10 +670,11 @@ _BG_PROCS: dict = {}   # bash_id -> {proc, logpath, cmd, read_pos, started}
 _BG_SEQ = [0]
 
 
-def _run_background(cmd, args, ctx, preview: str, *, auto_ok: bool) -> str:
+def _run_background(cmd, args, ctx, preview: str, *, auto_ok: bool,
+                    detail: dict | None = None) -> str:
     """在后台起进程，立即返回 bash_id；输出写临时日志，供 bash_output 轮询。"""
     if not auto_ok:
-        ok, msg = _gate(ctx, "run_command", preview)
+        ok, msg = _gate(ctx, "run_command", preview, detail=detail)
         if not ok:
             return msg
     workdir = getattr(ctx, "workspace", "") or os.getcwd()
@@ -734,8 +764,8 @@ def t_run_command(args: dict, ctx) -> str:
     auto_ok = policy.is_readonly_command(command)   # 只读命令自动放行，省去逐次审批
     preview = "运行命令：" + _truncate(command, 400)
     if args.get("run_in_background"):   # 长任务(dev server/watch/构建)：后台非阻塞，返回 bash_id
-        return _run_background(shell, args, ctx, preview, auto_ok=auto_ok)
-    return _run(shell, args, ctx, "run_command", preview, auto_ok=auto_ok)
+        return _run_background(shell, args, ctx, preview, auto_ok=auto_ok, detail={"command": command})
+    return _run(shell, args, ctx, "run_command", preview, auto_ok=auto_ok, detail={"command": command})
 
 
 def t_todo_write(args: dict, ctx) -> str:

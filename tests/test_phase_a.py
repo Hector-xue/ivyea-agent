@@ -1,7 +1,7 @@
 """Phase A：read_file 行号 + edit 容错、glob、accept-edits、只读命令自动放行。"""
 from __future__ import annotations
 
-from ivyea_agent import permission, policy
+from ivyea_agent import policy
 from ivyea_agent import tools_general as tg
 from ivyea_agent.agent_tools import ToolContext, dispatch
 

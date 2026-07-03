@@ -4,7 +4,6 @@ from __future__ import annotations
 import io
 import re
 
-import pytest
 
 from ivyea_agent import chat_tui
 
@@ -87,7 +86,6 @@ def _wait_idle(tui, timeout=2.0):
 
 
 def test_turn_streams_and_interleaves_tool_lines():
-    import time
     def fake_turn(line, render, narrate):
         render("你好"); narrate("⏺ 读取文件"); render("，世界")
         return {"text": "你好，世界", "usage": {}, "blocked": False}

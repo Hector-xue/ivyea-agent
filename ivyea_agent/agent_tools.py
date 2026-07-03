@@ -14,7 +14,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from . import account_diagnosis, action_queue, actions as act_mod, competitor_audit, executor, guardrails, image_audit, knowledge, listing_audit, memory, ocr, offer_audit, permission, patrol as patrol_mod, profiles, review_audit, skills, tools_general
+from . import account_diagnosis, action_queue, actions as act_mod, competitor_audit, executor, guardrails, hooks, image_audit, knowledge, listing_audit, memory, ocr, offer_audit, permission, patrol as patrol_mod, profiles, review_audit, skills, tools_general
 from .rule_engine import RuleEngineError
 
 
@@ -527,7 +527,11 @@ _DISPATCH = {
 # 故意保守：DB 检索（knowledge/skill/recall）和会写索引文件的 code_search/symbols/impact
 # 不在此列，避免 SQLite 跨线程或索引文件写竞争。
 PARALLEL_SAFE = {"read_file", "list_dir", "web_fetch", "web_search", "grep", "glob",
-                 "code_search", "code_symbols", "bash_output"}
+                 "code_search", "code_symbols", "bash_output",
+                 # 子 agent 只读且各自独立 sub_ctx/messages/PermissionState，可并行 fan-out。
+                 # 前提：provider 实例无共享可变状态（openai_compat/anthropic/gemini 均为
+                 # 每次调用独立请求）；若未来接入带会话状态的 provider 需复查。
+                 "dispatch_subagent"}
 
 
 @dataclass
@@ -539,14 +543,32 @@ class ToolResult:
 
 def dispatch_result(name: str, args: dict, ctx: ToolContext) -> ToolResult:
     """派发工具并返回结构化结果：ok 反映是否抛异常（而非靠字符串猜），
-    异常时 text 是给模型看的简短信息、error 保留 traceback 供排障。"""
+    异常时 text 是给模型看的简短信息、error 保留 traceback 供排障。
+    这里是全部工具（并行/串行/子 agent）的统一收口，pre/post_tool_use 钩子挂在此处；
+    没配 hooks.json 时 enabled() 为 False，零开销。"""
     fn = _DISPATCH.get(name)
     if not fn:
         return ToolResult(False, f"未知工具：{name}")
+    if hooks.enabled():
+        allowed, reason = hooks.fire_decision(
+            "pre_tool_use",
+            {"tool_name": name, "tool_input": args or {},
+             "session_id": getattr(ctx, "session_id", ""), "turn_id": getattr(ctx, "turn_id", "")},
+            tool_name=name, readonly=name in READONLY_TOOLS)
+        if not allowed:
+            return ToolResult(False, f"pre_tool_use hook 拒绝：{reason}")
     try:
-        return ToolResult(True, fn(args or {}, ctx))
+        res = ToolResult(True, fn(args or {}, ctx))
     except Exception as e:  # noqa: BLE001
-        return ToolResult(False, f"工具 {name} 执行出错：{e}", error=traceback.format_exc())
+        res = ToolResult(False, f"工具 {name} 执行出错：{e}", error=traceback.format_exc())
+    if hooks.enabled():
+        hooks.fire(
+            "post_tool_use",
+            {"tool_name": name, "tool_input": args or {}, "ok": res.ok,
+             "tool_response": (res.text or "")[:2000],
+             "session_id": getattr(ctx, "session_id", ""), "turn_id": getattr(ctx, "turn_id", "")},
+            tool_name=name, readonly=name in READONLY_TOOLS)
+    return res
 
 
 def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
@@ -555,7 +577,8 @@ def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
 
 
 # 只读工具集：纯读/检索/审计/诊断，绝不写。供只读子 agent 使用。
-READONLY_TOOLS = PARALLEL_SAFE | {
+# 注意剔除 dispatch_subagent：它虽只读可并行，但子 agent 不能递归再派子 agent。
+READONLY_TOOLS = (PARALLEL_SAFE - {"dispatch_subagent"}) | {
     "code_search", "code_symbols", "code_impact", "code_repair",
     "mcp_list_tools", "mcp_list_resources", "mcp_read_resource",
     "mcp_list_prompts", "mcp_get_prompt",
@@ -580,8 +603,12 @@ def t_dispatch_subagent(args: dict, ctx: ToolContext) -> str:
     provider = getattr(ctx, "provider", None)
     if provider is None:
         return "当前环境无可用主脑 provider，无法派子 agent。"
-    from . import agent_loop  # 延迟导入避免循环依赖
-    max_steps = min(int(args.get("max_steps") or 12), 20)
+    from . import agent_loop, config  # 延迟导入避免循环依赖
+    try:
+        _cap = int(config.get_setting("subagent_max_steps_cap", 40))
+    except (TypeError, ValueError):
+        _cap = 40
+    max_steps = min(int(args.get("max_steps") or 12), max(1, _cap))
     sub_sys = ("你是只读调研子 agent。用只读工具(grep/code_search/read_file/web_fetch/knowledge_search 等)"
                "把交给你的问题查清楚，最后用简洁中文给出结论与依据(文件:行/来源)。"
                "你不能写文件、不能执行命令、不能改广告，也不要再派子 agent。")

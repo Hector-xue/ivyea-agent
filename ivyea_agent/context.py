@@ -17,6 +17,9 @@ DEFAULT_AUTO_COMPACT = True
 # 轮内硬上限：无论是否开自动压缩，估算 token 越过它就强制压缩以防请求溢出报错。
 # 这是“防崩”而非“省钱”，所以默认开启、阈值取得很高，正常长任务不会触发。
 DEFAULT_HARD_CEILING = 200000
+# 压缩时保留最近 N 条消息原文（对标 Claude Code）：紧接压缩后的几步最依赖近期细节
+# （刚读的文件、刚给的路径），全摘要化会"失忆"重复劳动。config set compact_keep_recent 可调，0=全量摘要。
+DEFAULT_KEEP_RECENT = 6
 
 _SUMMARY_SYS = "你是对话压缩器。把给定的多轮对话压缩成简洁要点，必须保留：关键事实、已做的决策、ASIN/店铺SID/具体数字、用户偏好与未完成事项。用中文分条，不要寒暄。"
 
@@ -51,15 +54,28 @@ def should_warn_compact(last_prompt_tokens: int, threshold: Optional[int] = None
     return last_prompt_tokens > th
 
 
+def _est_text(s: str) -> float:
+    """按字符类估 token：CJK ≈ 0.75 token/字（chars//3 会低估近一半，防溢出方向不安全），
+    其余（英文/代码/空白）≈ 3.8 字/token。"""
+    cjk = sum(1 for ch in s if "一" <= ch <= "鿿")
+    return cjk * 0.75 + (len(s) - cjk) / 3.8
+
+
 def estimate_tokens(messages: list[dict]) -> int:
-    """轮内粗略 token 估算（无需 provider 用量回报）。中英混排偏保守取 ~3 字/token。"""
-    chars = 0
+    """轮内粗略 token 估算（无需 provider 用量回报），CJK/其它分开计。"""
+    total = 0.0
     for m in messages:
-        chars += len(m.get("content") or "")
+        content = m.get("content")
+        if isinstance(content, str):
+            total += _est_text(content)
+        elif isinstance(content, list):   # 多模态：只计文本块（图片按 base64 长度算会高估几十倍）
+            for b in content:
+                if isinstance(b, dict) and isinstance(b.get("text"), str):
+                    total += _est_text(b["text"])
         for tc in m.get("tool_calls") or []:
             args = (tc.get("function") or {}).get("arguments") or ""
-            chars += len(args if isinstance(args, str) else json.dumps(args, ensure_ascii=False))
-    return chars // 3
+            total += _est_text(args if isinstance(args, str) else json.dumps(args, ensure_ascii=False))
+    return int(total)
 
 
 def should_compact_midturn(est_tokens: int, threshold: Optional[int] = None) -> bool:
@@ -70,14 +86,35 @@ def should_compact_midturn(est_tokens: int, threshold: Optional[int] = None) -> 
     return should_compact(est_tokens, threshold)
 
 
-def compact(messages: list[dict], provider, *, keep_system: bool = True) -> tuple[list[dict], str]:
-    """把历史压成摘要。返回 (新消息列表, 摘要文本)。失败则原样返回。
-    新列表 = [system?, {user: 摘要}]，干净无 tool 配对残留。"""
+def _pair_safe_split(history: list[dict], keep_recent: int) -> int:
+    """返回切分下标 idx：history[:idx] 摘要、history[idx:] 原文保留。
+    向前回退保证保留区不以 tool 开头——tool 消息必须紧跟它的 assistant.tool_calls，
+    撕开配对会让 OpenAI 格式请求直接报错。回退方向是"多保不少保"，安全。"""
+    idx = max(0, len(history) - max(0, keep_recent))
+    while 0 < idx < len(history) and history[idx].get("role") == "tool":
+        idx -= 1        # 回退到该 tool 串前面的 assistant(tool_calls) 上
+    return idx
+
+
+def compact(messages: list[dict], provider, *, keep_system: bool = True,
+            keep_recent: Optional[int] = None) -> tuple[list[dict], str]:
+    """把旧历史压成摘要、保留最近 keep_recent 条消息原文（在 tool 配对边界切分）。
+    返回 (新消息列表, 摘要文本)。失败则原样返回。
+    新列表 = [system?, {user: 摘要}, {assistant: 确认}] + 最近原文。keep_recent=0 即旧行为全量摘要。"""
+    if keep_recent is None:
+        try:
+            keep_recent = int(config.get_setting("compact_keep_recent", DEFAULT_KEEP_RECENT))
+        except (TypeError, ValueError):
+            keep_recent = DEFAULT_KEEP_RECENT
     system = messages[0] if (messages and messages[0].get("role") == "system") else None
     history = messages[1:] if system else messages
-    if len(history) < 4:
+    split = _pair_safe_split(history, keep_recent)
+    if split < 4 <= len(history):
+        split = _pair_safe_split(history, 0)   # 历史短但需要压（如防溢出）：退回全量摘要
+    old, recent = history[:split], history[split:]
+    if len(old) < 4:
         return messages, ""   # 太短不值得压
-    text = _render_history(messages)
+    text = _render_history(old)
     try:
         summary = provider.complete(_SUMMARY_SYS, text, temperature=0.2, timeout=120.0)
     except Exception:
@@ -89,4 +126,5 @@ def compact(messages: list[dict], provider, *, keep_system: bool = True) -> tupl
         new.append(system)
     new.append({"role": "user", "content": f"[此前对话摘要，请据此继续]\n{summary.strip()}"})
     new.append({"role": "assistant", "content": "（已读取摘要，请继续。）"})
+    new.extend(recent)
     return new, summary.strip()
