@@ -156,3 +156,92 @@ def test_image_vision_cli_call(monkeypatch, tmp_path, capsys):
     stdout = capsys.readouterr().out
     assert "多模态视觉审核结果" in stdout
     assert "审核完成" in stdout
+
+
+# ── 视觉旁路（route_images）──
+
+def _fake_pick():
+    return {"cfg": {"kind": "openai", "provider_id": "openai", "model": "gpt-5-mini"},
+            "key": "sk-x", "label": "OpenAI · gpt-5-mini"}
+
+
+class _SeenProvider:
+    """记录收到的 messages，返回固定分析文本。"""
+    def __init__(self, reply="图里是一张销量趋势图，3月见顶。"):
+        self.reply = reply
+        self.seen = None
+
+    def chat(self, messages, tools=None, **kw):
+        self.seen = messages
+        return {"content": self.reply, "tool_calls": []}
+
+
+def test_route_images_passthrough_when_main_has_vision(tmp_path, monkeypatch):
+    from ivyea_agent import vision
+    img = tmp_path / "a.png"
+    _png(img)
+    mcfg = {"provider_id": "openai", "provider": "openai"}
+    content, imgs = vision.route_images("看图", [str(img)], mcfg, lambda s: None)
+    assert content == "看图" and imgs == [str(img)]     # 有视觉：原样透传，不剥图
+
+
+def test_route_images_sidecar_injects_and_strips(tmp_path, monkeypatch, ivyea_home):
+    from ivyea_agent import vision, providers
+    img = tmp_path / "a.png"
+    _png(img)
+    prov = _SeenProvider()
+    monkeypatch.setattr(vision, "pick_vision_model", _fake_pick)
+    monkeypatch.setattr(providers, "from_settings", lambda cfg, key: prov)
+    notes = []
+    mcfg = {"provider_id": "deepseek", "provider": "deepseek"}   # 主脑无视觉
+    content, imgs = vision.route_images("这图说明什么？", [str(img)], mcfg, notes.append)
+    assert imgs == []                                   # 图已剥掉，主脑只见文本
+    assert "销量趋势图" in content and "视觉模型" in content and "这图说明什么？" in content
+    assert any("视觉旁路代读" in n for n in notes)
+    # sidecar 收到的是多模态 content（含 image_url）且带用户问题原文
+    user = prov.seen[-1]
+    assert isinstance(user["content"], list)
+    assert any(b.get("type") == "image_url" for b in user["content"])
+    assert "这图说明什么" in user["content"][0]["text"]
+
+
+def test_route_images_no_vision_provider_available(tmp_path, monkeypatch, ivyea_home):
+    from ivyea_agent import vision
+    img = tmp_path / "a.png"
+    _png(img)
+    monkeypatch.setattr(vision, "pick_vision_model", lambda: None)
+    notes = []
+    content, imgs = vision.route_images("看图", [str(img)], {"provider_id": "deepseek"}, notes.append)
+    assert imgs == [] and content == "看图"             # 忽略图片继续文本
+    assert any("没有可用的视觉模型" in n for n in notes)
+
+
+def test_route_images_sidecar_error_fail_open(tmp_path, monkeypatch, ivyea_home):
+    from ivyea_agent import vision
+    img = tmp_path / "a.png"
+    _png(img)
+    monkeypatch.setattr(vision, "pick_vision_model", _fake_pick)
+    monkeypatch.setattr(vision, "sidecar_describe", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("api down")))
+    notes = []
+    content, imgs = vision.route_images("看图", [str(img)], {"provider_id": "deepseek"}, notes.append)
+    assert imgs == [] and content == "看图"
+    assert any("视觉旁路调用失败" in n for n in notes)
+
+
+def test_pick_vision_model_prefers_config_key(monkeypatch, ivyea_home):
+    from ivyea_agent import config, vision
+    monkeypatch.setenv("GEMINI_API_KEY", "g-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a-key")
+    config.set_setting("vision_model", "gemini")
+    got = vision.pick_vision_model()
+    assert got and got["cfg"]["provider_id"] == "gemini" and got["key"] == "g-key"
+
+
+def test_pick_vision_model_auto_detects_first_configured(monkeypatch, ivyea_home):
+    from ivyea_agent import vision
+    for env in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(env, raising=False)
+    assert vision.pick_vision_model() is None           # 全未配 → 无可用
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a-key")
+    got = vision.pick_vision_model()
+    assert got and got["cfg"]["provider_id"] == "anthropic"
