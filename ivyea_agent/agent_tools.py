@@ -14,7 +14,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from . import account_diagnosis, action_queue, actions as act_mod, competitor_audit, executor, guardrails, image_audit, knowledge, listing_audit, memory, ocr, offer_audit, permission, patrol as patrol_mod, profiles, review_audit, skills, tools_general
+from . import account_diagnosis, action_queue, actions as act_mod, competitor_audit, executor, guardrails, hooks, image_audit, knowledge, listing_audit, memory, ocr, offer_audit, permission, patrol as patrol_mod, profiles, review_audit, skills, tools_general
 from .rule_engine import RuleEngineError
 
 
@@ -539,14 +539,32 @@ class ToolResult:
 
 def dispatch_result(name: str, args: dict, ctx: ToolContext) -> ToolResult:
     """派发工具并返回结构化结果：ok 反映是否抛异常（而非靠字符串猜），
-    异常时 text 是给模型看的简短信息、error 保留 traceback 供排障。"""
+    异常时 text 是给模型看的简短信息、error 保留 traceback 供排障。
+    这里是全部工具（并行/串行/子 agent）的统一收口，pre/post_tool_use 钩子挂在此处；
+    没配 hooks.json 时 enabled() 为 False，零开销。"""
     fn = _DISPATCH.get(name)
     if not fn:
         return ToolResult(False, f"未知工具：{name}")
+    if hooks.enabled():
+        allowed, reason = hooks.fire_decision(
+            "pre_tool_use",
+            {"tool_name": name, "tool_input": args or {},
+             "session_id": getattr(ctx, "session_id", ""), "turn_id": getattr(ctx, "turn_id", "")},
+            tool_name=name, readonly=name in READONLY_TOOLS)
+        if not allowed:
+            return ToolResult(False, f"pre_tool_use hook 拒绝：{reason}")
     try:
-        return ToolResult(True, fn(args or {}, ctx))
+        res = ToolResult(True, fn(args or {}, ctx))
     except Exception as e:  # noqa: BLE001
-        return ToolResult(False, f"工具 {name} 执行出错：{e}", error=traceback.format_exc())
+        res = ToolResult(False, f"工具 {name} 执行出错：{e}", error=traceback.format_exc())
+    if hooks.enabled():
+        hooks.fire(
+            "post_tool_use",
+            {"tool_name": name, "tool_input": args or {}, "ok": res.ok,
+             "tool_response": (res.text or "")[:2000],
+             "session_id": getattr(ctx, "session_id", ""), "turn_id": getattr(ctx, "turn_id", "")},
+            tool_name=name, readonly=name in READONLY_TOOLS)
+    return res
 
 
 def dispatch(name: str, args: dict, ctx: ToolContext) -> str:

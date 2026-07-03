@@ -1876,6 +1876,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             pricing.add_spend(c)
         memory.index_turn("user", line, sid)
         memory.index_turn("assistant", out.get("text", ""), sid)
+        _hooks.fire("stop", {"session_id": sid or "", "turn_id": ctx.turn_id,
+                             "text_len": len(out.get("text") or "")})
         if ctx.todos:                        # 供 TUI 在轮末渲染计划面板（与行式对齐）
             from . import panels as _panels
             out["todos_panel"] = _panels.render_todos(ctx.todos, color=True)
@@ -1887,196 +1889,203 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         out["blocked"] = False
         return out
 
-    if _oneshot:                 # 非交互一次性（-p）：跑一轮该提示 → 结果打到 stdout → 退出
-        if getattr(args, "approve_all", False):
-            ctx.perm.accept_edits = True       # 无人值守：自动放行写/执行工具
-        # --progress：把步骤进度(工具/阶段/注入/todo)打到 stderr，最终答案仍只走 stdout。默认关，
-        # 因为部分调用方(如 IvyeaOps ad_audit 用 stderr=STDOUT)会把 stderr 并入捕获结果——不带
-        # --progress 时保持完全静默、stdout 纯净。人手动跑时加 --progress 即可看到进度。
-        _show_progress = bool(getattr(args, "progress", False))
-        _narrate = (lambda s: print(s, file=sys.stderr, flush=True)) if _show_progress else (lambda s: None)
-        # --output-format stream-json：stdout 全部是逐行 NDJSON 事件（对齐 Claude Code），
-        # 供 IvyeaOps 等消费方做工具调用可视化；人读输出（含最终答案）不再混入 stdout。
-        from . import stream_json as _sj_mod
-        _sj = getattr(args, "output_format", "text") == "stream-json"
-        _t0 = time.time()
-        if _sj:
-            _sj_mod.emit_line(_sj_mod.init_event(
-                sid, cfg.get_model_config().get("model", ""), os.getcwd(),
-                [t["function"]["name"] for t in agent_tools.TOOL_SCHEMAS],
-                "acceptEdits" if ctx.perm.accept_edits else "default"))
-        _out = _execute_turn(args.print_prompt, lambda t: None, _narrate,
-                             emit=_sj_mod.emit_line if _sj else None)
-        _persist()               # -p 也落盘会话：session_id 可供 --resume 真续接
-        if _show_progress and _out.get("todos_panel"):
-            print(_out["todos_panel"], file=sys.stderr, flush=True)
-        _txt = (_out.get("text") or "").strip()
-        if _sj:
-            _sj_mod.emit_line(_sj_mod.result_event(
-                sid, _txt, _out.get("usage") or {}, _out.get("cost") or 0.0,
-                int((time.time() - _t0) * 1000), num_turns=1, is_error=bool(_out.get("blocked"))))
-            return 1 if _out.get("blocked") else 0
-        if _out.get("blocked"):
-            print(ui.message("error", "未配置主脑模型或额度不可用，无法运行。"), file=sys.stderr)
-            return 1
-        print(markdown.render(_txt) if render_md else _txt)
-        return 0
-
-    if _tui_on or _live_on:      # 全屏 TUI（IVYEA_TUI=1）或滚动区常驻 app（IVYEA_LIVE=1）
-        return _chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
-                             render_markdown=markdown.render,
-                             plan_intent_fn=_plan_mode_intent,
-                             set_plan_mode=_set_plan_mode_msg,
-                             cycle_mode=_cycle_mode, mode_label_fn=_mode_label,
-                             slash_handlers=_SLASH_HANDLERS, scrollback=_live_on, intro=_intro)
-
-    while True:
-        line = ci.read("❯ ")
-        if line is chat_input.EXIT:
-            print("\n再见。")
+    # session_end 钩子：try/finally 保证 /exit、EOF、Ctrl-C、异常、-p 各种退出路径都触发
+    try:
+        if _oneshot:                 # 非交互一次性（-p）：跑一轮该提示 → 结果打到 stdout → 退出
+            if getattr(args, "approve_all", False):
+                ctx.perm.accept_edits = True       # 无人值守：自动放行写/执行工具
+            # --progress：把步骤进度(工具/阶段/注入/todo)打到 stderr，最终答案仍只走 stdout。默认关，
+            # 因为部分调用方(如 IvyeaOps ad_audit 用 stderr=STDOUT)会把 stderr 并入捕获结果——不带
+            # --progress 时保持完全静默、stdout 纯净。人手动跑时加 --progress 即可看到进度。
+            _show_progress = bool(getattr(args, "progress", False))
+            _narrate = (lambda s: print(s, file=sys.stderr, flush=True)) if _show_progress else (lambda s: None)
+            # --output-format stream-json：stdout 全部是逐行 NDJSON 事件（对齐 Claude Code），
+            # 供 IvyeaOps 等消费方做工具调用可视化；人读输出（含最终答案）不再混入 stdout。
+            from . import stream_json as _sj_mod
+            _sj = getattr(args, "output_format", "text") == "stream-json"
+            _t0 = time.time()
+            if _sj:
+                _sj_mod.emit_line(_sj_mod.init_event(
+                    sid, cfg.get_model_config().get("model", ""), os.getcwd(),
+                    [t["function"]["name"] for t in agent_tools.TOOL_SCHEMAS],
+                    "acceptEdits" if ctx.perm.accept_edits else "default"))
+            _out = _execute_turn(args.print_prompt, lambda t: None, _narrate,
+                                 emit=_sj_mod.emit_line if _sj else None)
+            _persist()               # -p 也落盘会话：session_id 可供 --resume 真续接
+            if _show_progress and _out.get("todos_panel"):
+                print(_out["todos_panel"], file=sys.stderr, flush=True)
+            _txt = (_out.get("text") or "").strip()
+            if _sj:
+                _sj_mod.emit_line(_sj_mod.result_event(
+                    sid, _txt, _out.get("usage") or {}, _out.get("cost") or 0.0,
+                    int((time.time() - _t0) * 1000), num_turns=1, is_error=bool(_out.get("blocked"))))
+                return 1 if _out.get("blocked") else 0
+            if _out.get("blocked"):
+                print(ui.message("error", "未配置主脑模型或额度不可用，无法运行。"), file=sys.stderr)
+                return 1
+            print(markdown.render(_txt) if render_md else _txt)
             return 0
-        if not line:
-            continue
-        if line in _SLASH_ALIASES:   # 别名归一（/h→/help、/q→/exit 等）
-            line = _SLASH_ALIASES[line]
-        if line in ("/exit", "/quit"):
-            print("再见。")
-            return 0
-        if line.split()[0] == "/paste":   # 剪贴板图片：存临时文件后改写成 @路径，走正常多模态轮
-            from . import vision as _vision
-            _img = _vision.clipboard_image()
-            if not _img:
-                print(ui.message("warn", "剪贴板里没有图片（网页终端无法访问系统剪贴板；本地终端需 pngpaste/xclip/wl-paste）。")); continue
-            _rest = line[len("/paste"):].strip() or "这张图片里是什么？"
-            print(ui.message("muted", f"已取剪贴板图片 → {_img}"))
-            line = f"@{_img} {_rest}"   # 落到下面的模型轮，由 mentions 收成多模态附件
-        _handler = _SLASH_HANDLERS.get(line.split()[0])
-        if _handler is not None:
-            _handler(line); continue
-        if line.startswith("/"):   # 自定义命令展开（展开后贯穿到模型轮）/ 未知命令
-            from . import commands as _cmds
-            _head = line.split()[0]
-            _expanded = _cmds.expand(_head[1:], line[len(_head):].strip())
-            if _expanded is not None:
-                print(ui.message("muted", f"已展开自定义命令 {_head}"))
-                line = _expanded
-            else:
-                hits = [c for c, _ in SLASH_COMMANDS if c.startswith(_head)]
-                tip = ("，你是否想用：" + " ".join(hits)) if hits else "，输入 /help 看全部"
-                print(ui.message("warn", f"未知命令 {_head}{tip}")); continue
 
-        _pi = _plan_mode_intent(line)   # 自然语言进/出计划模式（整行精确匹配，不进模型轮）
-        if _pi is not None:
-            _set_plan_mode(_pi == "enter"); continue
+        if _tui_on or _live_on:      # 全屏 TUI（IVYEA_TUI=1）或滚动区常驻 app（IVYEA_LIVE=1）
+            return _chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
+                                 render_markdown=markdown.render,
+                                 plan_intent_fn=_plan_mode_intent,
+                                 set_plan_mode=_set_plan_mode_msg,
+                                 cycle_mode=_cycle_mode, mode_label_fn=_mode_label,
+                                 slash_handlers=_SLASH_HANDLERS, scrollback=_live_on, intro=_intro)
 
-        # 自然语言 → Agent 循环
-        api_key = cfg.get_active_key()
-        current_model_settings = cfg.load_settings()
-        if (current_model_settings.get("kind") in ("native", "oauth", "login")
-                and current_model_settings.get("api_mode") not in ("gemini_native", "gemini_code_assist", "bedrock_converse", "copilot_chat_completions", "codex_responses")):
-            print(ui.message("warn", "当前 provider 需要尚未接入的原生/OAuth transport。请用 /model 切到 API key、OpenAI 兼容、本地或自定义 provider。"))
-            continue
-        if _model_needs_key(current_model_settings) and not api_key:
-            print(ui.message("warn", f"未配置主脑模型 key（{current_model_settings.get('key_env')}）。用 /model 配 key，或切到本地/自定义 no-key provider。"))
-            continue
-        # 成本护栏：每日 ¥ 上限
-        _lim = pricing.daily_limit()
-        if _lim > 0 and pricing.today_spend() >= _lim:
-            if not _ask(f"今日已花 ¥{pricing.today_spend():.2f} 达上限 ¥{_lim:.2f}，仍继续？(y/N)").strip().lower().startswith("y"):
-                print(ui.message("info", "已暂停。调整上限：ivyea config set daily_cost_limit_cny <元>"))
+        while True:
+            line = ci.read("❯ ")
+            if line is chat_input.EXIT:
+                print("\n再见。")
+                return 0
+            if not line:
                 continue
-        from . import engineering_context, knowledge, skills
-        ectx = engineering_context.build(os.getcwd(), line)
-        # 门控：工程/代码任务且无广告域信号(也无 ASIN) → 不注入亚马逊知识/skill，
-        # 避免污染上下文、烧 token、把模型往运营方向带偏。广告/通用/模糊任务一律照常注入。
-        _inject_domain = (
-            bool(getattr(ctx, "asin", "")) or _is_amazon_domain(line)
-            or not _looks_like_code_task(line)
-        )
-        kctx, kids = knowledge.context_for_query(line, limit=3) if _inject_domain else ("", [])
-        sctx, sids = skills.context_for_query(line, limit=2) if _inject_domain else ("", [])
-        from . import mentions as _mentions        # @文件引用：把 @path 文本文件内联给模型
-        user_content, _mention_imgs = _mentions.expand(line, os.getcwd(), with_images=True)
-        if _mention_imgs:
-            print(ui.message("muted", "已引用图片: " + ", ".join(os.path.basename(p) for p in _mention_imgs)))
-        if ectx:
-            user_content += "\n\n[工程上下文]\n" + ectx
-            print(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))
-            print(ui.message("muted", "已注入工程上下文"))
-        if sctx:
-            user_content += ("\n\n[Ivyea Skill：本轮相关可复用流程]\n"
-                             + sctx
-                             + "\n\n要求：优先按 skill workflow 组织执行步骤；涉及事实依据时再结合知识库。")
-            print(ui.message("muted", "已注入 skill: " + ", ".join(sids)))
-        if kctx:
-            user_content += ("\n\n[Ivyea 内置亚马逊知识库：本轮相关摘录]\n"
-                             + kctx
-                             + "\n\n要求：使用这些知识时说明依据，若与用户账户记忆冲突，以用户账户记忆为准。")
-            print(ui.message("muted", "已注入知识卡: " + ", ".join(kids)))
-        import time as _turn_time
-        ctx.turn_id = _turn_time.strftime("%Y%m%d-%H%M%S")
-        from . import hooks as _hooks
-        _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
-        messages[0] = _sys_msg()   # 每轮刷新 system：注入真实当前日期，续接旧会话/跨天也不过时
-        _snapshot(line)   # /rewind 检查点（本轮之前的对话+代码状态）
-        messages.append({"role": "user", "content": _mentions.build_user_content(user_content, _mention_imgs)})
-        try:
-            mcfg = cfg.get_model_config()
-            provider = build_chain(mcfg, api_key, narrate=lambda s: print(s))
-            ctx.provider = provider   # 供 dispatch_subagent 跑只读子 agent 用
-            rp = _ReasoningPrinter()   # 思考流（reasoning 模型）：正文前 dim 显示 ✻ 思考
-            if render_md and stream_live and _isatty(sys.stdout):
-                # 完整流式：边生成边打印正文，收尾擦除最后一段改渲染 markdown
-                sp = _StreamPrinter()
-                out = agent_loop.run_turn_stream(
-                    provider, ctx, messages, model=mcfg.get("model", ""),
-                    render=lambda t: (rp.done(), sp.render(t)),
-                    render_reasoning=rp.render,
-                    narrate=lambda s: (rp.done(), sp.commit(), print(s)))
-                rp.done()
-                sp.rerender(out["text"])
-            elif render_md:
-                # 缓冲 + spinner（含流式正文预览），收尾渲染 markdown
-                spin = _LiveSpinner()
-                out = agent_loop.run_turn_stream(
-                    provider, ctx, messages, model=mcfg.get("model", ""),
-                    render=lambda t: (rp.done(), spin.tick(t)),
-                    render_reasoning=rp.render,
-                    narrate=lambda s: (rp.done(), spin.clear(), print(s)))
-                rp.done()
-                spin.clear()
-                print(f"\n{_C['c']}●{_C['x']} " + markdown.render(out["text"]))   # 回答前留一空行
-            else:
-                print(f"{_C['c']}●{_C['x']} ", end="", flush=True)
-                out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""))
-            c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
-            _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
-            if c:
-                pricing.add_spend(c)   # 仍记账（今日累计存 spend.json）；正文不再刷花费行，累计花费看底部状态栏
-            from . import panels
-            if ctx.todos:
-                print(panels.render_todos(ctx.todos, color=_isatty(sys.stdout)))
-            print()
-            # 记忆：会话转录入库 + 自策展提示
-            memory.index_turn("user", line, sid)
-            memory.index_turn("assistant", out.get("text", ""), sid)
-            hint = memory.nudge_hint(out.get("text", ""))
-            if hint:
-                print(f"{_C['d']}  💡 {hint}{_C['x']}")
-            # 自动压缩默认关闭；长上下文只提醒，避免完整任务中途被压缩打断。
-            if ctx_mod.should_compact(int((out.get('usage') or {}).get('prompt_tokens') or 0)):
-                messages, _s = ctx_mod.compact(messages, provider)
-                if _s:
-                    memory.remember_summary(_s, sid)
-                    print(ui.message("info", "上下文较长，已自动压缩并入库摘要以省 token"))
-            elif ctx_mod.should_warn_compact(int((out.get('usage') or {}).get('prompt_tokens') or 0)):
-                print(ui.message("muted", "上下文已经较长；需要节省 token 时手动执行 /compact，或 /compact auto on 开启自动压缩。"))
-            _persist()
-        except KeyboardInterrupt:
-            print("\n" + ui.message("info", "已中断本轮，会话保留。继续输入即可。"))
-        except LLMError as e:
-            print("\n" + ui.message("error", f"模型错误: {e}"))
-            messages.pop()  # 撤回这条 user，避免污染上下文
+            if line in _SLASH_ALIASES:   # 别名归一（/h→/help、/q→/exit 等）
+                line = _SLASH_ALIASES[line]
+            if line in ("/exit", "/quit"):
+                print("再见。")
+                return 0
+            if line.split()[0] == "/paste":   # 剪贴板图片：存临时文件后改写成 @路径，走正常多模态轮
+                from . import vision as _vision
+                _img = _vision.clipboard_image()
+                if not _img:
+                    print(ui.message("warn", "剪贴板里没有图片（网页终端无法访问系统剪贴板；本地终端需 pngpaste/xclip/wl-paste）。")); continue
+                _rest = line[len("/paste"):].strip() or "这张图片里是什么？"
+                print(ui.message("muted", f"已取剪贴板图片 → {_img}"))
+                line = f"@{_img} {_rest}"   # 落到下面的模型轮，由 mentions 收成多模态附件
+            _handler = _SLASH_HANDLERS.get(line.split()[0])
+            if _handler is not None:
+                _handler(line); continue
+            if line.startswith("/"):   # 自定义命令展开（展开后贯穿到模型轮）/ 未知命令
+                from . import commands as _cmds
+                _head = line.split()[0]
+                _expanded = _cmds.expand(_head[1:], line[len(_head):].strip())
+                if _expanded is not None:
+                    print(ui.message("muted", f"已展开自定义命令 {_head}"))
+                    line = _expanded
+                else:
+                    hits = [c for c, _ in SLASH_COMMANDS if c.startswith(_head)]
+                    tip = ("，你是否想用：" + " ".join(hits)) if hits else "，输入 /help 看全部"
+                    print(ui.message("warn", f"未知命令 {_head}{tip}")); continue
+
+            _pi = _plan_mode_intent(line)   # 自然语言进/出计划模式（整行精确匹配，不进模型轮）
+            if _pi is not None:
+                _set_plan_mode(_pi == "enter"); continue
+
+            # 自然语言 → Agent 循环
+            api_key = cfg.get_active_key()
+            current_model_settings = cfg.load_settings()
+            if (current_model_settings.get("kind") in ("native", "oauth", "login")
+                    and current_model_settings.get("api_mode") not in ("gemini_native", "gemini_code_assist", "bedrock_converse", "copilot_chat_completions", "codex_responses")):
+                print(ui.message("warn", "当前 provider 需要尚未接入的原生/OAuth transport。请用 /model 切到 API key、OpenAI 兼容、本地或自定义 provider。"))
+                continue
+            if _model_needs_key(current_model_settings) and not api_key:
+                print(ui.message("warn", f"未配置主脑模型 key（{current_model_settings.get('key_env')}）。用 /model 配 key，或切到本地/自定义 no-key provider。"))
+                continue
+            # 成本护栏：每日 ¥ 上限
+            _lim = pricing.daily_limit()
+            if _lim > 0 and pricing.today_spend() >= _lim:
+                if not _ask(f"今日已花 ¥{pricing.today_spend():.2f} 达上限 ¥{_lim:.2f}，仍继续？(y/N)").strip().lower().startswith("y"):
+                    print(ui.message("info", "已暂停。调整上限：ivyea config set daily_cost_limit_cny <元>"))
+                    continue
+            from . import engineering_context, knowledge, skills
+            ectx = engineering_context.build(os.getcwd(), line)
+            # 门控：工程/代码任务且无广告域信号(也无 ASIN) → 不注入亚马逊知识/skill，
+            # 避免污染上下文、烧 token、把模型往运营方向带偏。广告/通用/模糊任务一律照常注入。
+            _inject_domain = (
+                bool(getattr(ctx, "asin", "")) or _is_amazon_domain(line)
+                or not _looks_like_code_task(line)
+            )
+            kctx, kids = knowledge.context_for_query(line, limit=3) if _inject_domain else ("", [])
+            sctx, sids = skills.context_for_query(line, limit=2) if _inject_domain else ("", [])
+            from . import mentions as _mentions        # @文件引用：把 @path 文本文件内联给模型
+            user_content, _mention_imgs = _mentions.expand(line, os.getcwd(), with_images=True)
+            if _mention_imgs:
+                print(ui.message("muted", "已引用图片: " + ", ".join(os.path.basename(p) for p in _mention_imgs)))
+            if ectx:
+                user_content += "\n\n[工程上下文]\n" + ectx
+                print(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))
+                print(ui.message("muted", "已注入工程上下文"))
+            if sctx:
+                user_content += ("\n\n[Ivyea Skill：本轮相关可复用流程]\n"
+                                 + sctx
+                                 + "\n\n要求：优先按 skill workflow 组织执行步骤；涉及事实依据时再结合知识库。")
+                print(ui.message("muted", "已注入 skill: " + ", ".join(sids)))
+            if kctx:
+                user_content += ("\n\n[Ivyea 内置亚马逊知识库：本轮相关摘录]\n"
+                                 + kctx
+                                 + "\n\n要求：使用这些知识时说明依据，若与用户账户记忆冲突，以用户账户记忆为准。")
+                print(ui.message("muted", "已注入知识卡: " + ", ".join(kids)))
+            import time as _turn_time
+            ctx.turn_id = _turn_time.strftime("%Y%m%d-%H%M%S")
+            from . import hooks as _hooks
+            _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
+            messages[0] = _sys_msg()   # 每轮刷新 system：注入真实当前日期，续接旧会话/跨天也不过时
+            _snapshot(line)   # /rewind 检查点（本轮之前的对话+代码状态）
+            messages.append({"role": "user", "content": _mentions.build_user_content(user_content, _mention_imgs)})
+            try:
+                mcfg = cfg.get_model_config()
+                provider = build_chain(mcfg, api_key, narrate=lambda s: print(s))
+                ctx.provider = provider   # 供 dispatch_subagent 跑只读子 agent 用
+                rp = _ReasoningPrinter()   # 思考流（reasoning 模型）：正文前 dim 显示 ✻ 思考
+                if render_md and stream_live and _isatty(sys.stdout):
+                    # 完整流式：边生成边打印正文，收尾擦除最后一段改渲染 markdown
+                    sp = _StreamPrinter()
+                    out = agent_loop.run_turn_stream(
+                        provider, ctx, messages, model=mcfg.get("model", ""),
+                        render=lambda t: (rp.done(), sp.render(t)),
+                        render_reasoning=rp.render,
+                        narrate=lambda s: (rp.done(), sp.commit(), print(s)))
+                    rp.done()
+                    sp.rerender(out["text"])
+                elif render_md:
+                    # 缓冲 + spinner（含流式正文预览），收尾渲染 markdown
+                    spin = _LiveSpinner()
+                    out = agent_loop.run_turn_stream(
+                        provider, ctx, messages, model=mcfg.get("model", ""),
+                        render=lambda t: (rp.done(), spin.tick(t)),
+                        render_reasoning=rp.render,
+                        narrate=lambda s: (rp.done(), spin.clear(), print(s)))
+                    rp.done()
+                    spin.clear()
+                    print(f"\n{_C['c']}●{_C['x']} " + markdown.render(out["text"]))   # 回答前留一空行
+                else:
+                    print(f"{_C['c']}●{_C['x']} ", end="", flush=True)
+                    out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""))
+                c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
+                _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
+                if c:
+                    pricing.add_spend(c)   # 仍记账（今日累计存 spend.json）；正文不再刷花费行，累计花费看底部状态栏
+                from . import panels
+                if ctx.todos:
+                    print(panels.render_todos(ctx.todos, color=_isatty(sys.stdout)))
+                print()
+                # 记忆：会话转录入库 + 自策展提示
+                memory.index_turn("user", line, sid)
+                memory.index_turn("assistant", out.get("text", ""), sid)
+                _hooks.fire("stop", {"session_id": sid or "", "turn_id": ctx.turn_id,
+                                     "text_len": len(out.get("text") or "")})
+                hint = memory.nudge_hint(out.get("text", ""))
+                if hint:
+                    print(f"{_C['d']}  💡 {hint}{_C['x']}")
+                # 自动压缩默认关闭；长上下文只提醒，避免完整任务中途被压缩打断。
+                if ctx_mod.should_compact(int((out.get('usage') or {}).get('prompt_tokens') or 0)):
+                    messages, _s = ctx_mod.compact(messages, provider)
+                    if _s:
+                        memory.remember_summary(_s, sid)
+                        print(ui.message("info", "上下文较长，已自动压缩并入库摘要以省 token"))
+                elif ctx_mod.should_warn_compact(int((out.get('usage') or {}).get('prompt_tokens') or 0)):
+                    print(ui.message("muted", "上下文已经较长；需要节省 token 时手动执行 /compact，或 /compact auto on 开启自动压缩。"))
+                _persist()
+            except KeyboardInterrupt:
+                print("\n" + ui.message("info", "已中断本轮，会话保留。继续输入即可。"))
+            except LLMError as e:
+                print("\n" + ui.message("error", f"模型错误: {e}"))
+                messages.pop()  # 撤回这条 user，避免污染上下文
+    finally:
+        _hooks.fire("session_end", {"session_id": sid or "", "turns": meter.turns,
+                                    "cost": round(meter.cost, 6)})
 
 
 def _cmd_model(args: argparse.Namespace) -> int:
