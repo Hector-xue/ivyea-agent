@@ -75,9 +75,61 @@ class ChatInput:
         self.mode_label_fn = mode_label_fn   # ()->当前模式文字，显示在输入框上边线右端（对标 Claude）
         self._app_factory = None      # 带框 Application（每次新建）
         self._session = None          # 普通 PromptSession 兜底
+        self._readline = None
+        self._readline_hist = ""
         self._mode = "plain"
-        if sys.stdin.isatty():
+        # 浏览器终端（IvyeaOps web 终端，xterm.js）：用 readline 行输入，**不接管终端**——
+        # 输出进终端主缓冲区，手机/电脑都能原生滚动看历史 + 框选复制 + 流畅（对标 Claude Code/bash）。
+        # prompt_toolkit 的全屏/钉底 app 会接管终端、拦掉原生滚动与复制，故 web 终端不用它。
+        # 保留 ↑↓ 历史 + Tab 斜杠/@补全。桌面真终端不受影响，仍走下面的带框 app。
+        if os.environ.get("IVYEA_OPS_TERMINAL", "").strip().lower() in ("1", "true", "on", "yes"):
+            if sys.stdin.isatty() and self._setup_readline():
+                self._mode = "readline"
+        elif sys.stdin.isatty():
             self._try_setup()
+
+    def _setup_readline(self) -> bool:
+        """配置 readline：历史文件 + 斜杠/@ Tab 补全。成功返回 True。"""
+        try:
+            import readline
+            config.ensure_dirs()
+            self._readline_hist = str(config.IVYEA_DIR / "chat_history")
+            try:
+                readline.read_history_file(self._readline_hist)
+            except (OSError, FileNotFoundError):
+                pass
+            readline.set_history_length(1000)
+            readline.set_completer_delims(" \t\n")   # 只按空白分词，让 /cmd 和 @path 整体补全
+            readline.set_completer(self._readline_completer())
+            readline.parse_and_bind("tab: complete")
+            self._readline = readline
+            return True
+        except Exception:
+            return False
+
+    def _readline_completer(self):
+        """readline 补全器：/斜杠命令（含用户自定义）+ @文件路径。"""
+        slash = self.slash
+
+        def _c(text, state):
+            matches: list[str] = []
+            if text.startswith("/"):
+                matches = [cmd for cmd, _ in slash if cmd.startswith(text)]
+                try:
+                    from . import commands as _cmds
+                    for name in _cmds.list_commands():
+                        c = "/" + name
+                        if c.startswith(text) and c not in matches:
+                            matches.append(c)
+                except Exception:
+                    pass
+            elif text.startswith("@"):
+                import glob
+                frag = os.path.expanduser(text[1:])
+                for p in sorted(glob.glob(frag + "*"))[:50]:
+                    matches.append("@" + p + ("/" if os.path.isdir(p) else ""))
+            return matches[state] if state < len(matches) else None
+        return _c
 
     def _completer(self):
         from prompt_toolkit.completion import Completer, Completion
@@ -289,6 +341,17 @@ class ChatInput:
 
     def read(self, plain_prompt: str = "❯ ") -> object:
         """返回输入字符串；用户退出返回 EXIT 哨兵。"""
+        if self._mode == "readline":     # 浏览器终端：普通行输入（不接管终端，保留 ↑↓/Tab）
+            try:
+                line = input(plain_prompt)
+            except (EOFError, KeyboardInterrupt):
+                return EXIT
+            if self._readline is not None:
+                try:
+                    self._readline.write_history_file(self._readline_hist)
+                except Exception:
+                    pass
+            return line.strip()
         if self._mode == "boxed":
             try:
                 r = self._read_boxed()

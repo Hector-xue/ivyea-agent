@@ -1502,9 +1502,14 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         except Exception:
             _tty_ok = False
     _plain = (_env("IVYEA_PLAIN") in ("1", "true", "on", "yes")) or not _tty_ok
-    _live_on = (not _plain) and (_env("IVYEA_LIVE") in ("1", "true", "on", "yes")
-                                 or _env("IVYEA_TUI") in ("0", "false", "off", "no"))
-    _tui_on = (not _plain) and (not _live_on)   # 默认 alt-screen
+    # 浏览器终端（IvyeaOps web 终端，IVYEA_OPS_TERMINAL=1）走行式循环 + readline 行输入，
+    # 不用会接管终端的全屏/滚动区 app——这样手机/电脑都能原生滚动看历史 + 框选复制 + 流畅
+    # （对标 Claude Code）。桌面真终端不受影响仍走 alt-screen。显式 IVYEA_TUI/LIVE 可覆盖。
+    _force = _env("IVYEA_LIVE") in ("1", "true", "on", "yes") or _env("IVYEA_TUI") in ("0", "false", "off", "no", "1", "true", "on", "yes")
+    _ops_term = (not _plain) and (not _force) and _env("IVYEA_OPS_TERMINAL") in ("1", "true", "on", "yes")
+    _live_on = (not _plain) and (not _ops_term) and (_env("IVYEA_LIVE") in ("1", "true", "on", "yes")
+                                                     or _env("IVYEA_TUI") in ("0", "false", "off", "no"))
+    _tui_on = (not _plain) and (not _ops_term) and (not _live_on)   # 默认 alt-screen（浏览器终端→行式）
     _health = cfg.main_brain_health()
     _health_msg = "" if _health.get("ok") else ui.message("warn", _health.get("hint", "主脑不可用，请用 /model 切换。"))
     # TUI 模式：banner+欢迎框作为 transcript 首块（打印会被 alt-screen 清掉）；行式则直接打印。
