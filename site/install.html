@@ -193,7 +193,7 @@
     </aside>
 
     <article class="doc">
-      <p class="eyebrow">Install guide · v1.2.1</p>
+      <p class="eyebrow">Install guide · v1.2.2</p>
       <h1>安装 Ivyea Agent</h1>
       <p class="doc-intro">一条命令装完，三步就能对话。安装脚本会自动检测 Python、装好 pipx、拉取最新 Release，把 <code>ivyea</code> 作为独立命令放进 PATH——不污染系统 Python，升级卸载都干净。Windows / macOS / Linux 三平台，CI 全绿。</p>
 
@@ -222,7 +222,7 @@
 <div class="tl"><span class="c"># 1 · 一键安装（自动装 pipx，拉最新 Release wheel）</span></div>
 <div class="tl"><span class="p">$ </span><span class="cmd">curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash</span></div>
 <div class="tl"><span class="dim">[ivyea] 使用 Python 3.11.9</span></div>
-<div class="tl"><span class="dim">[ivyea] 安装 ivyea-agent（来源：Release wheel v1.2.1）…</span></div>
+<div class="tl"><span class="dim">[ivyea] 安装 ivyea-agent（来源：Release wheel v1.2.2）…</span></div>
 <div class="tl"><span class="ok">[ivyea] ✓ 安装完成。</span></div>
 <div class="tl"><span class="c"># 2 · 首次引导：选模型 → 配 key（可选接领星）</span></div>
 <div class="tl"><span class="p">$ </span><span class="cmd">ivyea onboard</span></div>
@@ -233,7 +233,7 @@
 <div class="os-pane" data-pane="windows-script" hidden>
 <div class="tl"><span class="c"># 1 · 一键安装（PowerShell，自动装 pipx / 拉 Release）</span></div>
 <div class="tl"><span class="p">PS&gt; </span><span class="cmd">iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</span></div>
-<div class="tl"><span class="dim">[ivyea] 安装 ivyea-agent（来源：Release wheel v1.2.1）…</span></div>
+<div class="tl"><span class="dim">[ivyea] 安装 ivyea-agent（来源：Release wheel v1.2.2）…</span></div>
 <div class="tl"><span class="ok">[ivyea] ✓ 安装完成。若 ivyea 不能直接执行，请重开 PowerShell。</span></div>
 <div class="tl"><span class="c"># 2 · 首次引导：选模型 → 配 key</span></div>
 <div class="tl"><span class="p">PS&gt; </span><span class="cmd">ivyea onboard</span></div>
@@ -298,14 +298,14 @@
           <span class="d" style="background:#ff5f57"></span>
           <span class="d" style="background:#febc2e"></span>
           <span class="d" style="background:#28c840"></span>
-          <span class="t">固定 v1.2.1</span>
+          <span class="t">固定 v1.2.2</span>
         </div>
         <div class="term-body">
 <div class="tl"><span class="c"># Linux / macOS</span></div>
-<div class="tl"><span class="p">$ </span><span class="cmd">curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v1.2.1 bash</span></div>
+<div class="tl"><span class="p">$ </span><span class="cmd">curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | IVYEA_VERSION=v1.2.2 bash</span></div>
 <div class="tl">&nbsp;</div>
 <div class="tl"><span class="c"># Windows PowerShell</span></div>
-<div class="tl"><span class="p">PS&gt; </span><span class="cmd">$env:IVYEA_VERSION="v1.2.1"</span></div>
+<div class="tl"><span class="p">PS&gt; </span><span class="cmd">$env:IVYEA_VERSION="v1.2.2"</span></div>
 <div class="tl"><span class="p">PS&gt; </span><span class="cmd">iwr https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.ps1 -UseBasicParsing | iex</span></div>
 </div>
       </div>
@@ -381,7 +381,7 @@ ivyea model                  # 查看 / 切换主脑模型（交互）</code></p
       </div>
       <p>升级与卸载都走 <code>ivyea self</code>（默认 dry-run，加 <code>--execute</code> 才真正执行）：</p>
       <pre><code>ivyea self upgrade --execute              # 升级到最新 Release
-ivyea self upgrade --version v1.2.1 --execute   # 升到指定版本
+ivyea self upgrade --version v1.2.2 --execute   # 升到指定版本
 ivyea self uninstall --execute            # 卸载（保留数据）
 ivyea self uninstall --remove-data --execute    # 卸载并删除 ~/.ivyea</code></pre>
       <p>重新跑一键安装脚本也会把已装的 ivyea 升级到最新版，效果等同 <code>self upgrade</code>。</p>
