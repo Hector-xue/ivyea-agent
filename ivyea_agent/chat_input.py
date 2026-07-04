@@ -20,6 +20,29 @@ EXIT = object()  # 哨兵：用户在框内 Ctrl+C/Ctrl+D 退出
 _AT_RE = _re.compile(r"(?<!\S)@([^\s@]*)$")   # 光标前最后一个 @路径片段（用于补全）
 
 
+def slash_aware_autosuggest(slash_commands=None):
+    """ghost 灰字建议：斜杠命令时 = 补全菜单的第一项（与 Tab 补全一致，所见即所得），
+    普通输入时 = 历史建议。chat_input（行式）与 chat_tui（全屏/滚动区）两套输入框共用。
+
+    修复前：输入 `/` 时历史 ghost 灰字建议上次的 `/model`，Tab 却补成菜单第一项 `/help`
+    ——所见（model）非所得（help）。现在斜杠 ghost 直接取当前输入匹配到的第一个命令，
+    Tab / →键 / 菜单三者补的都是它，一致；用户也仍有可见的命令推荐。"""
+    from prompt_toolkit.auto_suggest import AutoSuggest, AutoSuggestFromHistory, Suggestion
+    base = AutoSuggestFromHistory()
+    cmds = [c[0] if isinstance(c, (tuple, list)) else c for c in (slash_commands or [])]
+
+    class _SlashOrHistoryGhost(AutoSuggest):
+        def get_suggestion(self, buffer, document):
+            t = document.text
+            if t.startswith("/"):
+                for cmd in cmds:                       # 第一个 startswith 的命令 = 菜单第一项
+                    if cmd.startswith(t) and cmd != t:
+                        return Suggestion(cmd[len(t):])
+                return None                            # 已完整/无匹配 → 不给 ghost
+            return base.get_suggestion(buffer, document)
+    return _SlashOrHistoryGhost()
+
+
 def _at_completions(frag: str):
     """@文件引用的路径补全：按当前片段列出目录下匹配的文件/子目录。"""
     from prompt_toolkit.completion import Completion
@@ -107,11 +130,10 @@ class ChatInput:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.styles import Style
         from prompt_toolkit.shortcuts.prompt import CompleteStyle
-        from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
         self._session = PromptSession(
             history=self._history,
             completer=self._completer(), complete_while_typing=True,
-            auto_suggest=AutoSuggestFromHistory(),        # 历史 ghost 建议（→/Ctrl-E 接受）
+            auto_suggest=slash_aware_autosuggest(self.slash),            # 历史 ghost 建议（斜杠命令除外，→/Ctrl-E 接受）
             complete_style=CompleteStyle.MULTI_COLUMN,   # 输入 / 即弹下拉菜单（带描述）
             bottom_toolbar=lambda: self.status_fn(),     # 常驻底部状态栏
             style=Style.from_dict(self._style_dict()))
@@ -170,11 +192,10 @@ class ChatInput:
         from prompt_toolkit.widgets import TextArea
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.styles import Style
-        from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 
         ta = TextArea(prompt=[("class:prompt", "❯ ")], multiline=True, wrap_lines=True,
                       completer=self._completer(), complete_while_typing=True,
-                      auto_suggest=AutoSuggestFromHistory(),   # 历史 ghost 建议
+                      auto_suggest=slash_aware_autosuggest(self.slash),   # 历史 ghost 建议（斜杠命令除外）
                       history=self._history)
         # 输入框高度按内容行数固定(空=1行,封顶8行):不支持 CPR 的终端(如手机浏览器)会
         # 按整屏预留空间→多行 TextArea 会撑满屏幕,固定高度可避免。
@@ -187,11 +208,11 @@ class ChatInput:
 
         @kb.add("enter", eager=True)
         def _(event):
-            # 补全菜单已用 ↑↓ 选中某项 → Enter 接受补全；否则提交整段输入
+            # 补全菜单已选中某项（Tab/↑↓）→ 定稿该项并**直接提交**（一次 Enter 即可，
+            # 不再要求「先 Enter 定稿、再 Enter 提交」两段式）；否则直接提交整段输入。
             buf = ta.buffer
             if buf.complete_state and buf.complete_state.current_completion:
                 buf.apply_completion(buf.complete_state.current_completion)
-                return
             event.app.exit(result=ta.text)
 
         @kb.add("escape", "enter")   # Alt/Option+Enter
@@ -208,7 +229,7 @@ class ChatInput:
             else:
                 buf.cursor_right()
 
-        @kb.add("tab")              # Tab：优先接受 ghost 建议，否则走斜杠补全菜单
+        @kb.add("tab")              # Tab：有补全菜单则循环候选（斜杠/@），否则接受历史 ghost 建议
         def _(event):
             buf = ta.buffer
             if buf.complete_state:

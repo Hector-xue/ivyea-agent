@@ -311,35 +311,56 @@ class ChatTUI:
             return "turn"
         return "turn"
 
-    def _run_slash(self, handler, text: str) -> None:
-        """执行斜杠命令：滚动区模式下挂起 app 到终端跑（handler 多为 print/可能交互），避免嵌套 app。
-        运行期临时清空审批 marshal——否则 handler 里的 tui.select 会被 marshal 到已挂起的主 app 造成死锁。"""
-        from . import tui as _tui_mod
+    # 交互式斜杠命令（handler 内部会弹 tui.select 需要真实终端）：这些挂起 app 到终端跑；
+    # 其余纯输出命令（/help /status /cost /tools /diff …）捕获 print 进 transcript，不用
+    # run_in_terminal——手机 web 终端(xterm.js)下 run_in_terminal 会输出丢失+乱码。
+    _INTERACTIVE_SLASH = {"/model", "/config", "/paste", "/mcp", "/update", "/rewind", "/profile"}
 
-        def _call():
-            _tui_mod.set_active_selector(None)
-            # patch_stdout 会把 print 的原始 ANSI 转义成字面量；run_in_terminal 已挂起 app，
-            # 临时换回真实终端流让 handler 的原始 ANSI 上色 + 交互输入正常，用完还原。
+    def _run_slash(self, handler, text: str) -> None:
+        """执行斜杠命令。纯输出命令：捕获 handler 的 print → 走 _emit_line 进 transcript
+        （不依赖 run_in_terminal/CPR，兼容 web 终端；输入框不消失、长输出可滚）。
+        交互命令：run_in_terminal 挂起 app 到真实终端跑（需终端交互）。"""
+        import io
+        from . import tui as _tui_mod
+        head = text.split()[0] if text.split() else text
+
+        if head not in self._INTERACTIVE_SLASH:
+            buf = io.StringIO()
             saved = sys.stdout
             try:
-                if self.scrollback and sys.__stdout__ is not None:
+                sys.stdout = buf
+                handler(text)
+            except Exception as e:   # noqa: BLE001
+                buf.write(f"\033[31m命令出错：{e}\033[0m")
+            finally:
+                sys.stdout = saved
+            out = buf.getvalue().rstrip("\n")
+            if out.strip():
+                self._emit_line(out)
+            else:
+                self._invalidate()
+            return
+
+        # 交互命令：挂起 app 到真实终端（run_in_terminal），set_active_selector(None) 让
+        # handler 的 tui.select 走终端交互而非 marshal 到已挂起的主 app（会死锁）。
+        def _call():
+            _tui_mod.set_active_selector(None)
+            saved = sys.stdout
+            try:
+                if sys.__stdout__ is not None:
                     sys.stdout = sys.__stdout__
                 handler(text)
             finally:
                 sys.stdout = saved
                 _tui_mod.set_active_selector(self._approve)
-
-        if self.scrollback:
-            try:
-                from prompt_toolkit.application import run_in_terminal
-                run_in_terminal(_call)
-                return
-            except Exception:
-                pass
         try:
-            _call()
-        except Exception as e:   # noqa: BLE001
-            self._emit_line(f"\033[31m命令出错：{e}\033[0m")
+            from prompt_toolkit.application import run_in_terminal
+            run_in_terminal(_call)
+        except Exception:
+            try:
+                _call()
+            except Exception as e:   # noqa: BLE001
+                self._emit_line(f"\033[31m命令出错：{e}\033[0m")
 
     def _body_height(self) -> int:
         """transcript 可用物理行数（终端高 - 输入框上线/输入/下线/状态栏 4 行）。"""
@@ -475,7 +496,7 @@ class ChatTUI:
 
         approving = Condition(lambda: self.pending is not None)
 
-        from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+        from .chat_input import slash_aware_autosuggest
         history = None
         try:
             from prompt_toolkit.history import FileHistory
@@ -486,7 +507,7 @@ class ChatTUI:
             history = None
         ta = TextArea(prompt=[("class:prompt", "❯ ")], multiline=False, height=1,
                       completer=self._completer(), complete_while_typing=True,
-                      auto_suggest=AutoSuggestFromHistory(), history=history)
+                      auto_suggest=slash_aware_autosuggest(self.slash_commands), history=history)   # 斜杠 ghost=补全菜单第一项
         from prompt_toolkit.layout.containers import VSplit, ConditionalContainer
         from prompt_toolkit.formatted_text import ANSI
         # 输入框上边线：右端显示当前模式（计划模式/自动接受编辑），对标 Claude 边线上的标签
@@ -583,7 +604,7 @@ class ChatTUI:
         @kb.add("c-n")
         def _(event): self._scroll_by(8)      # 下滚回到更新
 
-        # Tab：优先接受 ghost 建议（上文/历史推荐），否则走斜杠补全菜单
+        # Tab：有补全菜单则循环候选（斜杠/@，所见即所得），否则接受历史 ghost 建议
         @kb.add("tab")
         def _(event):
             buf = ta.buffer
