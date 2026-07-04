@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -95,15 +97,25 @@ def _source_repo() -> Path | None:
 
 
 def update_commands() -> list[list[str]]:
-    """本机的更新命令：源码仓 → git pull；否则 → self_manage.upgrade_plan 的命令。"""
+    """本机的更新命令（跨平台，**不依赖 bash**——Windows 没有 bash，旧版把命令包成
+    `bash -lc` 直接 WinError 2）：
+    - 源码仓 → `git pull`（git 跨平台在 PATH）。
+    - pipx 安装 → 直接跑 `pipx upgrade ivyea-agent`（解析 pipx 可执行文件绝对路径，
+      Windows 下即 pipx.exe）。
+    - 其余（venv / ivyea-runtime / unknown）→ 用当前解释器的 pip 升级，无 PATH/shell 依赖。
+    """
     root = _source_repo()
     if root is not None:
         return [["git", "-C", str(root), "pull", "--ff-only"]]
     try:
         from . import self_manage
-        return [["bash", "-lc", c] for c in self_manage.upgrade_plan().get("commands", [])]
+        info = self_manage.install_info()
+        if info.get("method") == "pipx":
+            pipx = shutil.which("pipx") or (info.get("pipx") or "") or "pipx"
+            return [[pipx, "upgrade", "ivyea-agent"]]
     except Exception:
-        return [["bash", "-lc", "python -m pip install --upgrade ivyea-agent"]]
+        pass
+    return [[sys.executable, "-m", "pip", "install", "--upgrade", "ivyea-agent"]]
 
 
 def do_update() -> tuple[bool, str]:
@@ -113,7 +125,8 @@ def do_update() -> tuple[bool, str]:
         return False, "没有可用的更新命令。"
     out: list[str] = []
     for cmd in cmds:
-        out.append("$ " + (" ".join(cmd) if cmd[0] != "bash" else cmd[-1]))
+        shown = ([Path(cmd[0]).name] + cmd[1:]) if cmd else cmd   # 首项只显示程序名(路径太长)
+        out.append("$ " + " ".join(shown))
         try:
             r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, timeout=300)
