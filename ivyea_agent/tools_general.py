@@ -212,6 +212,29 @@ def _expand_braces(pattern: str) -> list[str]:
     return out
 
 
+def _normalize_glob_pattern(pattern: str, root: Path) -> str:
+    """Make common model-produced absolute/repo-prefixed globs root-relative.
+
+    Once task scope has locked ``root=/x/ivyea-agent``, models still sometimes
+    emit ``/x/ivyea-agent/**/*.py`` or ``ivyea-agent/**/*.py``. Path matching
+    expects a root-relative pattern; normalize only prefixes that provably
+    identify the active root and leave outside paths untouched for policy/error
+    handling.
+    """
+    raw = (pattern or "").strip().replace("\\", "/")
+    if raw.startswith("./"):
+        raw = raw[2:]
+    root_text = root.resolve().as_posix().rstrip("/")
+    if raw == root_text:
+        return "*"
+    if raw.startswith(root_text + "/"):
+        return raw[len(root_text) + 1:]
+    prefix = root.name + "/"
+    if root.name and raw.startswith(prefix):
+        return raw[len(prefix):]
+    return raw
+
+
 def t_grep(args: dict, ctx) -> str:
     """内容正则搜索（ripgrep 风格），返回 file:line 命中行。只读，自动放行。"""
     pattern = args.get("pattern", "")
@@ -227,7 +250,8 @@ def t_grep(args: dict, ctx) -> str:
     if not ok:
         return msg
     glob = (args.get("glob") or "").strip()
-    globs = _expand_braces(glob) if glob else []   # 支持 **/*.{ts,tsx,js} 花括号，避免静默扫 0 文件
+    normalized_glob = _normalize_glob_pattern(glob, root) if glob else ""
+    globs = _expand_braces(normalized_glob) if normalized_glob else []  # 花括号 + 根相对容错
     max_hits = min(int(args.get("max_results") or 80), 300)
     hits: list[str] = []
     scanned = 0
@@ -277,7 +301,7 @@ def t_glob(args: dict, ctx) -> str:
     max_n = min(int(args.get("max_results") or 100), 500)
     # fnmatch 的 * 本就跨 /，把 **/ 归一为空、** 归一为 * 即可正确支持 **/*.py 这类（含根目录）；
     # 并展开 {a,b} 花括号（fnmatch 不认），避免 **/*.{ts,tsx} 静默 0 匹配。
-    pats = _expand_braces(pattern)
+    pats = _expand_braces(_normalize_glob_pattern(pattern, root))
     norms = [p.replace("**/", "").replace("**", "*") for p in pats]
     hits: list[str] = []
     scanned = 0

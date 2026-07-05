@@ -115,10 +115,12 @@ class _StreamPrinter:
         sys.stdout.flush()
         self.block += text
         self.on = True
-        while "\n\n" in self.block:                # 完成的块即时转 markdown
-            completed, remainder = self.block.split("\n\n", 1)
+        from . import markdown
+        completed_blocks, remainder = markdown.split_stream_blocks(self.block)
+        if completed_blocks:
             self._erase(self.block)                # 擦掉屏上整块 dim（completed+remainder）
-            self._emit_md(completed)
+            for completed in completed_blocks:
+                self._emit_md(completed)
             self.block = remainder
             if remainder:                          # 余下部分继续以 dim 挂在底部
                 sys.stdout.write(f"{_C['d']}{remainder}{_C['x']}")

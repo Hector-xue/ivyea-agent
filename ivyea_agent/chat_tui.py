@@ -105,8 +105,9 @@ class _ScrollEmitter:
 
     def text(self, token: str) -> None:
         self._buf += token
-        while "\n\n" in self._buf:
-            block, self._buf = self._buf.split("\n\n", 1)
+        from . import markdown
+        blocks, self._buf = markdown.split_stream_blocks(self._buf)
+        for block in blocks:
             self._emit(block)
 
     def _emit(self, block: str) -> None:

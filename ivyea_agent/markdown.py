@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import re
 
+from . import terminal_theme
+
 _B, _DIM, _IT, _UND, _X = "\033[1m", "\033[2m", "\033[3m", "\033[4m", "\033[0m"
 _CY, _GR, _YE, _MG, _FG = "\033[36m", "\033[32m", "\033[33m", "\033[35m", "\033[37m"
 
 _CODE = f"{_FG}{_DIM}"
 _CODE_BAR = f"{_DIM}│{_X}"
+_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})\s*([^\s`]*)?.*$")
 
 
 def _inline(s: str) -> str:
@@ -20,7 +23,7 @@ def _inline(s: str) -> str:
     holds: list[str] = []
 
     def _stash(m):
-        holds.append(f"{_CODE}{m.group(1)}{_X}")
+        holds.append(f"{_CY}{m.group(1)}{_X}")
         return f"\x00{len(holds)-1}\x00"
 
     s = re.sub(r"`([^`]+)`", _stash, s)
@@ -71,20 +74,67 @@ def _vis_len(s: str) -> int:
 
 
 def _strip_ansi(s: str) -> str:
-    return re.sub(r"\033\[[0-9;]*m", "", s)
+    return terminal_theme.strip_ansi(s)
+
+
+def _fence_parts(line: str) -> tuple[str, str] | None:
+    match = _FENCE_RE.match(line.rstrip("\r\n"))
+    if not match:
+        return None
+    marker = match.group(1)
+    info = (match.group(2) or "").strip()
+    if info.startswith("{.") and info.endswith("}"):
+        info = info[2:-1]
+    return marker, info
+
+
+def _closes_fence(line: str, marker: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped and stripped[0] == marker[0]
+                and len(stripped) >= len(marker)
+                and not stripped.strip(marker[0]))
+
+
+def split_stream_blocks(text: str) -> tuple[list[str], str]:
+    """Split complete Markdown paragraphs without cutting inside fenced code.
+
+    Streaming UIs call this repeatedly with their accumulated buffer. A blank
+    line commits a paragraph only when it is outside a ```/~~~ code fence.
+    """
+    source = str(text or "")
+    blocks: list[str] = []
+    start = 0
+    offset = 0
+    fence = ""
+    for line in source.splitlines(keepends=True):
+        line_start = offset
+        offset += len(line)
+        parts = _fence_parts(line)
+        if parts:
+            marker, _info = parts
+            if not fence:
+                fence = marker
+            elif marker[0] == fence[0] and _closes_fence(line, fence):
+                fence = ""
+            continue
+        if not fence and not line.strip() and line.endswith(("\n", "\r")):
+            block = source[start:line_start].strip("\r\n")
+            if block.strip():
+                blocks.append(block)
+            start = offset
+    return blocks, source[start:]
 
 
 def render(md: str) -> str:
     """把 markdown 文本渲染成带 ANSI 的终端字符串。NO_COLOR 环境变量则去色。"""
     import os
     out = _render(md)
-    return _strip_ansi(out) if os.environ.get("NO_COLOR") else out
+    return _strip_ansi(out) if "NO_COLOR" in os.environ else out
 
 
 def _render(md: str) -> str:
     lines = md.splitlines()
     out: list[str] = []
-    in_code = False
     table_buf: list[str] = []
 
     def _flush_table():
@@ -96,25 +146,32 @@ def _render(md: str) -> str:
         if out and out[-1] != "":
             out.append("")
 
-    for ln in lines:
-        fence = re.match(r"^\s*```(\w*)", ln)
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        fence = _fence_parts(ln)
         if fence:
             _flush_table()
-            if not in_code:                       # 代码块开：上方留白 + 语言标注框头
-                lang = fence.group(1)
-                _blank()
-                out.append(f"{_DIM}╭─{(' ' + lang) if lang else ''}{_X}")
-                in_code = True
-            else:                                 # 代码块关：框尾 + 下方留白
-                out.append(f"{_DIM}╰─{_X}")
-                out.append("")
-                in_code = False
-            continue
-        if in_code:
-            out.append(f"{_CODE_BAR} {_CODE}{ln}{_X}")
+            marker, lang = fence
+            code_lines: list[str] = []
+            i += 1
+            while i < len(lines) and not _closes_fence(lines[i], marker):
+                code_lines.append(lines[i])
+                i += 1
+            _blank()
+            label = f" {_B}{_CY}{lang}{_X}" if lang else ""
+            out.append(f"{_DIM}╭─{_X}{label}")
+            code = "\n".join(code_lines)
+            highlighted = terminal_theme.highlight_code(code, language=lang)
+            for code_line in highlighted.split("\n") if code_lines else []:
+                out.append(f"{_CODE_BAR} {code_line}" if code_line else _CODE_BAR)
+            out.append(f"{_DIM}╰─{_X}")
+            out.append("")
+            i += 1                              # closing fence, or one past EOF (harmless)
             continue
         if "|" in ln and ln.strip().startswith("|"):
             table_buf.append(ln)
+            i += 1
             continue
         _flush_table()
         h = re.match(r"^(#{1,6})\s+(.*)", ln)
@@ -128,22 +185,28 @@ def _render(md: str) -> str:
                 out.append(f"{_DIM}{color}{'─' * min(48, max(4, _vis_len(h.group(2))))}{_X}")
             else:
                 out.append(f"{_DIM}{'#' * level} {_X}{_B}{color}{title}{_X}")
+            i += 1
             continue
         if re.match(r"^\s*([-*_])\1{2,}\s*$", ln):
             out.append(f"{_DIM}{'─' * 48}{_X}")
+            i += 1
             continue
         q = re.match(r"^\s*>\s?(.*)", ln)
         if q:
             out.append(f"{_DIM}│ {_inline(q.group(1))}{_X}")
+            i += 1
             continue
         b = re.match(r"^(\s*)([-*+])\s+(.*)", ln)
         if b:
             out.append(f"{b.group(1)}{_CY}•{_X} {_inline(b.group(3))}")
+            i += 1
             continue
         n = re.match(r"^(\s*)(\d+)\.\s+(.*)", ln)
         if n:
             out.append(f"{n.group(1)}{_CY}{n.group(2)}.{_X} {_inline(n.group(3))}")
+            i += 1
             continue
         out.append(_inline(ln))
+        i += 1
     _flush_table()
     return "\n".join(out)

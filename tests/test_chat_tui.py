@@ -103,6 +103,18 @@ def test_turn_streams_and_interleaves_tool_lines():
     assert plain.index("你好") < plain.index("⏺ 读取文件") < plain.index("，世界")
 
 
+def test_scrollback_stream_does_not_commit_code_at_internal_blank_line(monkeypatch):
+    printed = []
+    monkeypatch.setattr(chat_tui, "_ptprint", printed.append)
+    emitter = chat_tui._ScrollEmitter(lambda text: "MD<" + text + ">")
+    emitter.text("```python\ndef hello():\n\n")
+    assert printed == []
+    emitter.text("    return 1\n```\n\n")
+    assert len(printed) == 1
+    assert "def hello():\n\n    return 1" in printed[0]
+    assert printed[0].count("MD<") == 1
+
+
 def test_turn_error_surfaced():
     def boom(line, render, narrate, cancel_check=None):
         raise RuntimeError("炸了")

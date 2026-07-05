@@ -1917,8 +1917,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if _lim > 0 and pricing.today_spend() >= _lim:
             narrate(ui.message("warn", f"今日已花 ¥{pricing.today_spend():.2f} 达上限 ¥{_lim:.2f}，已暂停。"))
             return {"text": "", "usage": {}, "blocked": True}
-        from . import engineering_context, knowledge, skills
-        ectx = engineering_context.build(os.getcwd(), line)
+        from . import engineering_context, knowledge, skills, task_scope
+        scope_note = task_scope.prepare_query(ctx, line, messages, base=os.getcwd())
+        ectx = engineering_context.build(ctx.workspace or os.getcwd(), line)
         _inject = bool(getattr(ctx, "asin", "")) or _is_amazon_domain(line) or not _looks_like_code_task(line)
         kctx, kids = knowledge.context_for_query(line, limit=3) if _inject else ("", [])
         sctx, sids = skills.context_for_query(line, limit=2) if _inject else ("", [])
@@ -1929,6 +1930,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             from . import vision as _vision_mod   # 主脑无视觉时 sidecar 代读、文本回灌
             user_content, _mention_imgs = _vision_mod.route_images(
                 user_content, _mention_imgs, cfg.get_model_config(), narrate)
+        if scope_note:
+            user_content += "\n\n" + scope_note
         if ectx:
             user_content += "\n\n[工程上下文]\n" + ectx
             narrate(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))
@@ -2076,8 +2079,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 if not _ask(f"今日已花 ¥{pricing.today_spend():.2f} 达上限 ¥{_lim:.2f}，仍继续？(y/N)").strip().lower().startswith("y"):
                     print(ui.message("info", "已暂停。调整上限：ivyea config set daily_cost_limit_cny <元>"))
                     continue
-            from . import engineering_context, knowledge, skills
-            ectx = engineering_context.build(os.getcwd(), line)
+            from . import engineering_context, knowledge, skills, task_scope
+            scope_note = task_scope.prepare_query(ctx, line, messages, base=os.getcwd())
+            ectx = engineering_context.build(ctx.workspace or os.getcwd(), line)
             # 门控：工程/代码任务且无广告域信号(也无 ASIN) → 不注入亚马逊知识/skill，
             # 避免污染上下文、烧 token、把模型往运营方向带偏。广告/通用/模糊任务一律照常注入。
             _inject_domain = (
@@ -2093,6 +2097,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 from . import vision as _vision_mod   # 主脑无视觉时 sidecar 代读、文本回灌
                 user_content, _mention_imgs = _vision_mod.route_images(
                     user_content, _mention_imgs, cfg.get_model_config(), print)
+            if scope_note:
+                user_content += "\n\n" + scope_note
             if ectx:
                 user_content += "\n\n[工程上下文]\n" + ectx
                 print(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))

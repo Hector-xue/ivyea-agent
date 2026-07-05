@@ -33,6 +33,48 @@ def test_code_block():
     assert "48;5" not in out
 
 
+def test_code_block_has_multilanguage_syntax_colors_and_preserves_blank_lines(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    md = '''```python
+def hello(name):
+    # blank line below
+
+    return f"hi {name}"
+```
+
+```json
+{"ok": true, "count": 2}
+```'''
+    out = markdown.render(md)
+    plain = _plain(out)
+    assert "def hello" in plain and "# blank line below" in plain
+    assert '{"ok": true, "count": 2}' in plain
+    assert "\033[38;5;" in out
+    assert "│\n" in plain                         # 代码块内部空行仍有边框，不被截断
+    assert plain.count("╭─") == 2 and plain.count("╰─") == 2
+
+
+def test_tilde_fence_and_inline_code_get_structural_color(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    out = markdown.render("运行 `ivyea chat`：\n\n~~~bash\necho ok\n~~~")
+    assert "`" not in out and "~~~" not in out
+    assert "\033[36mivyea chat\033[0m" in out
+    assert "bash" in _plain(out) and "echo ok" in _plain(out)
+
+
+def test_stream_block_splitter_never_splits_inside_fence():
+    md = "前言\n\n```python\ndef hello():\n\n    return 1\n```\n\n结尾"
+    blocks, remainder = markdown.split_stream_blocks(md)
+    assert blocks == ["前言", "```python\ndef hello():\n\n    return 1\n```"]
+    assert remainder == "结尾"
+
+
+def test_stream_block_splitter_waits_for_closing_fence():
+    blocks, remainder = markdown.split_stream_blocks("```python\ndef hello():\n\n")
+    assert blocks == []
+    assert remainder.startswith("```python")
+
+
 def test_table():
     md = "| 杠杆 | 数量 |\n| --- | --- |\n| 否词 | 3 |"
     out = markdown.render(md)

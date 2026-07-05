@@ -58,7 +58,7 @@ _ICONS = _ICONS_UNICODE if _unicode_glyphs_ok() else _ICONS_ASCII
 
 
 def _color_enabled(color: bool | None = None) -> bool:
-    if os.environ.get("NO_COLOR"):
+    if "NO_COLOR" in os.environ:
         return False
     if color is not None:
         return color
@@ -249,7 +249,21 @@ def tool_call(name: str, args: dict | None = None, *, color: bool | None = None)
     return f"{paint(_ICONS['tool'], 'info', color=color)} {paint(name, _B, color=color)}{paint(suffix, 'muted', color=color)}"
 
 
-def tool_result(text: str, *, color: bool | None = None) -> str:
+def _tool_result_kind(first: str, ok: bool | None) -> str:
+    lower = (first or "").lower()
+    if first.lstrip().startswith("⚠") or "已拦截" in first or "警告" in first:
+        return "warn"
+    if ok is False or any(word in lower for word in (
+        "失败", "错误", "出错", "拒绝", "不存在", "traceback", "error", "failed",
+    )) or re.search(r"退出码\s*[1-9]", first):
+        return "error"
+    if (first.lstrip().startswith(("✓", "[退出码 0]"))
+            or any(word in first for word in ("已写入", "已编辑", "测试通过", "命中", "匹配", "已更新计划"))):
+        return "success"
+    return "muted"
+
+
+def tool_result(text: str, *, color: bool | None = None, ok: bool | None = None) -> str:
     if not text:
         return f"  {paint(_ICONS['result'], 'muted', color=color)} {paint('完成，无文本输出', 'muted', color=color)}"
     redacted = security.redact_text(text)
@@ -260,8 +274,13 @@ def tool_result(text: str, *, color: bool | None = None) -> str:
     extra = len([ln for ln in lines[1:] if ln.strip()])
     if extra:
         first = f"{first}  …(+{extra} 行)"
+    kind = _tool_result_kind(first, ok)
     # 死胡同信号（⚠ 开头，如 grep/glob 扫 0 文件）：黄色 warn 高亮，别被灰掉埋没
     if first.lstrip().startswith("⚠"):
         body = first.lstrip()[1:].lstrip()   # 去 ⚠ 前缀，图标位统一用 warn ▲
         return f"  {paint(_ICONS['warn'], 'warn', color=color)} {paint(body, 'warn', color=color)}"
-    return f"  {paint(_ICONS['result'], 'muted', color=color)} {paint(first, 'muted', color=color)}"
+    icon = _ICONS.get(kind, _ICONS['result']) if kind in ("success", "warn", "error") else _ICONS["result"]
+    body = first.lstrip()
+    if kind in ("success", "warn", "error") and body.startswith(icon):
+        body = body[len(icon):].lstrip()
+    return f"  {paint(icon, kind, color=color)} {paint(body, kind, color=color)}"
