@@ -260,4 +260,8 @@ def tool_result(text: str, *, color: bool | None = None) -> str:
     extra = len([ln for ln in lines[1:] if ln.strip()])
     if extra:
         first = f"{first}  …(+{extra} 行)"
+    # 死胡同信号（⚠ 开头，如 grep/glob 扫 0 文件）：黄色 warn 高亮，别被灰掉埋没
+    if first.lstrip().startswith("⚠"):
+        body = first.lstrip()[1:].lstrip()   # 去 ⚠ 前缀，图标位统一用 warn ▲
+        return f"  {paint(_ICONS['warn'], 'warn', color=color)} {paint(body, 'warn', color=color)}"
     return f"  {paint(_ICONS['result'], 'muted', color=color)} {paint(first, 'muted', color=color)}"

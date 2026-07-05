@@ -18,6 +18,7 @@ from . import config, panels, permission, policy, security
 
 _MAX_OUT = 4000          # 工具返回截断（防爆上下文）
 _EXEC_TIMEOUT = 30       # 执行类默认超时（秒）
+DEADEND_MARK = "⚠"       # 死胡同信号前缀（0 文件/无文件/路径错）：供 ui.tool_result 高亮 + 提示模型换策略
 _MUTATING = {"write_file", "edit_file", "run_python", "run_command"}
 _DANGEROUS_COMMANDS = [
     r"\brm\s+-rf\s+/(?:\s|$)",
@@ -198,6 +199,19 @@ def _ws_root(ctx):
     return workspace.resolve_root(getattr(ctx, "workspace", "") or None)
 
 
+def _expand_braces(pattern: str) -> list[str]:
+    """把单层花括号 glob 展开成多个模式：**/*.{ts,tsx,js} → [**/*.ts, **/*.tsx, **/*.js]。
+    fnmatch/PurePath.match 都不认花括号，缺这一步会静默扫 0 文件。不支持嵌套（够用即可）。"""
+    m = re.search(r"\{([^{}]*)\}", pattern)
+    if not m:
+        return [pattern]
+    head, tail = pattern[:m.start()], pattern[m.end():]
+    out: list[str] = []
+    for opt in m.group(1).split(","):
+        out.extend(_expand_braces(head + opt + tail))   # 递归展开可能存在的第二组花括号
+    return out
+
+
 def t_grep(args: dict, ctx) -> str:
     """内容正则搜索（ripgrep 风格），返回 file:line 命中行。只读，自动放行。"""
     pattern = args.get("pattern", "")
@@ -213,11 +227,12 @@ def t_grep(args: dict, ctx) -> str:
     if not ok:
         return msg
     glob = (args.get("glob") or "").strip()
+    globs = _expand_braces(glob) if glob else []   # 支持 **/*.{ts,tsx,js} 花括号，避免静默扫 0 文件
     max_hits = min(int(args.get("max_results") or 80), 300)
     hits: list[str] = []
     scanned = 0
     for path in workspace.iter_files(root):
-        if glob and not path.match(glob):
+        if globs and not any(path.match(g) for g in globs):
             continue
         try:
             raw = path.read_bytes()
@@ -239,6 +254,10 @@ def t_grep(args: dict, ctx) -> str:
         if len(hits) >= max_hits:
             break
     if not hits:
+        if scanned == 0:   # 死胡同：根/glob 写错，不是"真没匹配"——报红旗、逼换策略而非换关键词重搜
+            return (f"{DEADEND_MARK} 扫描了 0 个文件（根 {root}"
+                    f"{('，glob=' + glob) if glob else ''}）——多半是搜索根或 glob 写错。"
+                    "先用 list_dir 核对根目录，别换关键词重搜。")
         return f"无匹配（扫描 {scanned} 文件）：{pattern}"
     return f"命中 {len(hits)} 处（扫描 {scanned} 文件）：\n" + _truncate("\n".join(hits))
 
@@ -256,20 +275,27 @@ def t_glob(args: dict, ctx) -> str:
     if not ok:
         return msg
     max_n = min(int(args.get("max_results") or 100), 500)
-    # fnmatch 的 * 本就跨 /，把 **/ 归一为空、** 归一为 * 即可正确支持 **/*.py 这类（含根目录）。
-    norm = pattern.replace("**/", "").replace("**", "*")
+    # fnmatch 的 * 本就跨 /，把 **/ 归一为空、** 归一为 * 即可正确支持 **/*.py 这类（含根目录）；
+    # 并展开 {a,b} 花括号（fnmatch 不认），避免 **/*.{ts,tsx} 静默 0 匹配。
+    pats = _expand_braces(pattern)
+    norms = [p.replace("**/", "").replace("**", "*") for p in pats]
     hits: list[str] = []
+    scanned = 0
     for path in workspace.iter_files(root):
+        scanned += 1
         try:
             rel = path.relative_to(root).as_posix()
         except ValueError:
             rel = path.name
-        if fnmatch.fnmatch(rel, norm) or fnmatch.fnmatch(path.name, pattern):
+        if any(fnmatch.fnmatch(rel, n) for n in norms) or any(fnmatch.fnmatch(path.name, p) for p in pats):
             hits.append(rel)
             if len(hits) >= max_n:
                 break
     if not hits:
-        return f"没有匹配 {pattern} 的文件。"
+        if scanned == 0:   # 死胡同：根目录下压根没文件 → path 参数多半写错
+            return f"{DEADEND_MARK} 根目录 {root} 下没有文件——检查 path 参数是否写错。"
+        return (f"{DEADEND_MARK} 没有匹配 {pattern} 的文件（扫描 {scanned} 文件）"
+                "——确认 glob 与路径是否正确，别换关键词反复重搜。")
     return f"匹配 {len(hits)} 个文件：\n" + _truncate("\n".join(sorted(hits)))
 
 

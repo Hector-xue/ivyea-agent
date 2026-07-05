@@ -1469,7 +1469,6 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             from . import log
             log.dbg("chat.persist", f"会话保存失败 sid={sid}: {e!r}")
 
-    keyst = _model_key_label(cfg.load_settings())
     mode = "真实写" if args.execute else "dry-run"
     from . import skills as _skills_mod
     try:
@@ -1484,12 +1483,23 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     except Exception:
         _n_knowledge = 0
     from . import __version__ as _ver
-    _welcome_lines = [
-        f"{_C['c']}✻{_C['x']} {_C['b']}亚马逊运营 Agent{_C['x']} {_C['d']}v{_ver}{_C['x']} · 规则引擎+LLM复核+审核制执行 · 自托管",
-        f"{_C['d']}主脑 {_label()}（{keyst}）· 执行 {mode}{_C['x']}",
-        f"{_C['d']}{_n_tools} 工具 · {_n_skills} skills · {_n_mcp} MCP · {_n_knowledge} 知识 · 会话 {(sid or '新')[:8]}{_C['x']}",
-        f"{_C['d']}/ 命令 · ↑↓+Enter 选择 · Alt+Enter 换行 · /exit 退出{_C['x']}",
-    ]
+
+    def _build_welcome_lines() -> list:
+        # 每次实时取主脑 label / key 状态：供启动打印与 /model 切换后重绘复用，
+        # 与底部状态栏 _status()（实时 _label()）同一数据源，避免切换后上下不同步。
+        _keyst = _model_key_label(cfg.load_settings())
+        return [
+            f"{_C['c']}✻{_C['x']} {_C['b']}亚马逊运营 Agent{_C['x']} {_C['d']}v{_ver}{_C['x']} · 规则引擎+LLM复核+审核制执行 · 自托管",
+            f"{_C['d']}主脑 {_label()}（{_keyst}）· 执行 {mode}{_C['x']}",
+            f"{_C['d']}{_n_tools} 工具 · {_n_skills} skills · {_n_mcp} MCP · {_n_knowledge} 知识 · 会话 {(sid or '新')[:8]}{_C['x']}",
+            f"{_C['d']}/ 命令 · ↑↓+Enter 选择 · Alt+Enter 换行 · /exit 退出{_C['x']}",
+        ]
+
+    _welcome_lines = _build_welcome_lines()
+
+    def _reprint_welcome() -> None:
+        """/model 切换后重绘欢迎框：让顶部展示的主脑与底部状态栏（实时 _label()）保持同步。"""
+        _print_welcome_box(_build_welcome_lines(), width=64)
     from . import chat_tui as _chat_tui  # noqa: F401
     # 聊天界面三态：**默认全屏 alt-screen TUI**（输入框彻底钉死、翻历史也在，用户选定）；
     # IVYEA_LIVE=1 或 IVYEA_TUI=0 → 滚动区常驻底部 app（原生滚轮/复制，输入框仅生成中固定）；
@@ -1750,15 +1760,22 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         _config_wizard(); return True
 
     def _sh_model(line):
+        def _model_sig():   # 主脑身份签名：真的切换了才重绘欢迎框，取消/无效 id 不打扰
+            s = cfg.load_settings()
+            return (s.get("provider"), s.get("model"), s.get("label"))
+        before = _model_sig()
         if line == "/model":
-            _model_picker(); return True
-        mid = line.split(None, 1)[1].strip()
-        m = __import__("ivyea_agent.models", fromlist=["by_id"]).by_id(mid)
-        if m:
-            cfg.apply_model(m)
-            print(f"已切换主脑: {m['label']}（{'已配 key' if cfg.get_active_key() else '未配 key，用 /model 配置'}）")
+            _model_picker()
         else:
-            print(ui.message("warn", f"未知模型 id：{mid}。用 /model 看清单。"))
+            mid = line.split(None, 1)[1].strip()
+            m = __import__("ivyea_agent.models", fromlist=["by_id"]).by_id(mid)
+            if m:
+                cfg.apply_model(m)
+                print(f"已切换主脑: {m['label']}（{'已配 key' if cfg.get_active_key() else '未配 key，用 /model 配置'}）")
+            else:
+                print(ui.message("warn", f"未知模型 id：{mid}。用 /model 看清单。"))
+        if _model_sig() != before:   # 顶部欢迎框与底部状态栏同步：切换后重绘
+            _reprint_welcome()
         return True
 
     def _sh_update(line):
