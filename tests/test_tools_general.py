@@ -174,3 +174,54 @@ def test_task_tools_update_bound_task(tmp_path, monkeypatch):
     saved = task_runner.load(task["id"])
     assert saved["steps"][0]["status"] == "completed"
     assert saved["events"][-1]["kind"] == "agent"
+
+
+# ── 检索死胡同信号 + 花括号 glob（复盘 20260705-073002：0 文件空转/花括号静默不匹配）──
+def test_grep_deadend_zero_files(tmp_path):
+    """空/错根：grep 扫 0 文件 → 返回 ⚠ 死胡同信号而非普通'无匹配'，逼换策略不换关键词。"""
+    r = tg.t_grep({"pattern": "anything"}, _ctx(tmp_path))
+    assert r.startswith(tg.DEADEND_MARK)
+    assert "扫描了 0 个文件" in r
+
+
+def test_grep_brace_glob_matches(tmp_path):
+    """grep 的 glob 支持 **/*.{ts,tsx} 花括号（此前 path.match 不认 → 静默扫 0 文件）。"""
+    (tmp_path / "a.ts").write_text("needle here", encoding="utf-8")
+    (tmp_path / "b.py").write_text("needle here", encoding="utf-8")
+    sub = tmp_path / "sub"; sub.mkdir()
+    (sub / "c.ts").write_text("needle here", encoding="utf-8")
+    r = tg.t_grep({"pattern": "needle", "glob": "**/*.{ts,tsx}"}, _ctx(tmp_path))
+    assert "a.ts" in r and "sub/c.ts" in r and "b.py" not in r
+
+
+def test_glob_brace_expansion(tmp_path):
+    """t_glob 支持 {py,md} 花括号展开。"""
+    (tmp_path / "a.py").write_text("x", encoding="utf-8")
+    (tmp_path / "b.md").write_text("x", encoding="utf-8")
+    (tmp_path / "c.txt").write_text("x", encoding="utf-8")
+    r = tg.t_glob({"pattern": "**/*.{py,md}"}, _ctx(tmp_path))
+    assert "a.py" in r and "b.md" in r and "c.txt" not in r
+
+
+def test_glob_deadend_empty_root(tmp_path):
+    """空根：t_glob → ⚠ 根目录没有文件（path 参数多半写错）。"""
+    r = tg.t_glob({"pattern": "**/*.py"}, _ctx(tmp_path))
+    assert r.startswith(tg.DEADEND_MARK) and "没有文件" in r
+
+
+def test_glob_deadend_no_match_with_files(tmp_path):
+    """有文件但 0 匹配：t_glob → ⚠ 提示确认 glob/路径，别反复重搜。"""
+    (tmp_path / "a.py").write_text("x", encoding="utf-8")
+    r = tg.t_glob({"pattern": "**/*.rs"}, _ctx(tmp_path))
+    assert r.startswith(tg.DEADEND_MARK) and "没有匹配" in r
+
+
+def test_ui_tool_result_highlights_deadend():
+    """ui.tool_result：⚠ 开头的死胡同结果用 warn 黄色 + ▲ 高亮，不被灰掉。"""
+    from ivyea_agent import ui
+    colored = ui.tool_result(tg.DEADEND_MARK + " 扫描了 0 个文件（根 /x）", color=True)
+    assert "\033[" in colored                      # 有 ANSI 上色（非 muted 灰）
+    plain = ui.strip_ansi(colored)
+    assert "▲" in plain and tg.DEADEND_MARK not in plain   # 图标换成 ▲、⚠ 前缀已剥离
+    normal = ui.strip_ansi(ui.tool_result("命中 3 处（扫描 10 文件）", color=True))
+    assert "⎿" in normal                           # 普通结果仍走 result 图标
