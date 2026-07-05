@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import (
     __version__, agent_loop, code_agent, config, knowledge, models,
-    retrieval, security, self_manage, sessions, skills, task_runner,
+    progress_reporting, retrieval, security, self_manage, sessions, skills, task_runner,
     traces, workspace,
 )
 from .agent_tools import ToolContext
@@ -883,6 +883,7 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
         "model": health()["model"],
         "read_only": bool(plan_mode),
         "todos": list(ctx.todos or []),
+        "progress": progress_reporting.public_state(ctx),
     }
     if ctx.task_id:
         try:
@@ -966,6 +967,7 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None)
         "messages": _public_messages(messages),
         "read_only": bool(plan_mode),
         "todos": list(ctx.todos or []),
+        "progress": progress_reporting.public_state(ctx),
     }
     send("final", data)
     return data

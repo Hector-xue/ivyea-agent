@@ -8,7 +8,7 @@ import difflib
 import shutil
 import textwrap
 
-from . import terminal_theme
+from . import terminal_theme, ui
 
 _X = "\033[0m"
 _DIM, _B = "\033[2m", "\033[1m"
@@ -19,6 +19,8 @@ _TODO = {
     "completed": ("☑", _DIM + _GREEN),
     "in_progress": ("◐", _B + _YEL),
     "pending": ("☐", _DIM),
+    "blocked": ("✗", _B + _RED),
+    "skipped": ("⊘", _DIM),
 }
 
 
@@ -44,6 +46,59 @@ def render_todos(todos: list, *, color: bool = True) -> str:
             lines.append(f"{bar}{c}  {cont}{x}")
     lines.append(f"{_CYAN if color else ''}╰─{_X if color else ''}")
     return "\n".join(lines)
+
+
+def _report_rows(label: str, items: list | None) -> list[str]:
+    clean = [str(item).strip() for item in (items or []) if str(item).strip()]
+    if not clean:
+        return []
+    return [f"{label}：{clean[0]}"] + [f"  - {item}" for item in clean[1:]]
+
+
+def render_progress(event: dict, *, color: bool | None = None) -> str:
+    """Render one structured start/phase/final progress event."""
+    if not event:
+        return ""
+    kind = event.get("kind")
+    lines: list[str] = []
+    title = "任务进度"
+    panel_kind = "info"
+    if kind == "start":
+        title = "开始执行"
+        lines.append(f"目标：{event.get('objective') or '未说明'}")
+        lines.extend(_report_rows("范围", event.get("scope")))
+        plan = event.get("plan") or []
+        if plan:
+            lines.append("阶段：")
+            lines.extend(f"  {i}. {item}" for i, item in enumerate(plan, 1))
+        lines.extend(_report_rows("完成标准", event.get("success_criteria")))
+        lines.append(f"当前：第 {event.get('phase_index')} 阶段 · {event.get('phase')}")
+        if event.get("summary"):
+            lines.append(f"准备做：{event.get('summary')}")
+    elif kind == "phase_start":
+        title = f"阶段 {event.get('phase_index')} 开始"
+        lines = [f"阶段：{event.get('phase')}", f"准备做：{event.get('summary')}"]
+    elif kind == "phase_end":
+        status = event.get("status") or "completed"
+        title = f"阶段 {event.get('phase_index')} 结束 · {status}"
+        panel_kind = "success" if status == "completed" else ("error" if status == "blocked" else "warn")
+        lines = [f"阶段：{event.get('phase')}", f"做了什么：{event.get('summary')}"]
+        lines.extend(_report_rows("已做到", event.get("completed")))
+        lines.extend(_report_rows("未做到", event.get("incomplete")))
+        lines.extend(_report_rows("证据", event.get("evidence")))
+        lines.extend(_report_rows("注意", event.get("attention")))
+        if event.get("next"):
+            lines.append(f"下一步：{event.get('next')}")
+    elif kind == "final":
+        title = "执行汇总"
+        incomplete = [item for item in (event.get("incomplete") or []) if str(item).strip() != "无"]
+        panel_kind = "warn" if incomplete else "success"
+        lines = [f"整体结果：{event.get('summary')}"]
+        lines.extend(_report_rows("已做到", event.get("completed")))
+        lines.extend(_report_rows("未做到", event.get("incomplete")))
+        lines.extend(_report_rows("验证", event.get("evidence")))
+        lines.extend(_report_rows("注意", event.get("attention")))
+    return ui.panel(title, lines or ["（无内容）"], kind=panel_kind, color=color)
 
 
 def colorize_patch(patch: str, *, color: bool = True) -> str:

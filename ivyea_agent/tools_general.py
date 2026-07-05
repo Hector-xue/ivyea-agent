@@ -14,7 +14,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import config, panels, permission, policy, security
+from . import config, panels, permission, policy, progress_reporting, security
 
 _MAX_OUT = 4000          # 工具返回截断（防爆上下文）
 _EXEC_TIMEOUT = 30       # 执行类默认超时（秒）
@@ -826,7 +826,14 @@ def t_todo_write(args: dict, ctx) -> str:
         if isinstance(t, dict) and t.get("content"):
             st = t.get("status", "pending")
             clean.append({"content": str(t["content"]),
-                          "status": st if st in ("pending", "in_progress", "completed") else "pending"})
+                          "status": st if st in progress_reporting.TODO_STATUSES else "pending"})
+    if len(clean) > 1:
+        ctx.progress_required = True
+    problem = progress_reporting.validate_todo_update(ctx, clean)
+    if problem:
+        return "⚠ Todo 更新已拒绝：" + problem
+    if clean != list(getattr(ctx, "todos", []) or []):
+        ctx.progress_final = {}
     ctx.todos = clean
     if not clean:
         return "计划已清空。"
@@ -838,6 +845,16 @@ def t_todo_write(args: dict, ctx) -> str:
     elif running == 0 and done < len(clean):
         msg += "（还有未完成步骤，记得把下一步标 in_progress）"
     return msg
+
+
+def t_progress_update(args: dict, ctx) -> str:
+    """记录并展示复杂任务的开始、阶段和最终汇报。"""
+    ctx.progress_last_event = {}
+    result = progress_reporting.apply_update(args, ctx)
+    event = result.get("event") or {}
+    if event:
+        ctx.progress_last_event = event
+    return str(result.get("text") or "")
 
 
 def _task_id(args: dict, ctx) -> str:
@@ -992,11 +1009,26 @@ GENERAL_TOOL_SCHEMAS = [
     _fn("mcp_get_prompt", "获取 MCP 服务器某个 prompt 模板的内容（只读）。",
         {"server": {"type": "string"}, "name": {"type": "string"},
          "arguments": {"type": "object", "description": "模板参数（可选）"}}, ["server", "name"]),
-    _fn("todo_write", "维护多步任务计划(让长任务可视化)。每步 {content, status: pending|in_progress|completed}。多步任务动手前先列计划；执行时同一时间恰好一个 in_progress，完成一步立刻标 completed 再开下一步，发现新子步骤就追加。单步小任务不必用。",
+    _fn("todo_write", "维护多步任务计划(让长任务可视化)。每步 {content, status: pending|in_progress|completed|blocked|skipped}。多步任务动手前先列计划；执行时同一时间恰好一个 in_progress。阶段变为 completed/blocked/skipped 前必须先用 progress_update(phase_end) 汇报结果和证据。单步小任务不必用。",
         {"todos": {"type": "array", "items": {"type": "object", "properties": {
             "content": {"type": "string"},
-            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}}}},
+            "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "blocked", "skipped"]}}}}},
         ["todos"]),
+    _fn("progress_update", "复杂/多步任务的结构化汇报工具。执行前：先 todo_write，再 kind=start，说明目标、范围、完成标准并同时开始第一个阶段。阶段切换：kind=phase_end 汇报做了什么、状态、证据、未完成和注意事项，再更新 Todo；新阶段用 kind=phase_start 介绍准备做什么。全部执行结束后必须 kind=final，系统会把真实 Todo、阶段报告和工具证据合并为最终汇总。简单单步任务不必调用。",
+        {
+            "kind": {"type": "string", "enum": ["start", "phase_start", "phase_end", "final"]},
+            "phase_index": {"type": "integer", "description": "对应 Todo 的阶段序号，从 1 开始；默认当前 in_progress"},
+            "status": {"type": "string", "enum": ["completed", "partial", "blocked", "skipped"],
+                       "description": "仅 phase_end 使用"},
+            "summary": {"type": "string", "description": "start=整体目标；phase_start=本阶段准备做什么；phase_end=本阶段做了什么；final=整体结果"},
+            "scope": {"type": "array", "items": {"type": "string"}, "description": "start 可选：任务范围；项目根会自动加入"},
+            "success_criteria": {"type": "array", "items": {"type": "string"}, "description": "start 必填：可验证的完成标准"},
+            "completed": {"type": "array", "items": {"type": "string"}, "description": "本阶段或整体已做到的事项"},
+            "incomplete": {"type": "array", "items": {"type": "string"}, "description": "未做到或部分完成事项"},
+            "evidence": {"type": "array", "items": {"type": "string"}, "description": "测试、命令、文件或数据证据"},
+            "attention": {"type": "array", "items": {"type": "string"}, "description": "风险、阻塞原因和注意事项"},
+            "next": {"type": "string", "description": "下一阶段或下一步"},
+        }, ["kind", "summary"]),
     _fn("self_critique", "收尾前自查：把你准备交付的最终答案放进 draft，用当前主脑按 rubric 复核"
         "(需求吻合/事实可靠/关键遗漏/验证到位)，返回简短批判。高风险或复杂任务交付前建议先自调一次。只读。",
         {"draft": {"type": "string", "description": "准备交付给用户的最终答案全文"},
@@ -1036,6 +1068,7 @@ GENERAL_DISPATCH = {
     "mcp_list_resources": t_mcp_list_resources, "mcp_read_resource": t_mcp_read_resource,
     "mcp_list_prompts": t_mcp_list_prompts, "mcp_get_prompt": t_mcp_get_prompt,
     "todo_write": t_todo_write,
+    "progress_update": t_progress_update,
     "self_critique": t_self_critique,
     "task_read": t_task_read,
     "task_step": t_task_step,

@@ -190,6 +190,7 @@ _TOOL_VERBS = {
     "web_search": "联网搜索", "web_fetch": "抓取网页",
     "knowledge_search": "查知识库", "skill_search": "查 skill", "recall": "回忆记忆",
     "todo_write": "更新计划",
+    "progress_update": "汇报进度",
 }
 
 
@@ -218,6 +219,12 @@ def _tool_detail(name: str, args: dict) -> str | None:
         cur = next((t.get("content") for t in todos if isinstance(t, dict) and t.get("status") == "in_progress"), "")
         s = f"{len(todos)} 步 · {done} 完成"
         return s + (f" · 进行中：{cur}" if cur else "")
+    if name == "progress_update":
+        kind = str(g("kind") or "")
+        labels = {"start": "开始执行", "phase_start": "阶段开始",
+                  "phase_end": "阶段结束", "final": "最终汇总"}
+        index = g("phase_index")
+        return labels.get(kind, kind) + (f" · 第 {index} 阶段" if index else "")
     return None
 
 

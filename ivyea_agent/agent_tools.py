@@ -49,6 +49,20 @@ class ToolContext:
     search_recovery_required: bool = False                     # 0 文件后先 list_dir，禁止继续盲搜
     consecutive_search_deadends: int = 0
     navigation_since_read: int = 0
+    progress_reporting_disabled: bool = False                  # 只读子 agent 等内部执行不展示主任务汇报
+    progress_required: bool = False                            # 复杂/多步任务启用结构化汇报闭环
+    progress_execution_expected: bool = False                  # 用户明确要求落地执行，而非只要方案
+    progress_query: str = ""
+    progress_started: bool = False
+    progress_start: dict[str, Any] = field(default_factory=dict)
+    progress_active_phase: int = 0
+    progress_started_phases: set[int] = field(default_factory=set)
+    progress_phase_reports: dict[int, dict[str, Any]] = field(default_factory=dict)
+    progress_final: dict[str, Any] = field(default_factory=dict)
+    progress_tool_evidence: list[str] = field(default_factory=list)
+    progress_phase_tool_evidence: dict[int, list[str]] = field(default_factory=dict)
+    progress_attention: list[str] = field(default_factory=list)
+    progress_last_event: dict[str, Any] = field(default_factory=dict)
 
 
 # OpenAI function-calling schema
@@ -623,7 +637,8 @@ def t_dispatch_subagent(args: dict, ctx: ToolContext) -> str:
                "把交给你的问题查清楚，最后用简洁中文给出结论与依据(文件:行/来源)。"
                "你不能写文件、不能执行命令、不能改广告，也不要再派子 agent。")
     sub_ctx = ToolContext(workspace=getattr(ctx, "workspace", ""), plan_mode=True,
-                          provider=provider, perm=permission.PermissionState())
+                          provider=provider, perm=permission.PermissionState(),
+                          progress_reporting_disabled=True)
     sub_messages = [{"role": "system", "content": sub_sys},
                     {"role": "user", "content": task}]
     try:
