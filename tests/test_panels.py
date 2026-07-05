@@ -10,7 +10,8 @@ def _plain(s: str) -> str:
     return re.sub(r"\033\[[0-9;]*m", "", s)
 
 
-def test_render_todos_icons_and_count():
+def test_render_todos_icons_and_count(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
     todos = [
         {"content": "拉广告数据", "status": "completed"},
         {"content": "跑规则引擎", "status": "in_progress"},
@@ -20,6 +21,7 @@ def test_render_todos_icons_and_count():
     plain = _plain(out)
     assert "计划 1/3" in plain
     assert "☑ 拉广告数据" in plain and "◐ 跑规则引擎" in plain and "☐ 出报告" in plain
+    assert "\033[1m\033[33m" in out                    # 进行中用醒目黄色，不与完成绿色混淆
 
 
 def test_render_todos_empty():
@@ -32,12 +34,44 @@ def test_render_todos_wraps_long_content(monkeypatch):
     assert len(out.splitlines()) > 3
 
 
-def test_render_diff_colors():
+def test_render_diff_colors(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
     out = panels.render_diff("bid 1.00\nstate on", "bid 0.85\nstate on", "kw")
     assert "\033[31m" in out and "\033[32m" in out      # 红删绿增
     plain = _plain(out)
     assert "- bid 1.00" in plain and "+ bid 0.85" in plain   # 行号栏 + 符号 + 代码
     assert "1 -" in plain and "1 +" in plain                 # 左侧行号
+
+
+def test_render_diff_keeps_syntax_colors_inside_added_lines(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    out = panels.render_diff("return 1", 'return "ok"', "demo.py")
+    assert "\033[31m" in out and "\033[32m" in out       # gutter/sign 表达增删
+    assert "\033[38;5;" in out                             # 行内容仍是语法色
+    assert "- return 1" in _plain(out) and '+ return "ok"' in _plain(out)
+
+
+def test_render_diff_batches_highlighting_per_file(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    calls = []
+
+    def fake(code, **_kwargs):
+        calls.append(code)
+        return code
+
+    monkeypatch.setattr("ivyea_agent.terminal_theme.highlight_code", fake)
+    old = "\n".join(f"x{i} = {i}" for i in range(40))
+    new = "\n".join(f"x{i} = {i + 1}" for i in range(40))
+    panels.render_diff(old, new, "demo.py")
+    assert calls == [old, new]                         # 不再逐行启动高亮器
+
+
+def test_colorize_patch_uses_syntax_color_not_solid_green(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    patch = "+++ b/demo.py\n@@ -1 +1 @@\n-return 1\n+return \"ok\""
+    out = panels.colorize_patch(patch)
+    assert "\033[38;5;" in out
+    assert _plain(out).endswith('+return "ok"')
 
 
 def test_render_diff_nochange():
@@ -47,6 +81,13 @@ def test_render_diff_nochange():
 def test_render_diff_no_color():
     out = panels.render_diff("a", "b", color=False)
     assert "\033[" not in out
+
+
+def test_panels_respect_no_color_environment(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    diff = panels.render_diff("a", "b", "demo.py")
+    todos = panels.render_todos([{"content": "x", "status": "in_progress"}])
+    assert "\033[" not in diff + todos
 
 
 def test_todo_write_tool(tmp_path):
@@ -89,6 +130,18 @@ def test_ui_message_and_panel_no_color(monkeypatch):
     box = ui.panel("标题", "很长的内容 " * 10, kind="warn", width=48)
     assert "\033[" not in msg + box
     assert "检查配置" in msg and "标题" in box
+
+
+def test_ui_tool_result_distinguishes_success_warning_and_error(monkeypatch):
+    from ivyea_agent import ui
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    success = ui.tool_result("✓ 测试通过", ok=True)
+    warning = ui.tool_result("⚠ 搜索根可能错误", ok=True)
+    error = ui.tool_result("工具执行失败", ok=False)
+    assert "\033[32m" in success
+    assert _plain(success).count("✓") == 1
+    assert "\033[33m" in warning
+    assert "\033[31m" in error
 
 
 def test_ui_tool_call_truncates_args():

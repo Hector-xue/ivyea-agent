@@ -203,6 +203,21 @@ def test_glob_brace_expansion(tmp_path):
     assert "a.py" in r and "b.md" in r and "c.txt" not in r
 
 
+def test_search_globs_normalize_absolute_and_repo_prefixed_patterns(tmp_path):
+    repo = tmp_path / "ivyea-agent"
+    repo.mkdir()
+    (repo / "a.py").write_text("needle\n", encoding="utf-8")
+    ctx = _ctx(repo)
+
+    absolute = tg.t_grep({"pattern": "needle", "glob": str(repo / "**" / "*.py")}, ctx)
+    prefixed = tg.t_grep({"pattern": "needle", "glob": "ivyea-agent/**/*.py"}, ctx)
+    globbed = tg.t_glob({"pattern": str(repo / "**" / "*.py")}, ctx)
+
+    assert "a.py" in absolute
+    assert "a.py" in prefixed
+    assert "a.py" in globbed
+
+
 def test_glob_deadend_empty_root(tmp_path):
     """空根：t_glob → ⚠ 根目录没有文件（path 参数多半写错）。"""
     r = tg.t_glob({"pattern": "**/*.py"}, _ctx(tmp_path))
@@ -216,12 +231,13 @@ def test_glob_deadend_no_match_with_files(tmp_path):
     assert r.startswith(tg.DEADEND_MARK) and "没有匹配" in r
 
 
-def test_ui_tool_result_highlights_deadend():
+def test_ui_tool_result_highlights_deadend(monkeypatch):
     """ui.tool_result：⚠ 开头的死胡同结果用 warn 黄色 + ▲ 高亮，不被灰掉。"""
     from ivyea_agent import ui
+    monkeypatch.delenv("NO_COLOR", raising=False)
     colored = ui.tool_result(tg.DEADEND_MARK + " 扫描了 0 个文件（根 /x）", color=True)
     assert "\033[" in colored                      # 有 ANSI 上色（非 muted 灰）
     plain = ui.strip_ansi(colored)
     assert "▲" in plain and tg.DEADEND_MARK not in plain   # 图标换成 ▲、⚠ 前缀已剥离
     normal = ui.strip_ansi(ui.tool_result("命中 3 处（扫描 10 文件）", color=True))
-    assert "⎿" in normal                           # 普通结果仍走 result 图标
+    assert "✓" in normal                           # 有效命中走 success，和死胡同 warning 明确区分

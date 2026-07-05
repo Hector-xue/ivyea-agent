@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ivyea-agent"
-version = "1.4.1"
+version = "1.5.0"
 description = "Ivyea Agent — 自托管的亚马逊运营 CLI Agent（对话式 + 多模型 + 领星广告读写审批 + 通用工具 + 记忆）"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -26,6 +26,7 @@ dependencies = [
     "openpyxl>=3.1",
     "httpx>=0.27",
     "prompt_toolkit>=3.0",
+    "Pygments>=2.17",
     "cryptography>=42",
 ]
 

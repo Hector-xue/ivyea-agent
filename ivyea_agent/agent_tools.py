@@ -39,6 +39,16 @@ class ToolContext:
     ops_context: dict[str, Any] = field(default_factory=dict)  # 当前 Ops 页面/板块上下文
     provider: Any = None                                       # 当前主脑 provider（供 dispatch_subagent）
     read_paths: set = field(default_factory=set)               # 本会话已 read_file 过的绝对路径（改前必读软护栏）
+    workspace_base: str = ""                                  # 会话最初工作区；跨仓库目标解析始终从这里发现候选
+    target_project: str = ""                                  # 当前锁定的工程目标（跨轮保留，显式新目标可切换）
+    target_root: str = ""
+    target_explicit: bool = False
+    scope_confidence: str = ""
+    scope_ambiguous: bool = False
+    behavioral_task: bool = False                              # UI/输出/交互类任务，完成前需运行路径验证
+    search_recovery_required: bool = False                     # 0 文件后先 list_dir，禁止继续盲搜
+    consecutive_search_deadends: int = 0
+    navigation_since_read: int = 0
 
 
 # OpenAI function-calling schema
