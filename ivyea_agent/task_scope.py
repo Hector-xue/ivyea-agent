@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import progress_reporting
+
 
 SCOPE_MARKER = "[任务范围锁定 / 执行契约]"
 _PROJECT_MARKERS = (".git", "pyproject.toml", "package.json", "Cargo.toml", "go.mod")
@@ -34,6 +36,19 @@ _BEHAVIOR_HINTS = (
 )
 _CONTINUATION_HINTS = ("继续", "接着", "按这个", "照这个", "执行", "开始做", "做吧", "可以", "确认")
 _COMMON_DIR_NAMES = {"root", "home", "tmp", "src", "app", "server", "client", "tests", "test"}
+_STRONG_PROGRESS_HINTS = (
+    "分步", "阶段", "优化方案", "实施方案", "计划模式", "复核", "全面", "全部", "批量",
+    "重构", "改造", "发布", "发版", "部署", "闭环", "逐步", "详细检查", "完整检查",
+)
+_ACTION_PROGRESS_HINTS = (
+    "优化", "修改", "修复", "实现", "执行", "创建", "检查", "分析", "调查", "整理",
+    "升级", "诊断", "验证", "测试", "review", "fix", "implement", "refactor", "deploy",
+)
+_SEQUENCE_PROGRESS_HINTS = ("先", "然后", "接着", "再", "最后", "之后")
+_EXECUTION_EXPECTED_HINTS = (
+    "开始执行", "直接执行", "执行吧", "开始做", "做吧", "落地", "帮我改", "帮我修",
+    "帮我实现", "请修改", "请修复", "请实现", "发版", "部署", "apply it", "implement it",
+)
 
 
 @dataclass
@@ -46,6 +61,8 @@ class ScopeResolution:
     behavioral: bool = False
     visual: bool = False
     relevant: bool = False
+    progress_required: bool = False
+    execution_expected: bool = False
     evidence: list[str] = field(default_factory=list)
     candidates: list[str] = field(default_factory=list)
 
@@ -175,6 +192,23 @@ def _matches(text: str, candidates: list[Path]) -> list[Path]:
     return matched
 
 
+def requires_progress_reporting(text: str) -> bool:
+    """Conservatively identify work that benefits from a reporting lifecycle."""
+    clean = _clean_query(text).lower()
+    if not clean:
+        return False
+    if any(term in clean for term in _STRONG_PROGRESS_HINTS):
+        return True
+    actions = sum(1 for term in _ACTION_PROGRESS_HINTS if term in clean)
+    sequence = sum(1 for term in _SEQUENCE_PROGRESS_HINTS if term in clean)
+    return actions >= 2 or (actions >= 1 and sequence >= 2) or (actions >= 1 and len(clean) >= 60)
+
+
+def _is_continuation(text: str) -> bool:
+    clean = _clean_query(text).strip().lower()
+    return len(clean) <= 32 and any(term in clean for term in _CONTINUATION_HINTS)
+
+
 def resolve(query: str, base: str | os.PathLike[str], *, messages: list[dict[str, Any]] | None = None,
             locked_root: str = "") -> ScopeResolution:
     """Resolve one turn using current text > prior lock > recent conversation > cwd."""
@@ -185,6 +219,8 @@ def resolve(query: str, base: str | os.PathLike[str], *, messages: list[dict[str
         behavioral=any(term in lower for term in _BEHAVIOR_HINTS),
         visual=any(term in lower for term in _VISUAL_HINTS),
         relevant=any(term in lower for term in _ENGINEERING_HINTS),
+        progress_required=requires_progress_reporting(clean),
+        execution_expected=any(term in lower for term in _EXECUTION_EXPECTED_HINTS),
         candidates=[str(path) for path in candidates],
     )
     current_matches = _matches(clean, candidates)
@@ -248,6 +284,8 @@ def render_note(scope: ScopeResolution, query: str) -> str:
     lines.append("执行约束：先在上述根目录定位入口/调用链并读取关键文件；若证据与锁定目标冲突，停止并澄清，不得静默换项目。")
     if scope.behavioral:
         lines.append("验收约束：这是行为/界面/输出类任务；写代码后除测试外，还必须验证一次真实运行路径或最小可运行场景。")
+    if scope.progress_required:
+        lines.append("汇报约束：这是复杂/多步任务；实际执行前先列 Todo 并做开始汇报，每阶段结束报告结果与证据，收尾必须汇总已做到、未做到和注意事项。")
     goal = re.sub(r"\s+", " ", _clean_query(query))[:240]
     if goal:
         lines.append("本轮目标：" + goal)
@@ -278,6 +316,12 @@ def prepare_query(ctx: Any, query: str, messages: list[dict[str, Any]] | None = 
         scope.relevant = True
     previous_root = str(getattr(ctx, "target_root", "") or "")
     apply_to_context(ctx, scope)
+    progress_reporting.prepare_context(
+        ctx, query,
+        required=bool(scope.progress_required),
+        execution_expected=bool(scope.execution_expected),
+        continuation=_is_continuation(query),
+    )
     if scope.explicit or (scope.root and previous_root and Path(previous_root).resolve() != Path(scope.root).resolve()):
         ctx.search_recovery_required = False
         ctx.consecutive_search_deadends = 0
