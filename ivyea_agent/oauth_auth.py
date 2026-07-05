@@ -39,6 +39,15 @@ CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_AUTH_ISSUER = "https://auth.openai.com"
 CODEX_REFRESH_SKEW_SECONDS = 120
+# Claude(Anthropic) 订阅版 OAuth —— 常量为生态逆向值（非官方，Anthropic 可能变），全部 env 可覆盖，
+# 便于失效时无需改码即可修正。默认走 Claude 订阅(Max/Pro)登录，token 带 oauth beta 头打 messages API。
+ANTHROPIC_OAUTH_CLIENT_ID = os.getenv("IVYEA_ANTHROPIC_OAUTH_CLIENT_ID", "9d1c250a-e61b-44d9-88ed-5944d1962f5e")
+ANTHROPIC_OAUTH_AUTHORIZE_URL = os.getenv("IVYEA_ANTHROPIC_OAUTH_AUTHORIZE_URL", "https://claude.ai/oauth/authorize")
+ANTHROPIC_OAUTH_TOKEN_URL = os.getenv("IVYEA_ANTHROPIC_OAUTH_TOKEN_URL", "https://console.anthropic.com/v1/oauth/token")
+ANTHROPIC_OAUTH_REDIRECT_URI = os.getenv("IVYEA_ANTHROPIC_OAUTH_REDIRECT_URI", "https://console.anthropic.com/oauth/code/callback")
+ANTHROPIC_OAUTH_SCOPE = os.getenv("IVYEA_ANTHROPIC_OAUTH_SCOPE", "org:create_api_key user:profile user:inference")
+ANTHROPIC_OAUTH_BETA = os.getenv("IVYEA_ANTHROPIC_OAUTH_BETA", "oauth-2025-04-20")
+ANTHROPIC_REFRESH_SKEW_SECONDS = 120
 COPILOT_ENV_VARS = ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
 COPILOT_TOKEN_EXCHANGE_URL = "https://api.github.com/copilot_internal/v2/token"
 COPILOT_UNSUPPORTED_PREFIX = "ghp_"
@@ -855,6 +864,146 @@ def codex_device_code_login(*, timeout: float = 15.0, max_wait: float = 15 * 60,
     )
 
 
+def anthropic_oauth_url(*, code_challenge: str, state: str) -> str:
+    params = {
+        "code": "true",
+        "client_id": ANTHROPIC_OAUTH_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": ANTHROPIC_OAUTH_REDIRECT_URI,
+        "scope": ANTHROPIC_OAUTH_SCOPE,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+    }
+    return ANTHROPIC_OAUTH_AUTHORIZE_URL + "?" + urllib.parse.urlencode(params)
+
+
+def _parse_anthropic_callback(raw: str) -> tuple[str, str]:
+    """从用户粘回的内容解析 (code, state)：支持 `code#state`、完整回调 URL、或纯 code。"""
+    value = (raw or "").strip()
+    if not value:
+        return "", ""
+    if value.startswith(("http://", "https://")):
+        parsed = urllib.parse.urlparse(value)
+        q = urllib.parse.parse_qs(parsed.query)
+        code = (q.get("code") or [""])[0]
+        state = (q.get("state") or [""])[0]
+        if code:
+            return code, (state or parsed.fragment or "")
+    if "#" in value:
+        code, _, state = value.partition("#")
+        return _extract_oauth_code(code), state.strip()
+    return _extract_oauth_code(value), ""
+
+
+def anthropic_oauth_login(*, notify: Any = None, prompt: Any = None, timeout: float = 30.0) -> None:
+    """Claude 订阅版 OAuth 登录（授权码 + PKCE + 手动粘码，网页终端也能用）。"""
+    def emit(text: str) -> None:
+        if notify:
+            notify(text)
+    ask = prompt or (lambda p: input(p))
+    verifier, challenge = _pkce_pair()
+    state = secrets.token_urlsafe(24)
+    url = anthropic_oauth_url(code_challenge=challenge, state=state)
+    emit("用浏览器打开下面链接，登录并授权 Claude：")
+    emit(f"  {url}")
+    emit("授权后页面会显示一段 `code#state`，整段复制后粘回这里：")
+    try:
+        raw = ask("粘贴 code：")
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise OAuthAuthError("Claude OAuth 登录已取消。") from exc
+    code, got_state = _parse_anthropic_callback(str(raw))
+    if not code:
+        raise OAuthAuthError("没有解析到授权码，请重试（复制整段 code#state）。")
+    if got_state and got_state != state:
+        raise OAuthAuthError("state 不匹配（可能粘错或授权被篡改），请重试。")
+    try:
+        resp = httpx.post(
+            ANTHROPIC_OAUTH_TOKEN_URL,
+            json={
+                "grant_type": "authorization_code",
+                "code": code,
+                "state": state,
+                "redirect_uri": ANTHROPIC_OAUTH_REDIRECT_URI,
+                "client_id": ANTHROPIC_OAUTH_CLIENT_ID,
+                "code_verifier": verifier,
+            },
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        raise OAuthAuthError(f"Claude token 交换失败：{exc}") from exc
+    if resp.status_code >= 400:
+        raise OAuthAuthError(f"Claude token 交换返回 HTTP {resp.status_code}：{resp.text[:200]}")
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise OAuthAuthError(f"Claude token 交换返回非 JSON：{exc}") from exc
+    access = str((payload or {}).get("access_token") or "").strip()
+    if not access:
+        raise OAuthAuthError("Claude token 交换未返回 access_token。")
+    set_auth_token(
+        "anthropic-oauth", access,
+        refresh_token=str(payload.get("refresh_token") or "").strip(),
+        expires_at=_expires_at_from_payload(payload, _jwt_expires_at(access)),
+        source="oauth",
+    )
+
+
+def refresh_anthropic_token(timeout: float = 20.0) -> str:
+    item = get_auth("anthropic-oauth")
+    refresh_token = str(item.get("refresh_token") or "").strip()
+    if not refresh_token:
+        raise OAuthAuthError("Claude OAuth refresh_token 缺失，请重新 `ivyea model auth anthropic-oauth --login`。")
+    try:
+        resp = httpx.post(
+            ANTHROPIC_OAUTH_TOKEN_URL,
+            json={"grant_type": "refresh_token", "refresh_token": refresh_token,
+                  "client_id": ANTHROPIC_OAUTH_CLIENT_ID},
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        raise OAuthAuthError(f"Claude OAuth 刷新失败：{exc}") from exc
+    if resp.status_code >= 400:
+        raise OAuthAuthError(f"Claude OAuth 刷新返回 HTTP {resp.status_code}：{resp.text[:200]}")
+    payload = resp.json() if resp.text else {}
+    access = str((payload or {}).get("access_token") or "").strip()
+    if not access:
+        raise OAuthAuthError("Claude OAuth 刷新未返回 access_token。")
+    set_auth_token("anthropic-oauth", access,
+                   refresh_token=str(payload.get("refresh_token") or refresh_token).strip(),
+                   expires_at=_expires_at_from_payload(payload, _jwt_expires_at(access)),
+                   source=str(item.get("source") or "oauth"))
+    return access
+
+
+def probe_anthropic_oauth(timeout: float = 30.0, *, model: str = "claude-haiku-4-5") -> tuple[bool, str]:
+    """用当前 OAuth token 对 messages API 发一条最小请求，验证 token 真能用（含 Claude Code 身份头）。"""
+    token = resolve_provider_token("anthropic-oauth")
+    if not token:
+        return False, "本地没有 Claude OAuth token，请先 `--login`。"
+    try:
+        resp = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": ANTHROPIC_OAUTH_BETA,
+                "Content-Type": "application/json",
+            },
+            json={"model": model, "max_tokens": 1,
+                  "system": "You are Claude Code, Anthropic's official CLI for Claude.",
+                  "messages": [{"role": "user", "content": "ping"}]},
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        return False, f"请求失败：{exc}"
+    if resp.status_code < 400:
+        return True, "Claude OAuth token 可用。"
+    return False, f"HTTP {resp.status_code}：{resp.text[:300]}"
+
+
 def resolve_provider_token(provider_id: str, env_name: str = "", *, refresh: bool = True) -> str:
     from . import config
     config.load_env()
@@ -868,6 +1017,10 @@ def resolve_provider_token(provider_id: str, env_name: str = "", *, refresh: boo
         item = get_auth(provider_id)
         if refresh and item.get("access_token") and item.get("refresh_token") and _is_expiring(item.get("expires_at"), CODEX_REFRESH_SKEW_SECONDS):
             return refresh_codex_token()
+    if provider_id == "anthropic-oauth":
+        item = get_auth(provider_id)
+        if refresh and item.get("access_token") and item.get("refresh_token") and _is_expiring(item.get("expires_at"), ANTHROPIC_REFRESH_SKEW_SECONDS):
+            return refresh_anthropic_token()
     if provider_id == "google-gemini-cli":
         item = get_auth(provider_id)
         if refresh and item.get("access_token") and item.get("refresh_token") and _is_expiring(item.get("expires_at"), GOOGLE_REFRESH_SKEW_SECONDS):

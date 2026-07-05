@@ -94,7 +94,9 @@ def _build_provider(model_cfg: dict, api_key: str) -> LLMProvider:
         # 只认 anthropic 自有网关；忽略切换残留的他家 base_url（默认走 api.anthropic.com）
         raw = (model_cfg.get("base_url") or model_cfg.get("base") or "")
         gw = raw if "anthropic" in raw.lower() else ""
-        return AnthropicProvider(api_key, model, gw)
+        # 订阅版 OAuth：api_mode=anthropic_oauth 或 auth_type=oauth_external → Bearer + oauth beta 头
+        oauth = api_mode == "anthropic_oauth" or (model_cfg.get("auth_type") or "").lower() == "oauth_external"
+        return AnthropicProvider(api_key, model, gw, oauth=oauth)
     if kind == "native":
         raise LLMError(f"{model_cfg.get('label', model)} 走厂商原生 API，适配规划中；"
                        "当前可用：Claude 原生 + Gemini 原生 + Bedrock Converse + OpenAI 兼容类（OpenAI/DeepSeek/通义/Kimi/GLM/豆包/MiniMax/OpenRouter/本地/自定义）。")
