@@ -14,6 +14,8 @@ from typing import Any, Optional
 from .base import LLMError, LLMProvider
 
 _DEFAULT_MAX_TOKENS = 8192
+# Claude 订阅版 OAuth token 打 messages API 的已知硬要求：system 首块须是 Claude Code 身份，否则 401/403。
+_CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
 
 def _split_messages(messages: list[dict]) -> tuple[str, list[dict]]:
@@ -123,10 +125,18 @@ def _extract(message: Any) -> dict:
 class AnthropicProvider(LLMProvider):
     name = "anthropic"
 
-    def __init__(self, api_key: str, model: str, base_url: str = ""):
+    def __init__(self, api_key: str, model: str, base_url: str = "", oauth: bool = False):
         super().__init__(api_key, model or "claude-opus-4-8")
         self.base_url = (base_url or "").rstrip("/")
+        self.oauth = oauth          # True=订阅版 OAuth：走 Bearer + oauth beta 头 + Claude Code 身份
         self._client = None
+
+    def _system(self, system: str):
+        """system 块。OAuth 模式下首块必须是 Claude Code 身份（Max token 硬要求）。"""
+        base = _system_param(system) or []
+        if self.oauth:
+            return [{"type": "text", "text": _CLAUDE_CODE_IDENTITY}] + base
+        return base or None
 
     def _cli(self):
         if self._client is None:
@@ -135,8 +145,15 @@ class AnthropicProvider(LLMProvider):
             except ImportError as e:
                 raise LLMError("未安装 anthropic SDK：pip install 'ivyea-agent[anthropic]'") from e
             if not self.api_key:
-                raise LLMError("ANTHROPIC_API_KEY 未配置（ivyea model 选 Claude 并配 key）")
-            kw: dict[str, Any] = {"api_key": self.api_key}
+                raise LLMError("Claude OAuth 未登录，先 `ivyea model auth anthropic-oauth --login`"
+                               if self.oauth else "ANTHROPIC_API_KEY 未配置（ivyea model 选 Claude 并配 key）")
+            kw: dict[str, Any] = {}
+            if self.oauth:   # 订阅版：Bearer token + oauth beta 头（不传 api_key）
+                from ..oauth_auth import ANTHROPIC_OAUTH_BETA
+                kw["auth_token"] = self.api_key
+                kw["default_headers"] = {"anthropic-beta": ANTHROPIC_OAUTH_BETA}
+            else:
+                kw["api_key"] = self.api_key
             if self.base_url:
                 kw["base_url"] = self.base_url
             self._client = anthropic.Anthropic(**kw)
@@ -146,7 +163,7 @@ class AnthropicProvider(LLMProvider):
         try:
             msg = self._cli().with_options(timeout=timeout).messages.create(
                 model=self.model, max_tokens=_DEFAULT_MAX_TOKENS,
-                system=_system_param(system),   # cache the (often-repeated) system prefix
+                system=self._system(system),   # cache the (often-repeated) system prefix；OAuth 加 Claude Code 身份
                 messages=[{"role": "user", "content": user}])
         except Exception as e:  # noqa: BLE001
             raise LLMError(f"Claude 调用失败：{e}") from e
@@ -155,7 +172,7 @@ class AnthropicProvider(LLMProvider):
     def chat(self, messages, tools=None, temperature=0.3, timeout=120.0):
         system, msgs = _split_messages(messages)
         kw: dict[str, Any] = {"model": self.model, "max_tokens": _DEFAULT_MAX_TOKENS,
-                              "system": _system_param(system), "messages": msgs}
+                              "system": self._system(system), "messages": msgs}
         at = _tools_to_anthropic(tools)
         if at:
             kw["tools"] = at
@@ -168,7 +185,7 @@ class AnthropicProvider(LLMProvider):
     def stream_chat(self, messages, tools=None, temperature=0.3, timeout=120.0):
         system, msgs = _split_messages(messages)
         kw: dict[str, Any] = {"model": self.model, "max_tokens": _DEFAULT_MAX_TOKENS,
-                              "system": _system_param(system), "messages": msgs}
+                              "system": self._system(system), "messages": msgs}
         at = _tools_to_anthropic(tools)
         if at:
             kw["tools"] = at

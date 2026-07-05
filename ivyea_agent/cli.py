@@ -151,6 +151,9 @@ def _print_provider_auth_required(provider: dict) -> None:
     elif pid == "qwen-oauth":
         print("  ivyea model auth qwen-oauth --login")
         print("  ivyea model auth qwen-oauth --probe")
+    elif pid == "anthropic-oauth":
+        print("  ivyea model auth anthropic-oauth --login")
+        print("  ivyea model auth anthropic-oauth --probe")
     else:
         print(f"  ivyea model auth {pid}")
 
@@ -164,6 +167,8 @@ def _interactive_provider_login(provider: dict) -> bool:
             oauth_auth.codex_device_code_login(notify=print)
         elif pid == "google-gemini-cli":
             oauth_auth.google_oauth_login(open_browser=True, notify=print)
+        elif pid == "anthropic-oauth":
+            oauth_auth.anthropic_oauth_login(notify=print)
         elif pid == "qwen-oauth":
             oauth_auth.qwen_cli_login()
         elif pid == "copilot":
@@ -388,14 +393,16 @@ def _cmd_model_auth(args: argparse.Namespace, action: str) -> int:
                 and not getattr(args, "token", None):
             return 0
     if getattr(args, "refresh", False):
-        if provider_id not in ("qwen-oauth", "openai-codex", "google-gemini-cli"):
-            print("--refresh 目前支持 qwen-oauth / openai-codex / google-gemini-cli", file=sys.stderr)
+        if provider_id not in ("qwen-oauth", "openai-codex", "google-gemini-cli", "anthropic-oauth"):
+            print("--refresh 目前支持 qwen-oauth / openai-codex / google-gemini-cli / anthropic-oauth", file=sys.stderr)
             return 2
         try:
             if provider_id == "qwen-oauth":
                 oauth_auth.refresh_qwen_token()
             elif provider_id == "openai-codex":
                 oauth_auth.refresh_codex_token()
+            elif provider_id == "anthropic-oauth":
+                oauth_auth.refresh_anthropic_token()
             else:
                 oauth_auth.refresh_google_token()
         except oauth_auth.OAuthAuthError as exc:
@@ -404,12 +411,15 @@ def _cmd_model_auth(args: argparse.Namespace, action: str) -> int:
         print(f"{provider_id}: 已刷新本地认证（token 已隐藏）")
         return 0
     if getattr(args, "login", False):
-        if provider_id not in ("google-gemini-cli", "qwen-oauth"):
-            print("--login 目前支持 google-gemini-cli / qwen-oauth", file=sys.stderr)
+        if provider_id not in ("google-gemini-cli", "qwen-oauth", "anthropic-oauth"):
+            print("--login 目前支持 google-gemini-cli / qwen-oauth / anthropic-oauth", file=sys.stderr)
             return 2
         try:
             if provider_id == "google-gemini-cli":
                 oauth_auth.google_oauth_login(open_browser=not getattr(args, "no_browser", False), notify=print)
+            elif provider_id == "anthropic-oauth":
+                oauth_auth.anthropic_oauth_login(notify=print)
+                print("提示：登录后建议 `ivyea model auth anthropic-oauth --probe` 验证 token 可用，再选它当主脑。")
             else:
                 oauth_auth.qwen_cli_login()
         except oauth_auth.OAuthAuthError as exc:
@@ -473,8 +483,16 @@ def _cmd_model_auth(args: argparse.Namespace, action: str) -> int:
         if not getattr(args, "probe", False):
             return 0
     if getattr(args, "probe", False):
+        if provider_id == "anthropic-oauth":
+            ok, msg = oauth_auth.probe_anthropic_oauth(timeout=getattr(args, "timeout", 30.0) or 30.0)
+            print(f"anthropic-oauth: {msg}")
+            if not ok:
+                print("排查：token 可能失效（`--refresh` 或重新 `--login`）；若持续 401/403，"
+                      "可能是逆向的 client_id/beta 头/身份要求已被 Anthropic 变更，用 IVYEA_ANTHROPIC_OAUTH_* 环境变量覆盖。",
+                      file=sys.stderr)
+            return 0 if ok else 1
         if provider_id not in ("google-gemini-cli", "openai-codex", "copilot", "qwen-oauth"):
-            print("--probe 目前支持 google-gemini-cli / openai-codex / copilot / qwen-oauth", file=sys.stderr)
+            print("--probe 目前支持 google-gemini-cli / openai-codex / copilot / qwen-oauth / anthropic-oauth", file=sys.stderr)
             return 2
         token = oauth_auth.resolve_provider_token(provider_id, provider.get("key_env", ""), refresh=True)
         if not token:

@@ -97,6 +97,21 @@ PROVIDERS: list[dict[str, Any]] = [
         "note": "Codex OAuth device-code 登录后走 chatgpt.com/backend-api/codex Responses；支持 Responses streaming 和工具调用。",
     },
     {
+        "id": "anthropic-oauth",
+        "label": "Claude 订阅 OAuth",
+        "group": "OAuth / 订阅",
+        "kind": "anthropic",
+        "api_mode": "anthropic_oauth",
+        "auth_type": "oauth_external",
+        "base": "https://api.anthropic.com",
+        "key_env": "",
+        "models": ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
+        "default_model": "claude-sonnet-4-6",
+        "status": "usable",
+        "note": "用 Claude 订阅(Max/Pro) OAuth 登录跑主脑：ivyea model auth anthropic-oauth --login 后 --probe 验证。"
+                "注意：为生态逆向、非官方，Anthropic 可能变更/限制；相关常量可用 IVYEA_ANTHROPIC_OAUTH_* 环境变量覆盖。",
+    },
+    {
         "id": "copilot",
         "label": "GitHub Copilot / GitHub Models",
         "group": "OAuth / 订阅",
@@ -493,6 +508,7 @@ def provider_capabilities(provider: dict[str, Any]) -> dict[str, Any]:
     tool_modes = {
         "chat_completions",
         "anthropic_messages",
+        "anthropic_oauth",
         "gemini_native",
         "gemini_code_assist",
         "bedrock_converse",
@@ -502,6 +518,7 @@ def provider_capabilities(provider: dict[str, Any]) -> dict[str, Any]:
     stream_modes = {
         "chat_completions",
         "anthropic_messages",
+        "anthropic_oauth",
         "gemini_native",
         "gemini_code_assist",
         "copilot_chat_completions",
@@ -516,17 +533,17 @@ def provider_capabilities(provider: dict[str, Any]) -> dict[str, Any]:
         "chat": provider.get("status", "usable") == "usable",
         "tools": api_mode in tool_modes,
         "streaming": api_mode in stream_modes,
-        "vision": pid in {"openai", "anthropic", "gemini"} or api_mode == "gemini_native",
+        "vision": pid in {"openai", "anthropic", "anthropic-oauth", "gemini"} or api_mode == "gemini_native",
         "oauth": auth in {"oauth_external", "oauth_device_code", "copilot"},
         "api_key": auth == "api_key",
         "local": auth == "none" or base.startswith(("http://localhost", "http://127.0.0.1")),
         "aws_sdk": auth == "aws_sdk",
         "custom_endpoint": pid in {"custom", "azure-foundry"} or not bool(base),
         "live_model_catalog": live_catalog,
-        "real_probe": pid in {"google-gemini-cli", "openai-codex", "copilot", "qwen-oauth"},
+        "real_probe": pid in {"google-gemini-cli", "openai-codex", "copilot", "qwen-oauth", "anthropic-oauth"},
         "model_refresh": live_catalog,
         "supports_code_tasks": pid in {
-            "openai", "anthropic", "google-gemini-cli", "openai-codex", "copilot",
+            "openai", "anthropic", "anthropic-oauth", "google-gemini-cli", "openai-codex", "copilot",
             "qwen", "qwen-oauth", "kimi-coding", "openrouter", "ollama", "custom",
         },
     }
