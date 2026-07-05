@@ -243,9 +243,9 @@ def t_grep(args: dict, ctx) -> str:
         scanned += 1
         text = raw.decode("utf-8", errors="replace")
         try:
-            rel = path.relative_to(root)
+            rel = path.relative_to(root).as_posix()   # 统一正斜杠（与 t_glob 一致，跨平台稳定；修 Windows 反斜杠）
         except ValueError:
-            rel = path
+            rel = path.as_posix()
         for i, line in enumerate(text.splitlines(), 1):
             if rx.search(line):
                 hits.append(f"{rel}:{i}: {line.strip()[:200]}")

@@ -16,14 +16,27 @@ from .base import LLMError, LLMProvider
 _DEFAULT_MAX_TOKENS = 8192
 # Claude 订阅版 OAuth token 打 messages API 的已知硬要求：system 首块须是 Claude Code 身份，否则 401/403。
 _CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+_THINK_BUDGET = {"low": 4096, "medium": 8192, "high": 16384}   # 思考旋钮 → extended thinking token 预算
 
 
-def _split_messages(messages: list[dict]) -> tuple[str, list[dict]]:
+def _thinking_kw(effort: str, base_max_tokens: int) -> dict:
+    """思考旋钮 → Claude extended thinking 请求参数；off/auto 不开思考。
+    Anthropic 要求 max_tokens > budget_tokens，故按需抬高 max_tokens。"""
+    budget = _THINK_BUDGET.get(effort or "")
+    if not budget:
+        return {}
+    return {"thinking": {"type": "enabled", "budget_tokens": budget},
+            "max_tokens": budget + base_max_tokens}
+
+
+def _split_messages(messages: list[dict], thinking_cache: dict | None = None) -> tuple[str, list[dict]]:
     """OpenAI 格式 → (system 文本, Anthropic messages)。
 
     - system 角色 → 汇成顶层 system 串
     - assistant.tool_calls → content 里的 tool_use 块
     - role=tool → 合并成 user 消息里的 tool_result 块（连续的合并到一条）
+    - thinking_cache（按 tool_call id 缓存的 thinking 块）：开思考时，带工具的 assistant 轮须把
+      thinking 块排在 tool_use 之前回传，否则 Anthropic API 400。
     """
     system_parts: list[str] = []
     out: list[dict] = []
@@ -45,9 +58,14 @@ def _split_messages(messages: list[dict]) -> tuple[str, list[dict]]:
                                 "content": str(m.get("content", ""))})
         elif role == "assistant":
             blocks: list[dict] = []
+            tcs = m.get("tool_calls") or []
+            if thinking_cache and tcs:   # thinking 块必须排在最前（Anthropic 硬要求）
+                cached = thinking_cache.get(tcs[0].get("id", ""))
+                if cached:
+                    blocks.extend(cached)
             if m.get("content"):
                 blocks.append({"type": "text", "text": m["content"]})
-            for tc in (m.get("tool_calls") or []):
+            for tc in tcs:
                 fn = tc.get("function", {})
                 try:
                     args = json.loads(fn.get("arguments") or "{}")
@@ -110,16 +128,23 @@ def _norm_usage(usage: Any) -> dict:
 
 
 def _extract(message: Any) -> dict:
-    """Anthropic Message → 统一 {content, tool_calls, usage}。"""
-    text_parts, tool_calls = [], []
+    """Anthropic Message → 统一 {content, tool_calls, usage, _thinking}。
+    _thinking：原样保留的 thinking/redacted_thinking 块（带 signature），供工具循环里回传（否则 API 400）。"""
+    text_parts, tool_calls, thinking = [], [], []
     for block in (message.content or []):
         bt = getattr(block, "type", None)
         if bt == "text":
             text_parts.append(block.text)
         elif bt == "tool_use":
             tool_calls.append({"id": block.id, "name": block.name, "arguments": block.input or {}})
+        elif bt == "thinking":
+            thinking.append({"type": "thinking", "thinking": getattr(block, "thinking", ""),
+                             "signature": getattr(block, "signature", "")})
+        elif bt == "redacted_thinking":
+            thinking.append({"type": "redacted_thinking", "data": getattr(block, "data", "")})
     return {"role": "assistant", "content": "".join(text_parts),
-            "tool_calls": tool_calls, "usage": _norm_usage(getattr(message, "usage", None))}
+            "tool_calls": tool_calls, "usage": _norm_usage(getattr(message, "usage", None)),
+            "_thinking": thinking}
 
 
 class AnthropicProvider(LLMProvider):
@@ -130,6 +155,13 @@ class AnthropicProvider(LLMProvider):
         self.base_url = (base_url or "").rstrip("/")
         self.oauth = oauth          # True=订阅版 OAuth：走 Bearer + oauth beta 头 + Claude Code 身份
         self._client = None
+        self._thinking_cache: dict[str, list] = {}   # tool_call id → 该 assistant 轮的 thinking 块（工具循环回传用）
+
+    def _cache_thinking(self, ex: dict) -> None:
+        tcs = ex.get("tool_calls") or []
+        th = ex.get("_thinking") or []
+        if tcs and th:
+            self._thinking_cache[tcs[0]["id"]] = th
 
     def _system(self, system: str):
         """system 块。OAuth 模式下首块必须是 Claude Code 身份（Max token 硬要求）。"""
@@ -170,9 +202,10 @@ class AnthropicProvider(LLMProvider):
         return "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
 
     def chat(self, messages, tools=None, temperature=0.3, timeout=120.0):
-        system, msgs = _split_messages(messages)
+        system, msgs = _split_messages(messages, self._thinking_cache)
         kw: dict[str, Any] = {"model": self.model, "max_tokens": _DEFAULT_MAX_TOKENS,
                               "system": self._system(system), "messages": msgs}
+        kw.update(_thinking_kw(self.reasoning_effort, _DEFAULT_MAX_TOKENS))   # 思考深度旋钮
         at = _tools_to_anthropic(tools)
         if at:
             kw["tools"] = at
@@ -180,22 +213,33 @@ class AnthropicProvider(LLMProvider):
             msg = self._cli().with_options(timeout=timeout).messages.create(**kw)
         except Exception as e:  # noqa: BLE001
             raise LLMError(f"Claude 调用失败：{e}") from e
-        return _extract(msg)
+        ex = _extract(msg)
+        self._cache_thinking(ex)
+        return ex
 
     def stream_chat(self, messages, tools=None, temperature=0.3, timeout=120.0):
-        system, msgs = _split_messages(messages)
+        system, msgs = _split_messages(messages, self._thinking_cache)
         kw: dict[str, Any] = {"model": self.model, "max_tokens": _DEFAULT_MAX_TOKENS,
                               "system": self._system(system), "messages": msgs}
+        kw.update(_thinking_kw(self.reasoning_effort, _DEFAULT_MAX_TOKENS))   # 思考深度旋钮
         at = _tools_to_anthropic(tools)
         if at:
             kw["tools"] = at
         try:
             with self._cli().with_options(timeout=timeout).messages.stream(**kw) as stream:
-                for text in stream.text_stream:
-                    yield {"type": "text", "text": text}
+                for event in stream:   # 思考增量→reasoning 事件(显示 ✻ 思考)，正文增量→text
+                    et = getattr(event, "type", "")
+                    if et == "content_block_delta":
+                        delta = getattr(event, "delta", None)
+                        dt = getattr(delta, "type", "")
+                        if dt == "thinking_delta":
+                            yield {"type": "reasoning", "text": getattr(delta, "thinking", "") or ""}
+                        elif dt == "text_delta":
+                            yield {"type": "text", "text": getattr(delta, "text", "") or ""}
                 final = stream.get_final_message()
         except Exception as e:  # noqa: BLE001
             raise LLMError(f"Claude 流式失败：{e}") from e
         ex = _extract(final)
+        self._cache_thinking(ex)   # 缓存本轮 thinking 块，供下一步工具循环回传
         yield {"type": "final", "content": ex["content"],
                "tool_calls": ex["tool_calls"], "usage": ex["usage"]}
