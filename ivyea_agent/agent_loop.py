@@ -52,6 +52,8 @@ def runtime_context_note(now: datetime | None = None) -> str:
 
 DEFAULT_MAX_TOOL_STEPS = 48
 DEFAULT_TOOL_WARNING_REMAINING = 5
+CODE_WRITE_TOOLS = {"write_file", "edit_file", "code_apply_patch"}   # 触发完成前自验证门禁的写工具
+_VERIFY_CAP = 2                                                       # 门禁最多逼修复几轮，防失控
 
 
 @dataclass
@@ -60,6 +62,8 @@ class TurnStatus:
     warning_remaining: int = DEFAULT_TOOL_WARNING_REMAINING
     warned: bool = False
     tool_calls: int = 0
+    wrote_code: bool = False       # 本轮是否动过源码（决定收尾前是否走自验证门禁）
+    verify_rounds: int = 0         # 已触发的自验证逼修复轮数
 
     def before_model_step(self, step_idx: int, narrate: Callable[[str], None]) -> None:
         remaining = self.max_steps - step_idx
@@ -171,6 +175,8 @@ def _dispatch_tool_calls(ctx: ToolContext, messages: list, status: TurnStatus, t
                          emit: Callable[[dict], None] | None = None) -> None:
     """派发本步所有工具调用：叙述、执行、记 trace、把结果按原顺序回灌到 messages。
     当本步全部是只读且并行安全的工具时并发执行（降延迟）；否则顺序执行（保留审批/写入语义）。"""
+    if any(tc["name"] in CODE_WRITE_TOOLS for tc in tool_calls):
+        status.wrote_code = True                     # 本轮写过源码 → 收尾前走自验证门禁
     parallel = len(tool_calls) > 1 and all(tc["name"] in PARALLEL_SAFE for tc in tool_calls)
     if parallel:
         for tc in tool_calls:
@@ -200,6 +206,28 @@ def _finalize_limit(ctx: ToolContext, messages: list, status: TurnStatus, max_st
     traces.record(getattr(ctx, "session_id", ""), getattr(ctx, "turn_id", ""),
                   "turn_limit", "tool_steps", ok=False, summary=text, payload=payload)
     return text
+
+
+def _verify_gate_feedback(ctx: ToolContext, status: TurnStatus,
+                          narrate: Callable[[str], None]) -> str | None:
+    """本轮写过源码且模型想收尾时，跑完成前自验证门禁。返回注回文本(未通过)或 None(放行)。
+    非代码轮/非 git 仓/门禁关/已达上限 → None。异常一律放行，绝不因门禁卡死主流程。"""
+    if not status.wrote_code or status.verify_rounds >= _VERIFY_CAP:
+        return None
+    if not config.get_setting("verify_before_done", True):
+        return None
+    try:
+        from . import verify
+        res = verify.gate(getattr(ctx, "workspace", "") or ".",
+                          run_tests=bool(config.get_setting("verify_run_tests", True)),
+                          timeout=int(config.get_setting("verify_test_timeout", 120)))
+    except Exception:   # noqa: BLE001
+        return None
+    if res.get("ok"):
+        return None
+    status.verify_rounds += 1
+    narrate(ui.message("warn", "完成前自验证未通过，先修复再收尾。"))
+    return res.get("feedback") or None
 
 
 def _maybe_compact(messages: list, provider, step_idx: int, narrate: Callable[[str], None]) -> None:
@@ -232,6 +260,10 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
         if not tool_calls:
             content = msg.get("content", "") or ""
             messages.append({"role": "assistant", "content": content})
+            fb = _verify_gate_feedback(ctx, status, narrate)
+            if fb is not None:
+                messages.append({"role": "user", "content": fb})
+                continue
             return content
         _append_tool_call_msg(messages, msg.get("content"), tool_calls)
         _dispatch_tool_calls(ctx, messages, status, tool_calls, step_idx, max_steps, narrate)
@@ -296,6 +328,10 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
         if not tool_calls:
             content = final.get("content", "") or ""
             messages.append({"role": "assistant", "content": content})
+            fb = _verify_gate_feedback(ctx, status, narrate)
+            if fb is not None:
+                messages.append({"role": "user", "content": fb})
+                continue
             return {"text": content, "usage": total_usage}
         if cancel_check():
             raise KeyboardInterrupt

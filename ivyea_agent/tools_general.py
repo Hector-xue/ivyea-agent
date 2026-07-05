@@ -877,6 +877,19 @@ def t_task_resume(args: dict, ctx) -> str:
         return f"读取续跑提示失败：{e}"
 
 
+def t_self_critique(args: dict, ctx) -> str:
+    """收尾前对自己的草稿答案做一次 rubric 自查（只读，不写）。用当前主脑复核。"""
+    from . import critique as _crit
+    draft = (args.get("draft") or "").strip()
+    if not draft:
+        return "draft 为空：把你准备交付的最终答案放进 draft 再自查。"
+    provider = getattr(ctx, "provider", None)
+    res = _crit.critique(args.get("task") or "", draft, provider)
+    if not res.get("ok"):
+        return res.get("note") or "自我批判不可用。"
+    return _truncate(res["markdown"] or "未见明显问题。")
+
+
 # ── schema + dispatch ────────────────────────────────────────────────────────
 def _fn(name, desc, props, required=()):
     return {"type": "function", "function": {
@@ -960,6 +973,11 @@ GENERAL_TOOL_SCHEMAS = [
             "content": {"type": "string"},
             "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}}}},
         ["todos"]),
+    _fn("self_critique", "收尾前自查：把你准备交付的最终答案放进 draft，用当前主脑按 rubric 复核"
+        "(需求吻合/事实可靠/关键遗漏/验证到位)，返回简短批判。高风险或复杂任务交付前建议先自调一次。只读。",
+        {"draft": {"type": "string", "description": "准备交付给用户的最终答案全文"},
+         "task": {"type": "string", "description": "可选：本次任务/需求，帮助判断是否答非所问"}},
+        ["draft"]),
     _fn("task_read", "读取当前绑定的 Ivyea 长任务状态、步骤和最近事件。续跑任务时应先调用。",
         {"task_id": {"type": "string", "description": "可选；不传则使用当前对话绑定的 task_id"}}),
     _fn("task_step", "更新当前绑定的 Ivyea 长任务步骤状态。用于执行过程中标记 in_progress/completed/blocked。",
@@ -994,6 +1012,7 @@ GENERAL_DISPATCH = {
     "mcp_list_resources": t_mcp_list_resources, "mcp_read_resource": t_mcp_read_resource,
     "mcp_list_prompts": t_mcp_list_prompts, "mcp_get_prompt": t_mcp_get_prompt,
     "todo_write": t_todo_write,
+    "self_critique": t_self_critique,
     "task_read": t_task_read,
     "task_step": t_task_step,
     "task_log": t_task_log,

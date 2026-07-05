@@ -66,6 +66,16 @@ def _model_candidates(model: str) -> list[str]:
     return out
 
 
+def _codex_reasoning(effort: str) -> dict:
+    """GPT-5 思考配置：summary 流始终开；按思考旋钮映射 effort。
+    off→minimal、low/medium/high→同名、auto→不指定(用模型默认)。"""
+    r: dict[str, Any] = {"summary": "auto"}
+    eff = {"off": "minimal", "low": "low", "medium": "medium", "high": "high"}.get(effort or "")
+    if eff:
+        r["effort"] = eff
+    return r
+
+
 def _normalize_usage(u: dict) -> dict:
     """Responses API 的 usage（input_tokens/output_tokens/input_tokens_details.cached_tokens）
     归一成内部契约的 chat-completions 形状（prompt_tokens/completion_tokens/
@@ -372,7 +382,7 @@ class CodexProvider(LLMProvider):
                 "input": input_items,
                 "stream": True,
                 "store": False,
-                "reasoning": {"summary": "auto"},   # GPT-5 思考摘要流（→ reasoning 事件，显示 ✻ 思考）
+                "reasoning": _codex_reasoning(self.reasoning_effort),   # GPT-5 思考摘要流 + 思考深度旋钮
             }
             if instructions:
                 payload["instructions"] = instructions
