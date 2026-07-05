@@ -1195,6 +1195,8 @@ _BANNER = r"""
 SLASH_COMMANDS = [
     ("/help", "显示帮助与命令"),
     ("/model", "查看/切换主脑模型 (如 /model deepseek:deepseek-chat)"),
+    ("/think", "查看/切换思考深度 (/think off|low|medium|high|auto)"),
+    ("/critique", "对最近一次回答做自我批判复核"),
     ("/config", "打开配置向导"),
     ("/status", "查看当前配置与状态"),
     ("/mcp", "列出已配置的 MCP 服务器"),
@@ -1778,6 +1780,44 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             _reprint_welcome()
         return True
 
+    def _sh_think(line):
+        """查看/切换思考深度旋钮（reasoning_effort）：影响 codex/claude/gemini/推理型模型的思考预算。"""
+        levels = ("off", "low", "medium", "high", "auto")
+        parts = line.split(None, 1)
+        cur = str(cfg.get_setting("reasoning_effort", "high") or "high").lower()
+        if len(parts) == 1:
+            print(ui.message("info", f"当前思考深度：{cur}。切换：/think {'|'.join(levels)}"))
+            return True
+        lvl = parts[1].strip().lower()
+        if lvl not in levels:
+            print(ui.message("warn", f"未知深度：{lvl}。可选 {'|'.join(levels)}"))
+            return True
+        cfg.set_setting("reasoning_effort", lvl)
+        print(ui.message("success", f"思考深度已设为 {lvl}（下轮生效；仅推理型主脑有效，普通模型忽略）。"))
+        return True
+
+    def _sh_critique(line):
+        """对最近一次回答做自我批判复核（通用 rubric 自查）。"""
+        from . import critique as _crit
+        ak = cfg.get_active_key()
+        if not ak and _model_needs_key(cfg.load_settings()):
+            print(ui.message("warn", "未配置主脑 key，无法自我批判。")); return True
+        last = next((m.get("content") for m in reversed(messages)
+                     if m.get("role") == "assistant" and m.get("content")), "")
+        if not last:
+            print(ui.message("info", "还没有可复核的回答。")); return True
+        task = next((m.get("content") for m in reversed(messages) if m.get("role") == "user"), "")
+        try:
+            provider = from_settings(cfg.get_model_config(), ak)
+        except LLMError as e:
+            print(ui.message("warn", f"无法构造主脑：{e}")); return True
+        print(ui.message("info", "正在自我批判复核最近一次回答…"))
+        res = _crit.critique(str(task), str(last), provider)
+        if not res.get("ok"):
+            print(ui.message("warn", res.get("note") or "自我批判不可用。")); return True
+        print(markdown.render(res["markdown"]) if render_md else res["markdown"])
+        return True
+
     def _sh_update(line):
         """检查最新版并一键更新（源码仓 git pull / 否则 pip·pipx 升级）。"""
         from . import updater as _updater
@@ -1837,6 +1877,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         "/diff": _sh_diff, "/init": _sh_init, "/mcp": _sh_mcp, "/knowledge": _sh_knowledge,
         "/skill": _sh_skill, "/tools": _sh_tools, "/memory": _sh_memory, "/status": _sh_status,
         "/config": _sh_config, "/model": _sh_model, "/rewind": _sh_rewind, "/update": _sh_update,
+        "/think": _sh_think, "/critique": _sh_critique,
         "/workspace": _sh_embedded, "/patch": _sh_embedded, "/gitops": _sh_embedded,
     }
 
@@ -3431,7 +3472,7 @@ def build_parser() -> argparse.ArgumentParser:
     pcode.add_argument("--budget", type=int, default=6000, help="brief 字符预算")
     pcode.add_argument("--command", dest="test_command", help="test 要运行的命令，默认 python -m pytest")
     pcode.add_argument("--run-tests", action="store_true", help="code run 时真实运行测试；默认只列建议测试")
-    pcode.add_argument("--max-rounds", type=int, default=1, help="code run 最大轮次；当前骨架只执行首轮 dry-run")
+    pcode.add_argument("--max-rounds", type=int, default=2, help="code run 最大轮次（默认 2：首轮改动 + 测试失败后一轮修复指引）")
     pcode.add_argument("--name", help="sandbox 计划名称")
     pcode.add_argument("--timeout", type=int, default=120)
     pcode.add_argument("--output-file", help="repair 读取 pytest 输出文件")

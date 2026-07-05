@@ -17,6 +17,15 @@ from .base import LLMError, LLMProvider
 
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
+
+
+def _thinking_config(model: str, effort: str) -> Optional[dict]:
+    """Gemini 2.5 思考预算映射（只有 2.5 支持 thinkingConfig，给旧模型加会报错，故门控）。
+    off→0(关)、auto→-1(动态)、low/medium/high→token 预算；非 2.5 返回 None。"""
+    if "2.5" not in (model or ""):
+        return None
+    budget = {"off": 0, "auto": -1, "low": 2048, "medium": 8192, "high": 16384}.get(effort or "")
+    return None if budget is None else {"thinkingBudget": budget}
 _RETRIES = 3
 _RETRYABLE = {429, 500, 502, 503, 504}
 
@@ -210,6 +219,9 @@ class GeminiProvider(LLMProvider):
                 "maxOutputTokens": DEFAULT_MAX_OUTPUT_TOKENS,
             },
         }
+        _tc = _thinking_config(self.model, self.reasoning_effort)
+        if _tc is not None:
+            payload["generationConfig"]["thinkingConfig"] = _tc   # 思考深度旋钮（仅 2.5）
         if system:
             payload["systemInstruction"] = {"parts": [{"text": system}]}
         gtools = _tools_to_gemini(tools)

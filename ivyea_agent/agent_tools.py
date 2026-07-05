@@ -582,7 +582,7 @@ READONLY_TOOLS = (PARALLEL_SAFE - {"dispatch_subagent"}) | {
     "code_search", "code_symbols", "code_impact", "code_repair",
     "mcp_list_tools", "mcp_list_resources", "mcp_read_resource",
     "mcp_list_prompts", "mcp_get_prompt",
-    "knowledge_search", "skill_search", "recall",
+    "knowledge_search", "skill_search", "recall", "self_critique",
     "run_patrol", "run_account_diagnosis", "propose_actions",
     "run_listing_audit", "run_review_audit", "run_offer_audit",
     "run_competitor_audit", "run_image_audit", "run_image_ocr",

@@ -828,7 +828,7 @@ def run_loop(
     *,
     test_command: str = "",
     run_tests_enabled: bool = False,
-    max_rounds: int = 1,
+    max_rounds: int = 2,
     persist: bool = False,
     llm_patch: bool = False,
     patch_provider: Any = None,

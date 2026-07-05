@@ -16,6 +16,7 @@ class LLMProvider:
     """所有模型适配器的统一接口。"""
 
     name: str = "base"
+    reasoning_effort: str = "auto"   # off|low|medium|high|auto；由 from_settings 按全局设置注入，各 provider 映射成自家思考参数
 
     def __init__(self, api_key: str, model: str):
         self.api_key = api_key
@@ -46,6 +47,21 @@ class LLMProvider:
 
 
 def from_settings(model_cfg: dict, api_key: str) -> LLMProvider:
+    """按模型配置构造 provider，并注入全局 reasoning_effort（思考深度旋钮）。
+    provider 由 _build_provider 造好后统一挂 .reasoning_effort，各 provider 在
+    请求体里映射成自家思考参数（推理型模型才生效，非推理型 no-op）。"""
+    provider = _build_provider(model_cfg, api_key)
+    try:
+        from .. import config
+        eff = str(config.get_setting("reasoning_effort", "high") or "high").lower()
+        if eff in ("off", "low", "medium", "high", "auto"):
+            provider.reasoning_effort = eff
+    except Exception:   # noqa: BLE001  设置读不到不影响主流程
+        pass
+    return provider
+
+
+def _build_provider(model_cfg: dict, api_key: str) -> LLMProvider:
     """按模型配置(models.py 条目/settings)构造 provider。
 
     kind=openai → 通用 OpenAI 兼容（OpenAI/DeepSeek/通义/Kimi/GLM/豆包/MiniMax/
