@@ -2263,6 +2263,10 @@ def conflicts() -> list[dict[str, Any]]:
     user = [c for c in cards if c.get("scope") == "user"]
     rows = []
     seen: set[str] = set()
+    generic_overlap_tags = {
+        "amazon", "compliance", "gbrain", "marketplace", "official",
+        "operations", "policy", "seller", "seller-central",
+    }
 
     def add(card: dict[str, Any], level: str, reason_code: str, reason: str, related: list[str] | None = None) -> None:
         fingerprint = _hash("|".join([str(card.get("id")), reason_code, *(related or [])]))[:16]
@@ -2284,10 +2288,11 @@ def conflicts() -> list[dict[str, Any]]:
         if not card.get("license"):
             add(card, "warn", "missing_license", "用户知识卡缺 license")
         tags = {str(tag).lower() for tag in card.get("tags") or []}
+        conflict_tags = tags - generic_overlap_tags
         body = _read_body(card).lower()
         overlaps = [
             row["id"] for row in official
-            if tags and tags.intersection({str(tag).lower() for tag in row.get("tags") or []})
+            if conflict_tags and conflict_tags.intersection({str(tag).lower() for tag in row.get("tags") or []})
         ]
         reverse = any(k in body for k in ("不要", "禁止", "不建议", "avoid", "do not", "never"))
         if reverse and overlaps:

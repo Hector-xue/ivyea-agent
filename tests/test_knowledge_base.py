@@ -505,6 +505,22 @@ def test_knowledge_conflict_audit(ivyea_home, tmp_path):
     assert "user.negative_hot_take" in rendered
 
 
+def test_knowledge_conflict_audit_ignores_generic_compliance_overlap(ivyea_home):
+    knowledge.import_text(
+        "Review manipulation guardrail",
+        "不要用礼品诱导好评，也不要要求客户删除差评。",
+        source_type="user",
+        source_url="user://review-guardrail",
+        tags=["compliance"],
+        card_id="user.review_guardrail",
+    )
+    rows = knowledge.conflicts()
+    assert not any(
+        row["id"] == "user.review_guardrail" and row["reason_code"] == "directional_claim_overlap"
+        for row in rows
+    )
+
+
 
 def test_expanded_official_amazon_knowledge_base():
     required_ids = {
