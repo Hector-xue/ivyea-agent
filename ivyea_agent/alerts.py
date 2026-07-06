@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from . import action_queue, knowledge, profiles, shadow, traces
+from . import action_queue, knowledge, knowledge_governance, profiles, shadow, traces
 
 
 def _sev(rank: str) -> int:
@@ -62,6 +62,58 @@ def check(*, limit: int = 500) -> list[dict[str, Any]]:
             "code": "knowledge.no_user_cards",
             "message": "尚未导入用户知识卡。",
             "fix": "运行 `ivyea knowledge import ./note.md --id user.note` 沉淀你的打法。",
+        })
+
+    governance = knowledge_governance.dashboard()
+    gov = governance["summary"]
+    if gov["pending_reviews"]:
+        alerts.append({
+            "severity": "warn",
+            "code": "knowledge.review_backlog",
+            "message": f"官方来源有 {gov['pending_reviews']} 条变更等待审核。",
+            "fix": "运行 `ivyea knowledge changes --status pending`，再用 `knowledge review` 审核。",
+        })
+    if gov["approved_not_published"]:
+        alerts.append({
+            "severity": "info",
+            "code": "knowledge.approved_not_published",
+            "message": f"有 {gov['approved_not_published']} 条来源变更已批准，但尚未生成并确认知识更新。",
+            "fix": "根据快照生成 `knowledge plan` 草案，复核后再 `knowledge apply --confirm`。",
+        })
+    if gov["stale_cards"]:
+        alerts.append({
+            "severity": "warn",
+            "code": "knowledge.stale_cards",
+            "message": f"知识库有 {gov['stale_cards']} 张过期卡需要复核。",
+            "fix": "运行 `ivyea knowledge governance` 查看过期卡和对应官方来源。",
+        })
+    if gov["monitor_errors"]:
+        alerts.append({
+            "severity": "warn",
+            "code": "knowledge.monitor_errors",
+            "message": f"官方来源监控有 {gov['monitor_errors']} 个错误。",
+            "fix": "运行 `ivyea knowledge sync-status` 查看错误并重试对应来源。",
+        })
+    if gov["monitor_overdue"]:
+        alerts.append({
+            "severity": "warn",
+            "code": "knowledge.monitor_overdue",
+            "message": f"官方来源监控有 {gov['monitor_overdue']} 个来源超过计划周期。",
+            "fix": "运行 `ivyea knowledge sync` 或检查 knowledge_sync 计划任务。",
+        })
+    if gov["conflicts"]:
+        alerts.append({
+            "severity": "warn",
+            "code": "knowledge.conflicts",
+            "message": f"检测到 {gov['conflicts']} 条知识冲突或证据边界风险。",
+            "fix": "运行 `ivyea knowledge conflicts` 逐条复核。",
+        })
+    if gov["coverage_gaps"]:
+        alerts.append({
+            "severity": "info",
+            "code": "knowledge.coverage_gaps",
+            "message": f"关键知识域/站点矩阵仍有 {gov['coverage_gaps']} 个缺口。",
+            "fix": "运行 `ivyea knowledge coverage`，按风险和站点补充官方知识。",
         })
 
     profs = profiles.list_profiles()

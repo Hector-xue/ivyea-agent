@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import config, context, panels, progress_reporting, stream_json, task_scope, traces, ui
+from . import config, context, knowledge, panels, progress_reporting, stream_json, task_scope, traces, ui
 from .agent_tools import PARALLEL_SAFE, TOOL_SCHEMAS, ToolContext, ToolResult, dispatch_result
 from .providers import LLMProvider
 
@@ -28,6 +28,9 @@ MCP：用户接了 MCP 服务器时，用 mcp_list_tools/mcp_list_resources/mcp_
 规划与汇报：多步/复杂任务**动手前先用 todo_write 拆成可验证的小步**，再调用 progress_update(kind=start) 向用户说明目标、范围、阶段、完成标准和第一阶段准备做什么；这两项完成前不要调用实际工作工具。执行时同一时间恰好一个 in_progress。每阶段结束先 progress_update(kind=phase_end) 汇报做了什么、状态、证据、未完成和注意事项，再把 Todo 标 completed/blocked/skipped；下一阶段先更新 Todo，再 progress_update(kind=phase_start) 介绍准备做什么。全部结束后必须 progress_update(kind=final)，汇总已做到、未做到、验证和注意事项，再用一句简短正文收尾。单步、明确的小任务别过度汇报。UI/行为类改动，typecheck/编译/测试通过 ≠ 完成，必须在真实界面或运行环境复现目标场景确认后才算完成。
 澄清：当需求**歧义、有多种合理理解、或缺关键输入（ASIN/路径/目标/站点等）**时，先用一两个精准问题反问、停下等用户回答，**别靠假设硬做**；信息足够才进入执行。但简单明确的任务别来回追问。
 原则：先拿证据再动手；写操作一律经人工审批，绝不自作主张直接写；动作绑数据、简洁可执行；不要瞎编 ASIN/规格/数字。读文件优先用 read_file 看真实内容，不要假设；**大文件读某几行用 read_file 的 offset/limit，别用 run_command/python 分段读**（那会反复弹审批）。"""
+
+SYSTEM_PROMPT += """
+亚马逊知识可靠性：注册/身份验证、上架报错、店铺绩效、政策规则、费用、Listing、FBA、广告等事实性问题，优先使用本轮注入的知识证据；证据不足时调用 knowledge_search。凡采用知识证据支撑结论，必须在对应句末写 [K1] 这类引用键，且只能引用工具或上下文实际提供的键。回答末尾的完整来源清单由系统生成。始终区分“亚马逊官方事实”“账户数据推断”“运营经验/算法假设”；算法未被官方披露时不得包装成官方规则。规则可能因站点、类目、账户和时间不同，适用范围不明时必须说明并建议核对当前站点后台。"""
 
 PLAN_NOTE = ("\n\n[计划模式] 当前为只读计划模式：可以巡检/分析/提动作，但**不要调用 execute_actions 写入**。"
              "先给出清晰的行动计划，待用户 /approve 批准后再执行。")
@@ -73,6 +76,7 @@ class TurnStatus:
     behavioral_task: bool = False  # UI/输出/行为任务：测试之外还需要运行路径证据
     runtime_validated: bool = False
     behavior_gate_rounds: int = 0
+    citation_gate_rounds: int = 0
 
     def before_model_step(self, step_idx: int, narrate: Callable[[str], None]) -> None:
         remaining = self.max_steps - step_idx
@@ -354,6 +358,38 @@ def _progress_gate_feedback(ctx: ToolContext, narrate: Callable[[str], None]) ->
     return feedback
 
 
+def _citation_gate_feedback(ctx: ToolContext, content: str, status: TurnStatus,
+                            narrate: Callable[[str], None]) -> str | None:
+    citations = list(getattr(ctx, "knowledge_citations", []) or [])
+    if not citations:
+        return None
+    check = knowledge.validate_citations(content, citations)
+    if check["ok"] or status.citation_gate_rounds >= 2:
+        return None
+    status.citation_gate_rounds += 1
+    narrate(ui.message("warn", "亚马逊知识引用尚未通过校验，先绑定具体证据再收尾。"))
+    available = ", ".join(f"[{key}]" for key in check["available"])
+    invalid = ", ".join(f"[{key}]" for key in check["invalid"])
+    detail = f" 未知引用：{invalid}。" if invalid else ""
+    return (
+        f"[知识引用门禁] 本轮已检索到证据 {available}，但当前答案没有有效、完整地引用它们。{detail}"
+        "请重写最终答案：只在确实由摘录支持的事实句末标 [K#]；不得编造编号；"
+        "官方事实、账户观测、分析推断、运营假设要分开表达；归因销售不等于增量销售，账户现象不等于官方算法。"
+        "不要自行撰写来源清单，系统会生成。"
+    )
+
+
+def _finalize_citations(ctx: ToolContext, content: str) -> str:
+    citations = list(getattr(ctx, "knowledge_citations", []) or [])
+    if not citations:
+        return content
+    check = knowledge.validate_citations(content, citations)
+    rendered = knowledge.append_citation_footer(content, citations)
+    if check["ok"]:
+        return rendered
+    return rendered.rstrip() + "\n\n引用校验：知识已检索，但回答未完整绑定到有效引用，相关结论需人工复核。"
+
+
 def _maybe_compact(messages: list, provider, step_idx: int, narrate: Callable[[str], None]) -> None:
     """步边界上的轮内压缩守卫：此处 tool_call↔tool 已配对完整，整段替换安全。
     仅在估算 token 越过硬上限（防溢出）或开了自动压缩到软阈值时触发。"""
@@ -388,9 +424,13 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
             fb = _verify_gate_feedback(ctx, status, narrate)
             if fb is None:
                 fb = _progress_gate_feedback(ctx, narrate)
+            if fb is None:
+                fb = _citation_gate_feedback(ctx, content, status, narrate)
             if fb is not None:
                 messages.append({"role": "user", "content": fb})
                 continue
+            content = _finalize_citations(ctx, content)
+            messages[-1]["content"] = content
             return content
         _append_tool_call_msg(messages, msg.get("content"), tool_calls)
         _dispatch_tool_calls(ctx, messages, status, tool_calls, step_idx, max_steps, narrate)
@@ -439,9 +479,12 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
         printed_any = False
         buffered_text: list[str] = []
         defer_text = bool(
-            getattr(ctx, "progress_required", False)
-            and not getattr(ctx, "progress_final", {})
-            and not getattr(ctx, "plan_mode", False)
+            (
+                getattr(ctx, "progress_required", False)
+                and not getattr(ctx, "progress_final", {})
+                and not getattr(ctx, "plan_mode", False)
+            )
+            or bool(getattr(ctx, "knowledge_citations", []))
         )
         for ev in provider.stream_chat(messages, tools=tool_schemas):
             if cancel_check():
@@ -465,11 +508,15 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
             fb = _verify_gate_feedback(ctx, status, narrate)
             if fb is None:
                 fb = _progress_gate_feedback(ctx, narrate)
+            if fb is None:
+                fb = _citation_gate_feedback(ctx, content, status, narrate)
             if fb is not None:
                 messages.append({"role": "user", "content": fb})
                 continue
-            if defer_text and printed_any:
-                render("".join(buffered_text) or content)
+            content = _finalize_citations(ctx, content)
+            messages[-1]["content"] = content
+            if defer_text and content:
+                render(content)
                 render("\n")
             _emit_safe(emit, stream_json.assistant_event(
                 getattr(ctx, "session_id", ""), content, []))

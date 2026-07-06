@@ -63,6 +63,10 @@ class ToolContext:
     progress_phase_tool_evidence: dict[int, list[str]] = field(default_factory=dict)
     progress_attention: list[str] = field(default_factory=list)
     progress_last_event: dict[str, Any] = field(default_factory=dict)
+    knowledge_citations: list[dict[str, Any]] = field(default_factory=list)  # 本轮可用的 [K#] 证据
+    knowledge_retrieval_expected: bool = False                              # 命中亚马逊检索路由
+    knowledge_risk: str = "none"                                           # none/low/medium/high
+    knowledge_query: str = ""
 
 
 # OpenAI function-calling schema
@@ -367,7 +371,18 @@ def _t_remember(args: dict, ctx: ToolContext) -> str:
 
 
 def _t_knowledge_search(args: dict, ctx: ToolContext) -> str:
-    return knowledge.render_search(args.get("query", ""), limit=int(args.get("limit") or 5))
+    query = str(args.get("query") or "")
+    evidence = knowledge.evidence_context(query, limit=int(args.get("limit") or 5))
+    merged, text = knowledge.merge_citations(
+        list(ctx.knowledge_citations or []),
+        list(evidence.get("citations") or []),
+        str(evidence.get("text") or ""),
+    )
+    ctx.knowledge_citations = merged
+    ctx.knowledge_retrieval_expected = bool(evidence.get("should_retrieve"))
+    ctx.knowledge_risk = str(evidence.get("risk") or "none")
+    ctx.knowledge_query = query
+    return text or "（该问题未触发亚马逊知识检索）"
 
 
 def _t_skill_search(args: dict, ctx: ToolContext) -> str:

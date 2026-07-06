@@ -206,6 +206,9 @@ def test_service_health_shape_without_socket(ivyea_home):
     assert manifest["security"]["secrets_in_responses"] is False
     assert manifest["capabilities"]["chat"] is True
     assert manifest["capabilities"]["knowledge_management"] is True
+    assert manifest["capabilities"]["official_source_monitoring"] is True
+    assert manifest["capabilities"]["answer_citations"] is True
+    assert manifest["capabilities"]["authorized_account_evidence"] is True
     assert manifest["capabilities"]["workspace_understanding"] is True
     assert manifest["capabilities"]["code_agent"] is True
     assert manifest["capabilities"]["mcp_stdio_server"] is True
@@ -233,6 +236,13 @@ def test_service_health_shape_without_socket(ivyea_home):
     assert any(e["path"] == "/v1/knowledge/upload" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/knowledge/uploads/apply" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/knowledge/watchlist" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/knowledge/official-sources" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/knowledge/changes" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/knowledge/sync" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/knowledge/evidence" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/knowledge/evidence/schema" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/knowledge/evidence/draft" for e in manifest["endpoints"])
+    assert any(e["path"] == "/v1/knowledge/evidence/apply" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/knowledge/update/draft" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/knowledge/update/apply" for e in manifest["endpoints"])
     assert any(e["path"] == "/v1/knowledge/audit" for e in manifest["endpoints"])
@@ -273,6 +283,13 @@ def test_service_health_shape_without_socket(ivyea_home):
     assert "/v1/skills/search" in spec["paths"]
     assert "/v1/knowledge/audit" in spec["paths"]
     assert "/v1/knowledge/sources" in spec["paths"]
+    assert "/v1/knowledge/official-sources" in spec["paths"]
+    assert "/v1/knowledge/changes" in spec["paths"]
+    assert "/v1/knowledge/sync" in spec["paths"]
+    assert "/v1/knowledge/evidence" in spec["paths"]
+    assert "/v1/knowledge/evidence/schema" in spec["paths"]
+    assert "/v1/knowledge/evidence/draft" in spec["paths"]
+    assert "/v1/knowledge/evidence/apply" in spec["paths"]
     assert "/v1/knowledge/import-directory" in spec["paths"]
     assert "/v1/knowledge/rebuild" in spec["paths"]
     assert "/v1/workspace/index" in spec["paths"]
@@ -376,7 +393,7 @@ def test_service_system_helpers(ivyea_home):
     assert "logs" in svc_logs
 
 
-def test_service_skill_and_knowledge_helpers(ivyea_home):
+def test_service_skill_and_knowledge_helpers(ivyea_home, monkeypatch):
     from ivyea_agent import service
 
     sks = service.skill_list(limit=20)
@@ -421,6 +438,40 @@ def test_service_skill_and_knowledge_helpers(ivyea_home):
     assert watchlist["ok"] is True
     assert watchlist["summary"]["official_sources"] >= 1
     assert any(row["id"] == "zhiwubuyan" and row["review_required"] for row in watchlist["sources"])
+
+    official = service.knowledge_official_sources()
+    assert official["ok"] is True
+    assert official["summary"]["public_monitorable"] >= 10
+    assert service.knowledge_changes()["ok"] is True
+    monkeypatch.setattr(service.knowledge_sync, "sync", lambda **kwargs: {
+        "ok": True, "summary": {"unchanged": 1}, "results": [], "publication": "review_required_before_import",
+    })
+    synced = service.knowledge_sync_run({"force": True, "source_ids": "sp_api.llms_index"})
+    assert synced["ok"] is True
+    assert synced["publication"] == "review_required_before_import"
+
+    evidence_payload = {
+        "authorized": True,
+        "rights_confirmed": True,
+        "kind": "registration_notice",
+        "marketplace": "JP",
+        "source_url": "https://sellercentral.amazon.co.jp/performance/dashboard",
+        "account_id": "PRIVATE-ACCOUNT",
+        "case_id": "CASE-998877",
+        "registration_stage": "identity_verification",
+        "document_request": "government ID and recent statement",
+        "exact_message": "Additional identity information is required.",
+        "content": "Email: private@example.com\nPassport number: P99887766",
+    }
+    evidence_draft = service.knowledge_evidence_draft(evidence_payload)
+    assert evidence_draft["ok"] is True
+    assert evidence_draft["raw_preserved"] is False
+    assert "private@example.com" not in str(evidence_draft)
+    blocked_evidence = service.knowledge_evidence_apply({**evidence_payload, "confirm": False, "rebuild": False})
+    assert blocked_evidence["ok"] is False
+    applied_evidence = service.knowledge_evidence_apply({**evidence_payload, "confirm": True, "rebuild": False})
+    assert applied_evidence["ok"] is True
+    assert service.knowledge_evidence_list()["summary"]["raw_documents_preserved"] == 0
 
     draft = service.knowledge_update_draft({
         "id": "user.service-update",
@@ -507,7 +558,7 @@ class _ServiceChatProvider:
         self.calls += 1
         assert messages[-1]["role"] == "user"
         assert "Ivyea 本地知识检索" in messages[-1]["content"]
-        return {"role": "assistant", "content": "只读分析完成", "tool_calls": []}
+        return {"role": "assistant", "content": "只读分析完成。[K1]", "tool_calls": []}
 
 
 class _ServiceToolProvider:
@@ -522,7 +573,7 @@ class _ServiceToolProvider:
                 "content": "",
                 "tool_calls": [{"id": "c1", "name": "knowledge_search", "arguments": {"query": "否词", "limit": 1}}],
             }
-        return {"role": "assistant", "content": "已结合知识库回答", "tool_calls": []}
+        return {"role": "assistant", "content": "已结合知识库回答。[K1]", "tool_calls": []}
 
 
 class _ServiceSessionProvider:
@@ -576,7 +627,8 @@ def test_service_chat_run_with_fake_provider(ivyea_home):
 
     assert result["ok"] is True
     assert result["read_only"] is True
-    assert result["text"] == "只读分析完成"
+    assert result["text"].startswith("只读分析完成。[K1]")
+    assert "引用知识：" in result["text"]
     assert result["messages"][-1]["role"] == "assistant"
     assert result["session_id"]
 
@@ -587,7 +639,8 @@ def test_service_chat_run_with_tool_event(ivyea_home):
     result = service.chat_run({"message": "否词规则", "max_steps": 3}, provider=_ServiceToolProvider())
 
     assert result["ok"] is True
-    assert result["text"] == "已结合知识库回答"
+    assert result["text"].startswith("已结合知识库回答。[K1]")
+    assert "引用知识：" in result["text"]
     assert any("查知识库" in e["text"] for e in result["events"])   # 工具行友好动词
     assert any(m["role"] == "tool" for m in result["messages"])
 
@@ -891,6 +944,35 @@ def test_local_service_health_and_retrieval(ivyea_home, monkeypatch):
             watchlist = json.loads(resp.read().decode("utf-8"))
         assert watchlist["ok"] is True
         assert watchlist["summary"]["official_sources"] >= 1
+
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/knowledge/official-sources", timeout=5) as resp:
+            official_sources = json.loads(resp.read().decode("utf-8"))
+        assert official_sources["ok"] is True
+        assert official_sources["summary"]["public_monitorable"] >= 10
+
+        with urllib.request.urlopen(f"http://{host}:{port}/v1/knowledge/evidence", timeout=5) as resp:
+            evidence_rows = json.loads(resp.read().decode("utf-8"))
+        assert evidence_rows["ok"] is True
+        assert evidence_rows["summary"]["raw_documents_preserved"] == 0
+
+        req = urllib.request.Request(
+            f"http://{host}:{port}/v1/knowledge/evidence/draft",
+            data=json.dumps({
+                "authorized": True,
+                "rights_confirmed": True,
+                "kind": "support_case",
+                "marketplace": "US",
+                "source_url": "https://sellercentral.amazon.com/performance/dashboard",
+                "exact_message": "Please provide additional evidence.",
+                "content": "Contact: http-evidence@example.com",
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            evidence_draft = json.loads(resp.read().decode("utf-8"))
+        assert evidence_draft["ok"] is True
+        assert "http-evidence@example.com" not in json.dumps(evidence_draft)
 
         req = urllib.request.Request(
             f"http://{host}:{port}/v1/knowledge/update/draft",

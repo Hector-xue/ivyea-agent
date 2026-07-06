@@ -1,0 +1,55 @@
+{
+  "version": "2026.07",
+  "retrieved_at": "2026-07-06",
+  "policy": {
+    "official_facts": "Only claims directly supported by current Amazon Ads public documentation.",
+    "account_observation": "Metrics and messages from an authorized advertiser account, scoped to that profile, marketplace, product, report, and date range.",
+    "inference": "A reproducible interpretation of account evidence; never relabeled as an official Amazon algorithm rule.",
+    "dynamic_fields": "Report type IDs, columns, lookback windows, eligibility, and marketplace availability must be checked against the live console or developer portal before automation."
+  },
+  "products": [
+    {
+      "id": "sponsored_products",
+      "billing": "cost_per_click",
+      "public_scope": ["individual product promotion", "Amazon placements", "select premium publishers"],
+      "report_evidence": ["search term", "targeting", "advertised product", "placement", "campaign"],
+      "boundary": "Availability, columns, lookback, and attribution settings can vary by account, marketplace, and interface version."
+    },
+    {
+      "id": "sponsored_brands",
+      "billing": "product_and_format_dependent",
+      "public_scope": ["brand and product discovery"],
+      "report_evidence": ["downloadable account reports where eligible"],
+      "boundary": "Do not reuse Sponsored Products sales scope, placement groups, or attribution assumptions."
+    },
+    {
+      "id": "sponsored_display",
+      "billing": "campaign_and_optimization_dependent",
+      "public_scope": ["display advertising"],
+      "report_evidence": ["downloadable account reports where eligible"],
+      "boundary": "Audience, view-through, click-through, and attribution semantics require the product-specific live definition."
+    },
+    {
+      "id": "amazon_attribution",
+      "billing": "measurement_product",
+      "public_scope": ["measurement of non-Amazon marketing channels"],
+      "report_evidence": ["attribution campaigns and tags"],
+      "boundary": "Amazon Attribution is not the same attribution contract as Sponsored Ads reporting."
+    },
+    {
+      "id": "amazon_ads_api",
+      "billing": "no_additional_api_fee",
+      "public_scope": ["programmatic campaign management", "programmatic reporting"],
+      "report_evidence": ["API reports after application and approval"],
+      "boundary": "Authentication, profiles, report schemas, versions, and availability must be validated in the current developer portal."
+    }
+  ],
+  "sources": [
+    "https://advertising.amazon.com/solutions/products/sponsored-products",
+    "https://advertising.amazon.com/help/GBYSPTSLR337JMLH",
+    "https://advertising.amazon.com/help/G3HEFZYWZF84NPS9",
+    "https://advertising.amazon.com/help/G89VFUTQUWFFN2VU",
+    "https://advertising.amazon.com/about-api",
+    "https://advertising.amazon.com/library/guides/basics-of-amazon-attribution"
+  ]
+}

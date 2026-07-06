@@ -9,10 +9,10 @@ import json
 import time
 from typing import Any
 
-from . import alerts, config, evals, notify, weekly_review
+from . import alerts, config, evals, knowledge_quality, knowledge_sync, notify, weekly_review
 
 SCHEDULE_FILE = config.IVYEA_DIR / "schedule.json"
-ALLOWED_TASKS = {"alert", "weekly", "eval"}
+ALLOWED_TASKS = {"alert", "weekly", "eval", "knowledge_quality", "knowledge_sync"}
 
 
 def _empty() -> dict[str, Any]:
@@ -93,6 +93,15 @@ def run_task(task: str, args: dict[str, Any] | None = None) -> tuple[bool, str]:
     if task == "eval":
         result = evals.run()
         return bool(result["ok"]), evals.render(result)
+    if task == "knowledge_sync":
+        result = knowledge_sync.sync(
+            force=bool(args.get("force", False)),
+            source_ids=[str(v) for v in args.get("source_ids") or []],
+        )
+        return bool(result["ok"]), knowledge_sync.render_sync(result)
+    if task == "knowledge_quality":
+        result = knowledge_quality.run()
+        return bool(result["ok"]), knowledge_quality.render(result)
     return False, f"未知任务：{task}"
 
 

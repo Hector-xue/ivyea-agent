@@ -69,12 +69,48 @@ def search(query: str, *, limit: int = 8, sources: list[str] | tuple[str, ...] |
 
     hits = _dedupe_hits(hits)
     hits.sort(key=lambda h: (-float(h.get("score") or 0), h.get("source", ""), h.get("id", "")))
+    selected = _preserve_source_diversity(hits, lim, wanted)
     return {
         "query": q,
         "mode": RETRIEVAL_MODE,
-        "hits": hits[:lim],
+        "hits": selected,
         "capabilities": capabilities(),
     }
+
+
+def _source_family(hit: dict[str, Any]) -> str:
+    source = str(hit.get("source") or "")
+    if source.startswith("knowledge"):
+        return "knowledge"
+    if source.startswith("memory"):
+        return "memory"
+    return source
+
+
+def _preserve_source_diversity(
+    hits: list[dict[str, Any]], limit: int, wanted: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Keep one relevant result from each requested local source when available."""
+    selected = list(hits[:limit])
+    if limit < 2:
+        return selected
+    for source in wanted:
+        if any(_source_family(hit) == source for hit in selected):
+            continue
+        candidate = next((hit for hit in hits[limit:] if _source_family(hit) == source), None)
+        if candidate is None:
+            continue
+        counts: dict[str, int] = {}
+        for hit in selected:
+            family = _source_family(hit)
+            counts[family] = counts.get(family, 0) + 1
+        replace_at = next(
+            (idx for idx in range(len(selected) - 1, -1, -1) if counts.get(_source_family(selected[idx]), 0) > 1),
+            len(selected) - 1,
+        )
+        selected[replace_at] = candidate
+    selected.sort(key=lambda h: (-float(h.get("score") or 0), h.get("source", ""), h.get("id", "")))
+    return selected
 
 
 def index_status() -> dict[str, Any]:

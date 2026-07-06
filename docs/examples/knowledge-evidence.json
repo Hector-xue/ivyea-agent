@@ -1,0 +1,17 @@
+{
+  "authorized": true,
+  "rights_confirmed": true,
+  "kind": "listing_issue",
+  "marketplace": "US",
+  "locale": "en-US",
+  "title": "Listing issue example",
+  "source_url": "https://sellercentral.amazon.com/performance/dashboard",
+  "account_id": "REPLACE_WITH_ACCOUNT_ID",
+  "case_id": "REPLACE_WITH_CASE_ID",
+  "error_code": "90220",
+  "exact_message": "REPLACE_WITH_EXACT_MESSAGE",
+  "asin": "B0EXAMPLE1",
+  "sku": "REPLACE_WITH_SKU",
+  "product_type": "REPLACE_WITH_PRODUCT_TYPE",
+  "content": "Paste authorized text only. Do not attach identity-document images or raw bank files."
+}

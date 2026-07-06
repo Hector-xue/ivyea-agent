@@ -1,0 +1,22 @@
+{
+  "kind": "advertising_report",
+  "marketplace": "US",
+  "ad_product": "sponsored_products",
+  "report_type": "search term report",
+  "currency": "USD",
+  "time_zone": "America/Los_Angeles",
+  "time_unit": "summary",
+  "attribution_window": "REPLACE_WITH_ACCOUNT_REPORT_DEFINITION",
+  "attribution_model": "REPLACE_WITH_ACCOUNT_REPORT_DEFINITION",
+  "sales_scope": "REPLACE_WITH_REPORT_SALES_SCOPE",
+  "window_start": "2026-06-01",
+  "window_end": "2026-06-07",
+  "metrics": {
+    "impressions": 1000,
+    "clicks": 50,
+    "spend": 25,
+    "attributed_orders": 5,
+    "attributed_sales": 100,
+    "attributed_units": 6
+  }
+}

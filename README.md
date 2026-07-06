@@ -268,13 +268,33 @@ ivyea skill create general.release_check --title "..." --trigger release --tool 
 
 内置 Amazon Skill：搜索词优化、否词误伤防护、预算节奏、Listing 转化审计、新品期打法、周度复盘。用户 skill 放 `~/.ivyea/skills/<domain>/<name>/`（`skill.json` + `SKILL.md`）即被发现，可覆盖内置。
 
-知识库支持来源登记、时效 / 许可审计、冲突检查、diff 草案确认写入：
+知识库支持风险路由、回答内 `[K#]` 引用、来源登记、时效 / 许可审计、冲突检查，以及 diff 草案确认写入。公开官方源只做增量监控并进入审核队列；Seller Central 登录后内容只能通过授权导出导入，不绕过登录：
 
 ```bash
 ivyea knowledge audit / sources / watchlist / conflicts
+ivyea knowledge official-sources                         # 官方来源、权威层级、站点和更新策略
+ivyea knowledge sync --force                            # 检查公开官方源；不自动发布
+ivyea knowledge changes                                 # 查看待审核变更
+ivyea knowledge review <event-id> --decision approved --confirm # 只批准进入导入草案，不自动发布
+ivyea knowledge review-history [event-id]               # 不可变审核历史
+ivyea knowledge versions [user.card-id]                  # 用户知识不可变版本账本
+ivyea knowledge rollback user.card-id --id kv-... --confirm # 回滚后生成新版本并重建索引
+ivyea knowledge governance                              # 审核/时效/覆盖/冲突总看板
+ivyea knowledge coverage                                # 关键知识域 × marketplace 缺口
+ivyea knowledge freshness                               # 知识卡与来源监控时效
+ivyea knowledge quality                                 # 运行数据化持续评测集
+ivyea knowledge evidence-schema                         # 授权账户证据 JSON Schema
+ivyea knowledge evidence-plan docs/examples/knowledge-evidence.json
+ivyea knowledge evidence-apply ./evidence.json --confirm # 专项脱敏、确认后入库；不保存原始文件
+ivyea knowledge ads-capabilities                       # 广告产品/报表/归因能力与动态边界
+ivyea knowledge ads-analyze docs/examples/amazon-ads-report.json
+ivyea knowledge ads-analyze docs/examples/amazon-traffic-experiment.json
 ivyea knowledge plan ./note.md --id user.my-playbook --source-url https://...   # 生成 diff 草案，不写入
 ivyea knowledge apply ./note.md --id user.my-playbook --confirm                 # 确认后写入并重建索引
+ivyea schedule set knowledge-quality knowledge_quality --every-hours 24
 ```
+
+广告分析只计算有明确定义的 CTR/CPC/CVR/ACoS/ROAS；零分母返回空值。报表必须保留产品、类型、窗口、时区、币种、归因和销售范围，流量实验会检查变更隔离、窗口可比性和混杂因素，并始终阻断“账户现象＝官方算法”。完整路线见 [Amazon 专业知识库推进方案](docs/Amazon专业知识库推进方案.md)。
 
 ---
 
@@ -308,6 +328,7 @@ ivyea chat -p "..." --permission-mode policy                          # 按 ~/.i
 ```bash
 ivyea alert check --notify --channel feishu     # 队列积压 / 失败 / 画像缺失等预警
 ivyea schedule set weekly-review weekly --every-hours 168
+ivyea schedule set amazon-updates knowledge_sync --every-hours 6
 ```
 
 ---

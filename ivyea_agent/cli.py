@@ -1921,7 +1921,14 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         scope_note = task_scope.prepare_query(ctx, line, messages, base=os.getcwd())
         ectx = engineering_context.build(ctx.workspace or os.getcwd(), line)
         _inject = bool(getattr(ctx, "asin", "")) or _is_amazon_domain(line) or not _looks_like_code_task(line)
-        kctx, kids = knowledge.context_for_query(line, limit=3) if _inject else ("", [])
+        kev = knowledge.evidence_context(line, limit=4) if _inject else {
+            "text": "", "ids": [], "citations": [], "should_retrieve": False, "risk": "none",
+        }
+        kctx, kids = str(kev.get("text") or ""), list(kev.get("ids") or [])
+        ctx.knowledge_citations = list(kev.get("citations") or [])
+        ctx.knowledge_retrieval_expected = bool(kev.get("should_retrieve"))
+        ctx.knowledge_risk = str(kev.get("risk") or "none")
+        ctx.knowledge_query = line
         sctx, sids = skills.context_for_query(line, limit=2) if _inject else ("", [])
         from . import mentions as _mentions        # @文件引用：把 @path 文本文件内联给模型
         user_content, _mention_imgs = _mentions.expand(line, os.getcwd(), with_images=True)
@@ -1941,7 +1948,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             narrate(ui.message("muted", "已注入 skill: " + ", ".join(sids)))
         if kctx:
             user_content += ("\n\n[Ivyea 内置亚马逊知识库：本轮相关摘录]\n" + kctx
-                             + "\n\n要求：使用这些知识时说明依据，若与用户账户记忆冲突，以用户账户记忆为准。")
+                             + "\n\n要求：采用摘录时在对应事实句末引用 [K#]；区分官方事实、账户观测、分析推断和运营假设。"
+                             + "广告归因销售不等于增量销售，账户现象不等于官方算法。"
+                               "若与用户账户事实冲突，以账户事实为准并指出冲突；不得把账户事实改写成通用规则。")
             narrate(ui.message("muted", "已注入知识卡: " + ", ".join(kids)))
         import time as _tt
         ctx.turn_id = _tt.strftime("%Y%m%d-%H%M%S")
@@ -2088,7 +2097,14 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 bool(getattr(ctx, "asin", "")) or _is_amazon_domain(line)
                 or not _looks_like_code_task(line)
             )
-            kctx, kids = knowledge.context_for_query(line, limit=3) if _inject_domain else ("", [])
+            kev = knowledge.evidence_context(line, limit=4) if _inject_domain else {
+                "text": "", "ids": [], "citations": [], "should_retrieve": False, "risk": "none",
+            }
+            kctx, kids = str(kev.get("text") or ""), list(kev.get("ids") or [])
+            ctx.knowledge_citations = list(kev.get("citations") or [])
+            ctx.knowledge_retrieval_expected = bool(kev.get("should_retrieve"))
+            ctx.knowledge_risk = str(kev.get("risk") or "none")
+            ctx.knowledge_query = line
             sctx, sids = skills.context_for_query(line, limit=2) if _inject_domain else ("", [])
             from . import mentions as _mentions        # @文件引用：把 @path 文本文件内联给模型
             user_content, _mention_imgs = _mentions.expand(line, os.getcwd(), with_images=True)
@@ -2111,7 +2127,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             if kctx:
                 user_content += ("\n\n[Ivyea 内置亚马逊知识库：本轮相关摘录]\n"
                                  + kctx
-                                 + "\n\n要求：使用这些知识时说明依据，若与用户账户记忆冲突，以用户账户记忆为准。")
+                                 + "\n\n要求：采用摘录时在对应事实句末引用 [K#]；区分官方事实、账户观测、分析推断和运营假设。"
+                                 + "广告归因销售不等于增量销售，账户现象不等于官方算法。"
+                                   "若与用户账户事实冲突，以账户事实为准并指出冲突；不得把账户事实改写成通用规则。")
                 print(ui.message("muted", "已注入知识卡: " + ", ".join(kids)))
             import time as _turn_time
             ctx.turn_id = _turn_time.strftime("%Y%m%d-%H%M%S")
@@ -2248,7 +2266,9 @@ def _cmd_memory(args: argparse.Namespace) -> int:
 
 
 def _cmd_knowledge(args: argparse.Namespace) -> int:
-    from . import knowledge
+    from . import (
+        ads_evidence, knowledge, knowledge_evidence, knowledge_governance, knowledge_quality, knowledge_sync,
+    )
 
     if args.action == "list":
         for card in knowledge.list_cards():
@@ -2265,6 +2285,117 @@ def _cmd_knowledge(args: argparse.Namespace) -> int:
     if args.action == "watchlist":
         print(knowledge.render_source_watchlist())
         return 0
+    if args.action == "official-sources":
+        print(knowledge_sync.render_registry())
+        return 0
+    if args.action == "sync-status":
+        print(json.dumps(knowledge_sync.status(), ensure_ascii=False, indent=2))
+        return 0
+    if args.action == "changes":
+        try:
+            print(knowledge_sync.render_changes(limit=args.limit, review_status=args.status or ""))
+            return 0
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+    if args.action == "review":
+        if not args.query or not args.decision:
+            print("用法: ivyea knowledge review <event-id> --decision approved|rejected|superseded --confirm", file=sys.stderr)
+            return 2
+        try:
+            result = knowledge_sync.review_change(
+                args.query, args.decision, reviewer=args.reviewer or "local-operator",
+                reviewer_source="local_cli", identity_verified=True,
+                note=args.note or "", confirm=bool(args.confirm),
+            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(knowledge_sync.render_review(result))
+        return 0 if result.get("ok") else 2
+    if args.action == "review-history":
+        print(knowledge_sync.render_review_history(limit=args.limit, event_id=args.query or ""))
+        return 0
+    if args.action == "versions":
+        print(json.dumps(knowledge.list_versions(args.query or "", limit=args.limit), ensure_ascii=False, indent=2))
+        return 0
+    if args.action == "rollback":
+        if not args.query or not args.id:
+            print("用法: ivyea knowledge rollback <card-id> --id <version-id> --confirm", file=sys.stderr)
+            return 2
+        try:
+            result = knowledge.rollback_version(
+                args.query, args.id, confirm=bool(args.confirm),
+                rebuild_indexes=not bool(args.no_rebuild),
+                actor=args.reviewer or "local-operator", actor_source="local_cli",
+            )
+        except (ValueError, OSError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("ok") else 2
+    if args.action == "governance":
+        print(knowledge_governance.render_dashboard())
+        return 0
+    if args.action == "coverage":
+        print(knowledge_governance.render_coverage())
+        return 0
+    if args.action == "freshness":
+        print(knowledge_governance.render_freshness())
+        return 0
+    if args.action == "quality":
+        result = knowledge_quality.run()
+        print(knowledge_quality.render(result))
+        return 0 if result.get("ok") else 1
+    if args.action == "sync":
+        source_ids = [part.strip() for part in str(args.query or "").split(",") if part.strip()]
+        try:
+            result = knowledge_sync.sync(force=bool(args.force), source_ids=source_ids)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(knowledge_sync.render_sync(result))
+        return 0 if result.get("ok") else 1
+    if args.action == "evidence-list":
+        print(knowledge_evidence.render_list(limit=args.limit))
+        return 0
+    if args.action == "evidence-schema":
+        print(json.dumps(knowledge_evidence.schema(), ensure_ascii=False, indent=2))
+        return 0
+    if args.action == "ads-capabilities":
+        print(json.dumps(ads_evidence.capability_matrix(), ensure_ascii=False, indent=2))
+        return 0
+    if args.action == "ads-analyze":
+        if not args.query:
+            print("用法: ivyea knowledge ads-analyze <广告报表或实验JSON路径>", file=sys.stderr)
+            return 2
+        try:
+            payload = json.loads(Path(args.query).expanduser().read_text(encoding="utf-8"))
+            result = ads_evidence.analyze(payload)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(ads_evidence.render_analysis(result))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("ready_for_analysis") else 2
+    if args.action in {"evidence-plan", "evidence-apply"}:
+        if not args.query:
+            print(f"用法: ivyea knowledge {args.action} <证据JSON路径>", file=sys.stderr)
+            return 2
+        try:
+            payload = json.loads(Path(args.query).expanduser().read_text(encoding="utf-8"))
+            prepared = knowledge_evidence.prepare(payload)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        if args.action == "evidence-plan":
+            print(knowledge_evidence.render_prepared(prepared))
+            return 0
+        result = knowledge_evidence.apply(
+            prepared, confirm=bool(args.confirm), rebuild_indexes=not bool(args.no_rebuild),
+        )
+        print(knowledge_evidence.render_apply(result))
+        return 0 if result.get("ok") else 2
     if args.action == "plan":
         if not args.query:
             print("用法: ivyea knowledge plan <本地Markdown/TXT路径>", file=sys.stderr)
@@ -2868,7 +2999,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         return 0
     if args.action == "set":
         if not args.name or not args.task:
-            print("用法: ivyea schedule set <名称> <alert|weekly|eval> --every-hours 24", file=sys.stderr)
+            print("用法: ivyea schedule set <名称> <alert|weekly|eval|knowledge_sync|knowledge_quality> --every-hours 24", file=sys.stderr)
             return 2
         try:
             task_args = {}
@@ -2880,6 +3011,8 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
                     "title": args.title or "",
                     "limit": args.limit,
                 }
+            elif args.task == "knowledge_sync":
+                task_args = {"force": bool(args.force)}
             elif args.limit != 500:
                 task_args = {"limit": args.limit}
             job = schedule.set_job(args.name, args.task, every_hours=args.every_hours, args=task_args)
@@ -2908,7 +3041,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     if args.action == "run":
         task = args.task or args.name
         if not task:
-            print("用法: ivyea schedule run <alert|weekly|eval>", file=sys.stderr)
+            print("用法: ivyea schedule run <alert|weekly|eval|knowledge_sync|knowledge_quality>", file=sys.stderr)
             return 2
         task_args = {}
         if args.notify:
@@ -2919,6 +3052,8 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
                 "title": args.title or "",
                 "limit": args.limit,
             }
+        elif task == "knowledge_sync":
+            task_args = {"force": bool(args.force)}
         elif args.limit != 500:
             task_args = {"limit": args.limit}
         ok, text = schedule.run_task(task, task_args)
@@ -3414,13 +3549,14 @@ def build_parser() -> argparse.ArgumentParser:
     psch = sub.add_parser("schedule", help="本地计划任务：list/set/remove/run-due/run")
     psch.add_argument("action", choices=["list", "set", "remove", "run-due", "run"])
     psch.add_argument("name", nargs="?", help="set/remove 的计划名称")
-    psch.add_argument("task", nargs="?", help="set/run 的任务：alert/weekly/eval")
+    psch.add_argument("task", nargs="?", help="set/run 的任务：alert/weekly/eval/knowledge_sync/knowledge_quality")
     psch.add_argument("--every-hours", type=float, default=24.0)
     psch.add_argument("--limit", type=int, default=500)
     psch.add_argument("--notify", action="store_true", help="alert 任务完成后发送通知")
     psch.add_argument("--channel", choices=["stdout", "webhook", "feishu"], default="stdout")
     psch.add_argument("--webhook-url", help="覆盖 settings/env 中的 webhook URL")
     psch.add_argument("--title", help="通知标题")
+    psch.add_argument("--force", action="store_true", help="knowledge_sync 时忽略来源检查周期")
     psch.set_defaults(func=_cmd_schedule)
 
     ppol = sub.add_parser("policy", help="本地安全策略：show/init/check-path/check-command/explain-command")
@@ -3594,10 +3730,15 @@ def build_parser() -> argparse.ArgumentParser:
     pret.add_argument("--json", action="store_true", help="输出 JSON，便于 IvyeaOps/脚本消费")
     pret.set_defaults(func=_cmd_retrieval)
 
-    pk = sub.add_parser("knowledge", help="亚马逊知识库：list/search/show/audit/sources/watchlist/plan/apply/import/url/rebuild/index/conflicts")
+    pk = sub.add_parser("knowledge", help="亚马逊知识库：检索、来源审计、官方源同步、审核导入")
     pk.add_argument("action", choices=[
-        "list", "search", "show", "audit", "sources", "watchlist", "plan", "apply",
-        "import", "url", "rebuild", "index", "conflicts",
+        "list", "search", "show", "audit", "sources", "watchlist", "official-sources",
+        "sync", "sync-status", "changes", "review", "review-history", "governance", "coverage", "freshness", "quality",
+        "versions", "rollback",
+        "evidence-list", "evidence-schema", "evidence-plan", "evidence-apply",
+        "ads-capabilities", "ads-analyze",
+        "plan", "apply", "import", "url", "rebuild",
+        "index", "conflicts",
     ])
     pk.add_argument("query", nargs="?")
     pk.add_argument("--limit", type=int, default=5)
@@ -3610,6 +3751,11 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--tags", help="标签，逗号分隔")
     pk.add_argument("--confirm", action="store_true", help="确认应用 knowledge apply 生成的知识更新")
     pk.add_argument("--no-rebuild", action="store_true", help="应用知识更新后不自动重建知识/检索索引")
+    pk.add_argument("--force", action="store_true", help="sync 时忽略各来源检查周期，立即检查")
+    pk.add_argument("--status", choices=["pending", "approved", "rejected", "superseded"], help="筛选变更审核状态")
+    pk.add_argument("--decision", choices=["approved", "rejected", "superseded"], help="变更审核决定")
+    pk.add_argument("--reviewer", help="本地审核人标识")
+    pk.add_argument("--note", help="审核备注")
     pk.set_defaults(func=_cmd_knowledge)
 
     pski = sub.add_parser("skill", help="可复用 Skill：list/search/show/run/create/audit/status/export-lock")

@@ -1,0 +1,27 @@
+{
+  "kind": "traffic_experiment",
+  "marketplace": "US",
+  "ad_product": "sponsored_products",
+  "report_type": "placement report",
+  "currency": "USD",
+  "time_zone": "America/Los_Angeles",
+  "attribution_window": "REPLACE_WITH_ACCOUNT_REPORT_DEFINITION",
+  "attribution_model": "REPLACE_WITH_ACCOUNT_REPORT_DEFINITION",
+  "sales_scope": "REPLACE_WITH_REPORT_SALES_SCOPE",
+  "hypothesis": "Increasing the top-of-search adjustment increases qualified traffic.",
+  "changed_factors": ["top-of-search placement adjustment"],
+  "baseline": {
+    "window_start": "2026-06-01",
+    "window_end": "2026-06-07",
+    "metrics": {"impressions": 1000, "clicks": 50, "spend": 25, "attributed_orders": 5, "attributed_sales": 100}
+  },
+  "evaluation": {
+    "window_start": "2026-06-08",
+    "window_end": "2026-06-14",
+    "metrics": {"impressions": 1100, "clicks": 60, "spend": 32, "attributed_orders": 6, "attributed_sales": 120}
+  },
+  "confounders": ["inventory stable", "price stable", "no listing edit", "no coupon change"],
+  "control_group": "REPLACE_WITH_CONTROL_IF_AVAILABLE",
+  "randomized": false,
+  "data_mature": true
+}

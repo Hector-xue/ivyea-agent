@@ -46,6 +46,137 @@ def test_context_for_query_compact():
     assert "confidence=" in text and "freshness=" in text
 
 
+def test_professional_retrieval_routes_high_risk_and_cites_official_cards():
+    registration = knowledge.evidence_context("亚马逊卖家注册身份验证失败怎么办", limit=3)
+    assert registration["should_retrieve"] is True
+    assert registration["risk"] == "high"
+    assert registration["citations"][0]["id"] == "seller_registration.registration_and_identity_verification"
+    assert registration["citations"][0]["authority_tier"] == "primary"
+    assert "[K1]" in registration["text"]
+    assert registration["citations"][0]["url"].startswith("https://sell.amazon.com/")
+
+    listing = knowledge.evidence_context("上架报错 90220", limit=3)
+    assert listing["citations"][0]["id"] == "seller_central.listings_items_error_diagnostics"
+
+    assert knowledge.retrieval_decision("你好，帮我写 Python")["should_retrieve"] is False
+
+
+def test_citation_validation_and_footer_only_lists_used_sources():
+    evidence = knowledge.evidence_context("上架报错 90220", limit=2)
+    citations = evidence["citations"]
+    check = knowledge.validate_citations("缺少属性时先核对 schema。[K1]", citations)
+    assert check["ok"] is True
+    assert check["valid"] == ["K1"]
+    assert knowledge.validate_citations("错误引用。[K99]", citations)["invalid"] == ["K99"]
+
+    rendered = knowledge.append_citation_footer("先核对 schema。[K1]", citations)
+    assert "引用知识：" in rendered
+    assert citations[0]["url"] in rendered
+    if len(citations) > 1:
+        assert citations[1]["url"] not in rendered
+
+
+def test_bundled_cards_have_source_urls_after_governance_upgrade():
+    cards = knowledge.list_builtin_cards()
+    assert len(cards) >= 30
+    assert not [card["id"] for card in cards if not card.get("source_url")]
+    assert knowledge.get_card("governance.professional_knowledge_standard")["authority_tier"] == "internal_governance"
+
+
+def test_phase_two_high_risk_official_knowledge_recall():
+    cases = [
+        ("日本站注册需要什么资料", "seller_registration.japan_registration"),
+        ("英国站欧洲站注册企业验证", "seller_registration.uk_eu_registration"),
+        ("账户停用绩效通知怎么申诉", "policies.account_health_appeal_evidence"),
+        ("亚马逊费用佣金估算为什么和实际不一样", "fees.selling_fees_and_estimates"),
+        ("受限商品被下架需要什么证据", "policies.restricted_products_diagnostics"),
+        ("FBA危险品 SDS 审核", "fba.dangerous_goods_diagnostics"),
+        ("GTIN UPC 条码豁免报错", "listing.gtin_and_exemptions"),
+        ("变体父子体 parent_sku 错误", "listing.variation_relationships"),
+        ("知识产权投诉真实性证据", "policies.ip_complaint_evidence"),
+    ]
+    for query, expected in cases:
+        evidence = knowledge.evidence_context(query, limit=5)
+        ids = [row["id"] for row in evidence["citations"]]
+        assert expected in ids, (query, ids)
+        hit = next(row for row in evidence["citations"] if row["id"] == expected)
+        assert hit["authority_tier"].startswith("primary")
+        assert hit["url"].startswith("https://")
+    assert knowledge.retrieval_decision("变体父子体 parent_sku 错误")["risk"] == "high"
+
+
+def test_business_loop_and_ads_product_knowledge_recall():
+    cases = [
+        ("亚马逊 VAT GST 税务报告怎么核对", "tax.tax_reports_and_liability"),
+        ("结算付款和银行入账怎么对账", "finance.settlement_reconciliation"),
+        ("退货退款 SAFE-T 索赔需要什么证据", "returns.returns_and_safe_t_claims"),
+        ("品牌备案 Brand Registry 商标要求", "brand.brand_registry"),
+        ("透明计划 Transparency 防伪码", "brand.transparency"),
+        ("Sponsored Brands 品牌广告怎么衡量", "amazon_ads.sponsored_brands"),
+        ("Sponsored Display 迁移到展示广告", "amazon_ads.display_ads"),
+        ("Amazon DSP 程序化广告归因", "amazon_ads.amazon_dsp"),
+        ("AMC 营销云 clean room 分析边界", "amazon_ads.amazon_marketing_cloud"),
+    ]
+    for query, expected in cases:
+        evidence = knowledge.evidence_context(query, limit=5)
+        ids = [row["id"] for row in evidence["citations"]]
+        assert expected in ids, (query, ids)
+
+
+def test_user_knowledge_versions_conflict_detection_and_rollback(ivyea_home):
+    created = knowledge.import_text(
+        "Versioned playbook", "# Version one\n\nKeep the original evidence.", card_id="user.versioned",
+    )
+    first_version = created["current_version_id"]
+    assert created["revision"] == 1
+
+    draft = knowledge.draft_update(
+        "Versioned playbook", "# Version two\n\nUse the reviewed updated evidence.", card_id="user.versioned",
+    )
+    applied = knowledge.apply_update(draft, confirm=True, rebuild_indexes=False)
+    assert applied["ok"] is True
+    assert applied["card"]["revision"] == 2
+    assert applied["card"]["parent_version_id"] == first_version
+
+    versions = knowledge.list_versions("user.versioned")
+    assert [row["revision"] for row in versions["versions"]] == [2, 1]
+    blocked = knowledge.rollback_version("user.versioned", first_version, confirm=False)
+    assert blocked["error"] == "confirmation_required"
+    rolled_back = knowledge.rollback_version(
+        "user.versioned", first_version, confirm=True, rebuild_indexes=False,
+    )
+    assert rolled_back["rolled_back"] is True
+    assert rolled_back["created_version_id"] != first_version
+    assert "Version one" in knowledge.get_card("user.versioned")["body"]
+
+    stale = knowledge.draft_update(
+        "Versioned playbook", "# Stale draft\n\nThis draft must not overwrite newer content.",
+        card_id="user.versioned",
+    )
+    knowledge.import_text(
+        "Versioned playbook", "# Concurrent update\n\nA newer writer won the race.",
+        card_id="user.versioned",
+    )
+    conflict = knowledge.apply_update(stale, confirm=True, rebuild_indexes=False)
+    assert conflict["error"] == "knowledge_update_conflict"
+
+
+def test_concurrent_user_card_writes_do_not_lose_source_rows(ivyea_home):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def write(index):
+        return knowledge.import_text(
+            f"Concurrent {index}", f"# Card {index}\n\nConcurrent body {index}.",
+            card_id=f"user.concurrent-{index}",
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        rows = list(pool.map(write, range(20)))
+    assert len(rows) == 20
+    ids = {row["id"] for row in knowledge.list_user_cards()}
+    assert {f"user.concurrent-{index}" for index in range(20)} <= ids
+
+
 def test_agent_knowledge_tool_registered():
     from ivyea_agent.agent_tools import TOOL_SCHEMAS, _DISPATCH
     names = {t["function"]["name"] for t in TOOL_SCHEMAS}
@@ -312,6 +443,14 @@ def test_knowledge_cli_import_and_rebuild(ivyea_home, tmp_path, capsys):
     assert main(["knowledge", "watchlist"]) == 0
     out = capsys.readouterr().out
     assert "知识来源观察清单" in out
+
+    assert main(["knowledge", "official-sources"]) == 0
+    out = capsys.readouterr().out
+    assert "官方来源注册表" in out
+    assert "sp_api.changelog_rss" in out
+
+    assert main(["knowledge", "changes"]) == 0
+    assert "暂无待审核" in capsys.readouterr().out
 
     update = tmp_path / "listing-update.md"
     update.write_text("Listing 更新草案：主图影响 CTR，A+ 和五点会影响 CVR，广告动作必须先看承接。", encoding="utf-8")

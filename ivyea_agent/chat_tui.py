@@ -355,8 +355,17 @@ class ChatTUI:
                 sys.stdout = saved
                 _tui_mod.set_active_selector(self._approve)
         try:
+            import asyncio
             from prompt_toolkit.application import run_in_terminal
-            run_in_terminal(_call)
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                # Unit tests and non-running fallback callers have an event-loop
+                # object, but it is not running.  Scheduling there leaves a
+                # pending coroutine that is never awaited; run synchronously.
+                _call()
+            else:
+                run_in_terminal(_call)
         except Exception:
             try:
                 _call()

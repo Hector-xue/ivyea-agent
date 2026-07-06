@@ -3,15 +3,18 @@ from __future__ import annotations
 
 import json
 import hmac
+import hashlib
 import os
 import base64
 import binascii
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from . import (
-    __version__, agent_loop, code_agent, config, knowledge, models,
+    __version__, ads_evidence, agent_loop, code_agent, config, knowledge, knowledge_evidence,
+    knowledge_governance, knowledge_quality, knowledge_sync, models,
     progress_reporting, retrieval, security, self_manage, sessions, skills, task_runner,
     traces, workspace,
 )
@@ -74,6 +77,15 @@ def manifest() -> dict[str, Any]:
             "health": True,
             "knowledge_search": True,
             "knowledge_management": True,
+            "official_source_monitoring": True,
+            "answer_citations": True,
+            "authorized_account_evidence": True,
+            "amazon_ads_evidence_analysis": True,
+            "knowledge_governance_dashboard": True,
+            "knowledge_change_review_ledger": True,
+            "knowledge_quality_benchmark": True,
+            "knowledge_version_history": True,
+            "knowledge_rollback": True,
             "local_retrieval": retrieval.capabilities(),
             "task_state": True,
             "chat": True,
@@ -127,6 +139,27 @@ def manifest() -> dict[str, Any]:
             {"method": "GET", "path": "/v1/knowledge/audit", "description": "structured source quality and freshness audit"},
             {"method": "GET", "path": "/v1/knowledge/sources", "description": "knowledge source registry and review summary"},
             {"method": "GET", "path": "/v1/knowledge/watchlist", "description": "curated Amazon knowledge sources to review before import"},
+            {"method": "GET", "path": "/v1/knowledge/official-sources", "description": "allowlisted official Amazon sources and monitoring policy"},
+            {"method": "GET", "path": "/v1/knowledge/changes", "description": "official-source changes with review status"},
+            {"method": "POST", "path": "/v1/knowledge/changes/review", "description": "record a confirmed review decision without publishing knowledge"},
+            {"method": "GET", "path": "/v1/knowledge/changes/{event_id}/packet", "description": "load an approved source snapshot, diff, and candidate knowledge cards"},
+            {"method": "POST", "path": "/v1/knowledge/changes/draft", "description": "prepare an evidence-linked runtime knowledge update draft"},
+            {"method": "POST", "path": "/v1/knowledge/changes/apply", "description": "separately confirm and publish an approved evidence-linked runtime update"},
+            {"method": "GET", "path": "/v1/knowledge/reviews", "description": "immutable official-source review history"},
+            {"method": "GET", "path": "/v1/knowledge/publications", "description": "confirmed knowledge publications linked to reviewed source changes"},
+            {"method": "GET", "path": "/v1/knowledge/versions", "description": "immutable user knowledge version history"},
+            {"method": "POST", "path": "/v1/knowledge/versions/rollback", "description": "restore a confirmed user knowledge version"},
+            {"method": "GET", "path": "/v1/knowledge/governance", "description": "knowledge review, freshness, coverage, and conflict dashboard"},
+            {"method": "GET", "path": "/v1/knowledge/coverage", "description": "critical knowledge domain and marketplace coverage matrix"},
+            {"method": "GET", "path": "/v1/knowledge/freshness", "description": "card freshness and official-source monitor status"},
+            {"method": "GET", "path": "/v1/knowledge/quality", "description": "run deterministic Amazon knowledge retrieval quality cases"},
+            {"method": "POST", "path": "/v1/knowledge/sync", "description": "check due public official sources without auto-publishing changes"},
+            {"method": "GET", "path": "/v1/knowledge/evidence", "description": "list sanitized authorized account evidence metadata"},
+            {"method": "GET", "path": "/v1/knowledge/evidence/schema", "description": "JSON Schema for authorized account evidence"},
+            {"method": "GET", "path": "/v1/knowledge/ads/capabilities", "description": "dated Amazon Ads product, report, and evidence capability matrix"},
+            {"method": "POST", "path": "/v1/knowledge/ads/analyze", "description": "analyze an Ads report or traffic experiment without persisting raw account data"},
+            {"method": "POST", "path": "/v1/knowledge/evidence/draft", "description": "redact and structure authorized Seller Central evidence without storing it"},
+            {"method": "POST", "path": "/v1/knowledge/evidence/apply", "description": "apply confirmed sanitized account evidence and rebuild indexes"},
             {"method": "GET", "path": "/v1/knowledge/conflicts", "description": "knowledge conflict review queue"},
             {"method": "POST", "path": "/v1/knowledge/update/draft", "description": "build a reviewed knowledge update draft with diff"},
             {"method": "POST", "path": "/v1/knowledge/update/apply", "description": "apply a confirmed knowledge update draft and rebuild indexes"},
@@ -579,6 +612,145 @@ def knowledge_sources() -> dict[str, Any]:
 def knowledge_watchlist() -> dict[str, Any]:
     data = knowledge.source_watchlist()
     return {"ok": True, "summary": data.get("summary") or {}, "sources": data.get("sources") or []}
+
+
+def knowledge_official_sources() -> dict[str, Any]:
+    data = knowledge_sync.registry()
+    return {"ok": True, "summary": data["summary"], "sources": data["sources"]}
+
+
+def knowledge_changes(limit: int = 50, review_status: str = "") -> dict[str, Any]:
+    data = knowledge_sync.changes(limit=limit, review_status=review_status)
+    return {"ok": True, **data}
+
+
+def knowledge_reviews(limit: int = 100, event_id: str = "") -> dict[str, Any]:
+    return {"ok": True, **knowledge_sync.review_history(limit=limit, event_id=event_id)}
+
+
+def knowledge_publications(limit: int = 100, event_id: str = "") -> dict[str, Any]:
+    return {"ok": True, **knowledge_sync.publication_history(limit=limit, event_id=event_id)}
+
+
+def knowledge_change_review(payload: dict[str, Any]) -> dict[str, Any]:
+    return knowledge_sync.review_change(
+        str(payload.get("event_id") or ""),
+        str(payload.get("decision") or ""),
+        reviewer=str(payload.get("reviewer") or "local-operator"),
+        reviewer_source=str(payload.get("reviewer_source") or "agent_api_token"),
+        identity_verified=payload.get("identity_verified") is True,
+        note=str(payload.get("note") or ""),
+        confirm=payload.get("confirm") is True,
+    )
+
+
+def knowledge_versions(card_id: str = "", limit: int = 100) -> dict[str, Any]:
+    return {"ok": True, **knowledge.list_versions(card_id, limit=limit)}
+
+
+def knowledge_version_rollback(payload: dict[str, Any]) -> dict[str, Any]:
+    return knowledge.rollback_version(
+        str(payload.get("card_id") or ""),
+        str(payload.get("version_id") or ""),
+        confirm=payload.get("confirm") is True,
+        rebuild_indexes=payload.get("rebuild") if isinstance(payload.get("rebuild"), bool) else True,
+        actor=str(payload.get("actor") or "api-operator"),
+        actor_source=str(payload.get("actor_source") or "agent_api_token"),
+    )
+
+
+def knowledge_change_packet(event_id: str, card_id: str = "") -> dict[str, Any]:
+    return {"ok": True, "packet": knowledge_sync.change_packet(event_id, card_id=card_id)}
+
+
+def knowledge_change_draft(payload: dict[str, Any]) -> dict[str, Any]:
+    prepared = knowledge_sync.prepare_change_draft(
+        str(payload.get("event_id") or ""),
+        card_id=str(payload.get("card_id") or ""),
+        body=str(payload.get("body") or ""),
+        title=str(payload.get("title") or ""),
+        new_card_id=str(payload.get("new_card_id") or ""),
+    )
+    public = dict(prepared)
+    if isinstance(public.get("draft"), dict):
+        public["draft"] = _public_knowledge_draft(public["draft"])
+    return public
+
+
+def knowledge_change_apply(payload: dict[str, Any]) -> dict[str, Any]:
+    applied = knowledge_sync.apply_change_draft(
+        str(payload.get("event_id") or ""),
+        card_id=str(payload.get("card_id") or ""),
+        body=str(payload.get("body") or ""),
+        title=str(payload.get("title") or ""),
+        new_card_id=str(payload.get("new_card_id") or ""),
+        confirm=payload.get("confirm") is True,
+        rebuild_indexes=payload.get("rebuild") if isinstance(payload.get("rebuild"), bool) else True,
+    )
+    public = dict(applied)
+    if isinstance(public.get("draft"), dict):
+        public["draft"] = _public_knowledge_draft(public["draft"])
+    return public
+
+
+def knowledge_governance_dashboard() -> dict[str, Any]:
+    return knowledge_governance.dashboard()
+
+
+def knowledge_coverage() -> dict[str, Any]:
+    return {"ok": True, "coverage": knowledge_governance.coverage()}
+
+
+def knowledge_freshness() -> dict[str, Any]:
+    return {"ok": True, "freshness": knowledge_governance.freshness()}
+
+
+def knowledge_quality_run() -> dict[str, Any]:
+    result = knowledge_quality.run()
+    return {"ok": bool(result.get("ok")), "quality": result}
+
+
+def knowledge_sync_run(payload: dict[str, Any]) -> dict[str, Any]:
+    source_ids = payload.get("source_ids") or []
+    if isinstance(source_ids, str):
+        source_ids = [part.strip() for part in source_ids.split(",") if part.strip()]
+    if not isinstance(source_ids, list):
+        raise ValueError("source_ids must be a list or comma-separated string")
+    return knowledge_sync.sync(
+        force=bool(payload.get("force", False)),
+        source_ids=[str(value) for value in source_ids],
+    )
+
+
+def knowledge_evidence_list(limit: int = 100) -> dict[str, Any]:
+    data = knowledge_evidence.list_evidence(limit=limit)
+    return {"ok": True, **data}
+
+
+def knowledge_evidence_draft(payload: dict[str, Any]) -> dict[str, Any]:
+    prepared = knowledge_evidence.prepare(payload)
+    prepared["draft"]["actor"] = str(payload.get("actor") or "api-operator")
+    prepared["draft"]["actor_source"] = str(payload.get("actor_source") or "agent_api_token")
+    return prepared
+
+
+def knowledge_evidence_apply(payload: dict[str, Any]) -> dict[str, Any]:
+    prepared = knowledge_evidence.prepare(payload)
+    prepared["draft"]["actor"] = str(payload.get("actor") or "api-operator")
+    prepared["draft"]["actor_source"] = str(payload.get("actor_source") or "agent_api_token")
+    return knowledge_evidence.apply(
+        prepared,
+        confirm=bool(payload.get("confirm", False)),
+        rebuild_indexes=payload.get("rebuild") if isinstance(payload.get("rebuild"), bool) else True,
+    )
+
+
+def knowledge_ads_capabilities() -> dict[str, Any]:
+    return {"ok": True, "capabilities": ads_evidence.capability_matrix()}
+
+
+def knowledge_ads_analyze(payload: dict[str, Any]) -> dict[str, Any]:
+    return {"ok": True, "analysis": ads_evidence.analyze(payload), "raw_preserved": False}
 
 
 def knowledge_update_draft(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1124,6 +1296,62 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/knowledge/watchlist":
             self._json(200, knowledge_watchlist())
             return
+        if parsed.path == "/v1/knowledge/official-sources":
+            self._json(200, knowledge_official_sources())
+            return
+        if parsed.path == "/v1/knowledge/changes":
+            try:
+                self._json(200, knowledge_changes(
+                    limit=_int(_first(qs, "limit"), 50), review_status=_first(qs, "status"),
+                ))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/knowledge/reviews":
+            self._json(200, knowledge_reviews(
+                limit=_int(_first(qs, "limit"), 100), event_id=_first(qs, "event_id"),
+            ))
+            return
+        if parsed.path == "/v1/knowledge/publications":
+            self._json(200, knowledge_publications(
+                limit=_int(_first(qs, "limit"), 100), event_id=_first(qs, "event_id"),
+            ))
+            return
+        if parsed.path == "/v1/knowledge/versions":
+            self._json(200, knowledge_versions(
+                card_id=_first(qs, "card_id"), limit=_int(_first(qs, "limit"), 100),
+            ))
+            return
+        if parsed.path.startswith("/v1/knowledge/changes/") and parsed.path.endswith("/packet"):
+            parts = parsed.path.strip("/").split("/")
+            event_id = parts[3] if len(parts) == 5 else ""
+            try:
+                self._json(200, knowledge_change_packet(event_id, card_id=_first(qs, "card_id")))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/knowledge/governance":
+            self._json(200, knowledge_governance_dashboard())
+            return
+        if parsed.path == "/v1/knowledge/coverage":
+            self._json(200, knowledge_coverage())
+            return
+        if parsed.path == "/v1/knowledge/freshness":
+            self._json(200, knowledge_freshness())
+            return
+        if parsed.path == "/v1/knowledge/quality":
+            result = knowledge_quality_run()
+            self._json(200, result)
+            return
+        if parsed.path == "/v1/knowledge/evidence":
+            self._json(200, knowledge_evidence_list(limit=_int(_first(qs, "limit"), 100)))
+            return
+        if parsed.path == "/v1/knowledge/evidence/schema":
+            self._json(200, {"ok": True, "schema": knowledge_evidence.schema()})
+            return
+        if parsed.path == "/v1/knowledge/ads/capabilities":
+            self._json(200, knowledge_ads_capabilities())
+            return
         if parsed.path == "/v1/knowledge/conflicts":
             self._json(200, knowledge_conflicts())
             return
@@ -1227,6 +1455,58 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/knowledge/rebuild":
             self._json(200, knowledge_rebuild())
+            return
+        if parsed.path == "/v1/knowledge/sync":
+            try:
+                self._json(200, knowledge_sync_run(body))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/knowledge/changes/review":
+            try:
+                result = knowledge_change_review(self._verified_review_payload(body))
+                self._json(200 if result.get("ok") else 409, result)
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/knowledge/versions/rollback":
+            try:
+                result = knowledge_version_rollback(body)
+                self._json(200 if result.get("ok") else 409, result)
+            except (ValueError, OSError) as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/knowledge/changes/draft":
+            try:
+                self._json(200, knowledge_change_draft(body))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/knowledge/changes/apply":
+            try:
+                result = knowledge_change_apply(body)
+                self._json(200 if result.get("ok") else 409, result)
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/knowledge/evidence/draft":
+            try:
+                self._json(200, knowledge_evidence_draft(body))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/knowledge/evidence/apply":
+            try:
+                result = knowledge_evidence_apply(body)
+                self._json(200 if result.get("ok") else 409, result)
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/knowledge/ads/analyze":
+            try:
+                self._json(200, knowledge_ads_analyze(body))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
             return
         if parsed.path.startswith("/v1/model/providers/") and parsed.path.endswith("/probe"):
             parts = parsed.path.strip("/").split("/")
@@ -1375,6 +1655,34 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(401, {"ok": False, "error": "unauthorized"})
         return False
 
+    def _verified_review_payload(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Verify an IvyeaOps admin identity assertion with the API token."""
+        clean = dict(body)
+        clean["identity_verified"] = False
+        assertion = clean.pop("identity_assertion", None)
+        token = str(getattr(self.server, "api_token", "") or "")
+        if (
+            not token
+            or clean.get("reviewer_source") != "ops_authenticated_admin"
+            or not isinstance(assertion, dict)
+        ):
+            return clean
+        timestamp = str(assertion.get("timestamp") or "")
+        signature = str(assertion.get("signature") or "")
+        try:
+            fresh = abs(time.time() - int(timestamp)) <= 300
+        except ValueError:
+            fresh = False
+        material = "|".join([
+            str(clean.get("event_id") or ""),
+            str(clean.get("decision") or ""),
+            str(clean.get("reviewer") or ""),
+            timestamp,
+        ])
+        expected = hmac.new(token.encode("utf-8"), material.encode("utf-8"), hashlib.sha256).hexdigest()
+        clean["identity_verified"] = bool(fresh and signature and hmac.compare_digest(signature, expected))
+        return clean
+
     def _json(self, status: int, data: dict[str, Any]) -> None:
         raw = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
         self.send_response(status)
@@ -1479,12 +1787,22 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext) -> t
             messages.append({"role": role, "content": str(row.get("content") or "")})
     user_content = message
     if payload.get("inject_retrieval", True):
-        retrieved = retrieval.search(message, limit=3, sources=["knowledge"])
-        snippets = []
-        for hit in retrieved.get("hits") or []:
-            snippets.append(f"- {hit.get('title') or hit.get('id')}: {hit.get('snippet')}")
-        if snippets:
-            user_content += "\n\n[Ivyea 本地知识检索]\n" + "\n".join(snippets)
+        evidence = knowledge.evidence_context(message, limit=4)
+        ctx.knowledge_citations = list(evidence.get("citations") or [])
+        ctx.knowledge_retrieval_expected = bool(evidence.get("should_retrieve"))
+        ctx.knowledge_risk = str(evidence.get("risk") or "none")
+        ctx.knowledge_query = message
+        if evidence.get("text"):
+            user_content += (
+                "\n\n[Ivyea 本地知识检索 / 亚马逊知识证据]\n" + str(evidence["text"])
+                + "\n要求：采用摘录时在对应事实句末引用 [K#]；区分官方事实、账户观测、分析推断和运营假设。"
+                + "广告指标必须保留报表、时间、币种、归因窗口/模型和销售范围；归因销售不等于增量销售，账户现象不等于官方算法。"
+            )
+    else:
+        ctx.knowledge_citations = []
+        ctx.knowledge_retrieval_expected = False
+        ctx.knowledge_risk = "none"
+        ctx.knowledge_query = message
     messages.append({"role": "user", "content": user_content})
     return messages, created_at
 
@@ -1568,7 +1886,8 @@ def _public_knowledge_card(card: dict[str, Any], include_body: bool = False) -> 
     keys = [
         "id", "title", "category", "source_type", "confidence", "freshness",
         "source_quality", "retrieved_at", "license", "source_url", "tags",
-        "scope", "body_hash", "score", "snippet",
+        "scope", "body_hash", "score", "snippet", "authority_tier", "evidence_class",
+        "marketplaces", "locales", "evidence_id", "evidence_kind", "observed_at", "diagnostic",
     ]
     row = {key: card.get(key) for key in keys if key in card}
     if include_body:

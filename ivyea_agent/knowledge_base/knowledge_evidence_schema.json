@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent.ivyea.com/schemas/knowledge-evidence-v2.json",
+  "title": "Ivyea authorized Amazon account evidence",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["authorized", "rights_confirmed", "kind", "marketplace"],
+  "properties": {
+    "authorized": {"const": true, "description": "The user explicitly authorizes local processing."},
+    "rights_confirmed": {"const": true, "description": "The user confirms a right to process the supplied account evidence."},
+    "kind": {
+      "type": "string",
+      "enum": [
+        "performance_notification",
+        "seller_central_help_export",
+        "support_case",
+        "listing_issue",
+        "registration_notice",
+        "compliance_notice",
+        "fee_record",
+        "api_notification",
+        "advertising_report",
+        "traffic_experiment"
+        ,"tax_report"
+        ,"settlement_report"
+        ,"returns_report"
+        ,"brand_notice"
+      ]
+    },
+    "marketplace": {
+      "type": "string",
+      "enum": ["GLOBAL", "US", "CA", "MX", "BR", "UK", "DE", "FR", "IT", "ES", "NL", "SE", "PL", "BE", "IE", "JP", "AU", "SG", "IN", "AE", "SA", "EG", "TR"]
+    },
+    "locale": {"type": "string", "default": "en-US"},
+    "title": {"type": "string", "maxLength": 160},
+    "source_url": {
+      "type": "string",
+      "description": "Official Amazon URL or sellercentral-export:// reference."
+    },
+    "content": {"type": "string", "maxLength": 500000},
+    "exact_message": {"type": "string"},
+    "captured_at": {"type": "string"},
+    "observed_at": {"type": "string"},
+    "account_id": {"type": "string", "description": "Never stored verbatim; converted to a private hash reference."},
+    "case_id": {"type": "string", "description": "Never stored verbatim; converted to a private hash reference."},
+    "notification_id": {"type": "string", "description": "Never stored verbatim; converted to a private hash reference."},
+    "profile_id": {"type": "string", "description": "Never stored verbatim; converted to a private hash reference."},
+    "campaign_id": {"type": "string", "description": "Never stored verbatim; converted to a private hash reference."},
+    "ad_group_id": {"type": "string", "description": "Never stored verbatim; converted to a private hash reference."},
+    "error_code": {"type": "string"},
+    "asin": {"type": "string", "pattern": "^[A-Za-z0-9]{10}$"},
+    "sku": {"type": "string"},
+    "product_type": {"type": "string"},
+    "account_status": {"type": "string", "enum": ["NORMAL", "AT_RISK", "DEACTIVATED"]},
+    "policy": {"type": "string"},
+    "record_type": {"type": "string", "enum": ["observed", "estimate"]},
+    "currency": {"type": "string"},
+    "registration_stage": {"type": "string"},
+    "document_request": {"type": "string"},
+    "settlement_id": {"type": "string", "description": "Never stored verbatim; converted to a private hash reference."},
+    "transaction_id": {"type": "string", "description": "Never stored verbatim; converted to a private hash reference."},
+    "order_id": {"type": "string", "description": "Never stored verbatim; converted to a private hash reference."},
+    "claim_id": {"type": "string", "description": "Never stored verbatim; converted to a private hash reference."},
+    "program": {"type": "string"},
+    "ad_product": {
+      "type": "string",
+      "enum": ["sponsored_products", "sponsored_brands", "sponsored_display", "dsp", "amazon_attribution", "other"]
+    },
+    "report_type": {"type": "string"},
+    "time_zone": {"type": "string"},
+    "time_unit": {"type": "string"},
+    "attribution_window": {"type": "string"},
+    "attribution_model": {"type": "string"},
+    "sales_scope": {"type": "string"},
+    "window_start": {"type": "string", "format": "date"},
+    "window_end": {"type": "string", "format": "date"},
+    "metrics": {"$ref": "#/$defs/metrics"},
+    "hypothesis": {"type": "string"},
+    "changed_factors": {"type": "array", "items": {"type": "string"}},
+    "baseline": {"$ref": "#/$defs/period"},
+    "evaluation": {"$ref": "#/$defs/period"},
+    "confounders": {"type": "array", "items": {"type": "string"}},
+    "control_group": {"type": "string"},
+    "randomized": {"type": "boolean"},
+    "data_mature": {"type": "boolean"},
+    "confirm": {"type": "boolean", "default": false},
+    "rebuild": {"type": "boolean", "default": true}
+  },
+  "anyOf": [
+    {"required": ["content"]},
+    {"required": ["exact_message"]},
+    {"required": ["metrics"]},
+    {"required": ["baseline", "evaluation"]}
+  ],
+  "$defs": {
+    "metrics": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "impressions": {"type": "number", "minimum": 0},
+        "clicks": {"type": "number", "minimum": 0},
+        "spend": {"type": "number", "minimum": 0},
+        "attributed_orders": {"type": "number", "minimum": 0},
+        "attributed_sales": {"type": "number", "minimum": 0},
+        "attributed_units": {"type": "number", "minimum": 0}
+      }
+    },
+    "period": {
+      "type": "object",
+      "required": ["window_start", "window_end", "metrics"],
+      "properties": {
+        "window_start": {"type": "string", "format": "date"},
+        "window_end": {"type": "string", "format": "date"},
+        "metrics": {"$ref": "#/$defs/metrics"}
+      }
+    }
+  }
+}

@@ -1,11 +1,16 @@
 """Lightweight product evals for Ivyea Agent."""
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from . import alerts, competitor_audit, image_audit, knowledge, listing_audit, mcp_source, notify, ocr, offer_audit, policy, review_audit, rule_engine, schedule, security, skills, vision, weekly_review
+from . import (
+    ads_evidence, alerts, competitor_audit, image_audit, knowledge, knowledge_evidence,
+    knowledge_governance, knowledge_quality, knowledge_sync, listing_audit, mcp_source, notify, ocr,
+    offer_audit, policy, review_audit, rule_engine, schedule, security, skills, vision, weekly_review,
+)
 
 
 def run() -> dict[str, Any]:
@@ -32,6 +37,113 @@ def run() -> dict[str, Any]:
         "name": "knowledge.negative_recall",
         "ok": any(h["id"] == "playbook.negative_keyword_risk" for h in khits),
         "detail": ",".join(h["id"] for h in khits),
+    })
+    registration = knowledge.evidence_context("亚马逊卖家注册身份验证失败怎么办", limit=3)
+    checks.append({
+        "name": "knowledge.registration_official_recall",
+        "ok": bool(registration["citations"]) and (
+            registration["citations"][0]["id"] == "seller_registration.registration_and_identity_verification"
+            and registration["citations"][0]["authority_tier"] == "primary"
+        ),
+        "detail": ",".join(registration.get("ids") or []),
+    })
+    listing_error = knowledge.evidence_context("上架报错 90220", limit=3)
+    citation_check = knowledge.validate_citations("先核对当前 schema。[K1]", listing_error["citations"])
+    checks.append({
+        "name": "knowledge.listing_error_citation",
+        "ok": bool(listing_error["citations"]) and (
+            listing_error["citations"][0]["id"] == "seller_central.listings_items_error_diagnostics"
+            and citation_check["ok"]
+        ),
+        "detail": f"risk={listing_error['risk']} ids={','.join(listing_error.get('ids') or [])}",
+    })
+    source_audit = knowledge.source_registry()["summary"]
+    checks.append({
+        "name": "knowledge.source_traceability",
+        "ok": source_audit["missing_source_url_cards"] == 0 and source_audit["official_sources"] >= 1,
+        "detail": f"missing_urls={source_audit['missing_source_url_cards']} sources={source_audit['sources']}",
+    })
+    phase_two_cases = [
+        ("日本站注册身份验证", "seller_registration.japan_registration"),
+        ("账户停用绩效通知申诉", "policies.account_health_appeal_evidence"),
+        ("费用佣金估算和实际不一致", "fees.selling_fees_and_estimates"),
+        ("受限商品危险品 SDS", "policies.restricted_products_diagnostics"),
+        ("GTIN 变体父子体报错", "listing.gtin_and_exemptions"),
+    ]
+    missed = []
+    for query, expected in phase_two_cases:
+        ids = knowledge.evidence_context(query, limit=5).get("ids") or []
+        if expected not in ids:
+            missed.append(f"{expected}:{','.join(ids)}")
+    checks.append({
+        "name": "knowledge.high_risk_domain_recall",
+        "ok": not missed,
+        "detail": "all high-risk cases recalled" if not missed else ";".join(missed),
+    })
+    official_registry = knowledge_sync.registry()["summary"]
+    checks.append({
+        "name": "knowledge.official_source_coverage",
+        "ok": official_registry["sources"] >= 25 and official_registry["authorization_required"] >= 5,
+        "detail": (
+            f"sources={official_registry['sources']} public={official_registry['public_monitorable']} "
+            f"auth={official_registry['authorization_required']}"
+        ),
+    })
+    private_text, redaction_counts = knowledge_evidence.redact_evidence_text(
+        "Email: owner@example.com\nPhone: +1 415 555 1212\nPassport number: P12345678"
+    )
+    checks.append({
+        "name": "knowledge.authorized_evidence_redaction",
+        "ok": "owner@example.com" not in private_text and "P12345678" not in private_text and bool(redaction_counts),
+        "detail": json.dumps(redaction_counts, ensure_ascii=False, sort_keys=True),
+    })
+    ads_cases = [
+        ("广告 ACoS ROAS 归因销售口径", "amazon_ads.metrics_and_denominators"),
+        ("搜索词报告展示量不一致", "amazon_ads.sponsored_products_reports"),
+        ("流量池算法权重自然排名", "governance.traffic_algorithm_evidence"),
+    ]
+    ads_missed = []
+    for query, expected in ads_cases:
+        ids = knowledge.evidence_context(query, limit=5).get("ids") or []
+        if expected not in ids:
+            ads_missed.append(f"{expected}:{','.join(ids)}")
+    checks.append({
+        "name": "knowledge.ads_evidence_recall",
+        "ok": not ads_missed,
+        "detail": "ads evidence boundaries recalled" if not ads_missed else ";".join(ads_missed),
+    })
+    ads_report = ads_evidence.analyze({
+        "kind": "advertising_report", "ad_product": "sponsored_products",
+        "report_type": "search term report", "currency": "USD", "time_zone": "UTC",
+        "window_start": "2026-06-01", "window_end": "2026-06-07",
+        "metrics": {"impressions": 100, "clicks": 10, "spend": 5, "attributed_sales": 20},
+    })
+    checks.append({
+        "name": "knowledge.ads_metric_and_inference_gate",
+        "ok": ads_report["derived_metrics"]["acos"] == 0.25 and not ads_report["official_algorithm_claim_allowed"],
+        "detail": f"acos={ads_report['derived_metrics']['acos']} algorithm_claim={ads_report['official_algorithm_claim_allowed']}",
+    })
+    quality = knowledge_quality.run()
+    checks.append({
+        "name": "knowledge.continuous_quality_suite",
+        "ok": bool(quality["ok"]) and quality["summary"]["cases"] >= 15,
+        "detail": (
+            f"cases={quality['summary']['cases']} passed={quality['summary']['passed']} "
+            f"rate={quality['summary']['pass_rate']:.1%}"
+        ),
+    })
+    coverage = knowledge_governance.coverage()
+    checks.append({
+        "name": "knowledge.coverage_matrix_complete",
+        "ok": (
+            coverage["summary"]["requirements"] >= 41
+            and coverage["summary"]["covered"] == coverage["summary"]["requirements"]
+            and coverage["summary"]["gaps"] == 0
+        ),
+        "detail": (
+            f"requirements={coverage['summary']['requirements']} covered={coverage['summary']['covered']} "
+            f"gaps={coverage['summary']['gaps']}"
+        ),
     })
     kidx = knowledge.rebuild_index()
     checks.append({

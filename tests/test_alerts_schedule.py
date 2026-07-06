@@ -52,6 +52,22 @@ def test_schedule_alert_notify_stdout(ivyea_home):
     assert "Ivyea Alerts" in text
 
 
+def test_schedule_knowledge_sync(ivyea_home, monkeypatch):
+    from ivyea_agent import schedule
+
+    monkeypatch.setattr(schedule.knowledge_sync, "sync", lambda **kwargs: {
+        "ok": True,
+        "summary": {"selected": 1, "unchanged": 1},
+        "results": [{"id": "sp_api.llms_index", "status": "unchanged"}],
+    })
+    monkeypatch.setattr(schedule.knowledge_sync, "render_sync", lambda data: "knowledge sync unchanged")
+    job = schedule.set_job("official-updates", "knowledge_sync", every_hours=6)
+    assert job["task"] == "knowledge_sync"
+    ok, text = schedule.run_task("knowledge_sync")
+    assert ok is True
+    assert text == "knowledge sync unchanged"
+
+
 def test_schedule_cli(ivyea_home, capsys):
     from ivyea_agent.cli import main
 

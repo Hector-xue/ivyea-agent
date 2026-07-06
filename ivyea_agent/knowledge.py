@@ -19,7 +19,11 @@ import time
 from datetime import datetime
 from typing import Any
 
-from . import config, security
+from . import config, locking, security
+
+
+class KnowledgeConflictError(RuntimeError):
+    """Raised when a reviewed draft no longer matches the current card."""
 
 ALIASES = {
     "否词": ["negative", "negative targeting", "negative keywords"],
@@ -56,7 +60,85 @@ ALIASES = {
     "来源": ["source", "source quality", "confidence", "freshness"],
     "置信": ["confidence", "source quality"],
     "时效": ["freshness", "retrieved_at", "version"],
+    "注册": ["registration", "seller registration", "account setup", "identity verification"],
+    "身份验证": ["identity verification", "verification", "documents", "registration"],
+    "验证失败": ["verification error", "registration error", "identity verification"],
+    "上架": ["listing", "listings items", "create product listing", "product type definitions"],
+    "报错": ["error", "issue", "troubleshooting", "error code"],
+    "错误码": ["error code", "issue code", "troubleshooting"],
+    "必填属性": ["required attributes", "product type definitions", "listing errors"],
+    "绩效": ["account health", "performance", "policy compliance"],
+    "账户状况": ["account health", "policy compliance"],
+    "停用": ["suspension", "deactivation", "account health", "appeal"],
+    "申诉": ["appeal", "plan of action", "account health"],
+    "政策": ["policy", "policies", "compliance"],
+    "规则": ["policy", "requirements", "guidelines", "compliance"],
+    "合规": ["compliance", "policy", "requirements"],
+    "知识产权": ["intellectual property", "trademark", "copyright", "patent"],
+    "流量": ["traffic", "discoverability", "ranking", "search"],
+    "算法": ["algorithm", "ranking", "discoverability", "inference"],
+    "自然排名": ["organic rank", "ranking", "discoverability", "inference"],
+    "流量池": ["traffic pool", "algorithm", "operator hypothesis", "evidence"],
+    "权重": ["weight", "algorithm", "operator hypothesis", "evidence"],
+    "归因": ["attribution", "attribution window", "sales scope", "conversion date"],
+    "归因窗口": ["attribution window", "attribution model", "sales scope"],
+    "展示量": ["impressions", "ctr", "measurement"],
+    "点击率": ["ctr", "click-through rate", "impressions", "clicks"],
+    "点击成本": ["cpc", "cost per click", "spend", "clicks"],
+    "转化率": ["cvr", "conversion rate", "attributed orders", "clicks"],
+    "广告报表": ["ads reporting", "search term report", "targeting report", "placement report"],
+    "搜索词报告": ["search term report", "click-filter", "inferred search term", "asin"],
+    "广告位": ["placement", "top of search", "rest of search", "product pages"],
+    "竞价策略": ["bidding strategy", "dynamic bidding", "placement adjustment", "effective bid"],
+    "英国站": ["UK", "Europe", "seller registration", "en-GB"],
+    "欧洲站": ["EU", "Europe", "seller registration", "VAT"],
+    "日本站": ["JP", "Japan", "seller registration", "Amazon.co.jp"],
+    "账户健康": ["account health", "account status", "performance notification"],
+    "绩效通知": ["performance notification", "account health", "appeal"],
+    "账户停用": ["deactivation", "account status changed", "appeal"],
+    "受限商品": ["restricted products", "approval", "product safety"],
+    "危险品": ["dangerous goods", "hazmat", "SDS", "FBA review"],
+    "危品": ["dangerous goods", "hazmat", "SDS"],
+    "材料安全数据表": ["SDS", "safety data sheet", "dangerous goods"],
+    "费用": ["selling fees", "referral fee", "fee estimate", "product fees"],
+    "佣金": ["referral fee", "selling fees"],
+    "gtin": ["GTIN", "product ID", "UPC", "EAN", "JAN", "exemption"],
+    "条码豁免": ["GTIN exemption", "product ID exemption"],
+    "变体": ["variations", "parent-child", "parentage level", "variation theme"],
+    "父子体": ["parent-child", "parent SKU", "child", "variations"],
+    "知识产权投诉": ["intellectual property complaint", "trademark", "copyright", "patent", "appeal"],
+    "税务": ["tax", "VAT", "GST", "sales tax", "tax report"],
+    "结算": ["settlement", "payment", "financial transaction", "reconciliation"],
+    "对账": ["reconciliation", "settlement", "transaction", "payment"],
+    "退货": ["returns", "RMA", "refund", "return report"],
+    "退款": ["refund", "returns", "financial event"],
+    "索赔": ["claim", "SAFE-T", "reimbursement", "A-to-z"],
+    "品牌备案": ["Brand Registry", "trademark", "enrollment", "brand owner"],
+    "透明计划": ["Transparency", "serialization", "authenticity", "counterfeit"],
+    "展示广告": ["display ads", "Sponsored Display", "audience", "vCPM"],
+    "程序化广告": ["Amazon DSP", "programmatic", "supply", "audience"],
+    "营销云": ["Amazon Marketing Cloud", "AMC", "clean room", "privacy"],
 }
+
+_HIGH_RISK_TERMS = (
+    "注册", "身份验证", "验证失败", "上架报错", "报错", "错误码", "error code",
+    "绩效", "账户状况", "account health", "停用", "封号", "suspension", "deactivation",
+    "申诉", "appeal", "政策", "规则", "合规", "知识产权", "侵权", "费用", "fee",
+    "限制", "restricted", "受限商品", "危险品", "危品", "hazmat", "sds", "税务", "vat",
+    "gtin", "条码豁免", "知识产权投诉", "税务", "结算", "对账", "退款", "索赔", "safe-t",
+)
+_AMAZON_DOMAIN_TERMS = (
+    "amazon", "亚马逊", "seller central", "sp-api", "asin", "fba", "listing", "广告",
+    "sponsored products", "sponsored brands", "sponsored display", "acos", "roas", "ctr", "cpc", "cvr",
+    "attribution", "placement", "否词", "关键词", "搜索词", "竞价", "出价",
+    "预算", "流量", "算法", "排名", "转化", "主图", "五点", "a+", "库存", "店铺",
+    "卖家", "上架", "绩效", "注册", "报错", "错误码", "高点击", "零单", "点击", "订单",
+    "account health", "product type", "英国站", "欧洲站", "日本站", "受限商品", "危险品",
+    "危品", "gtin", "条码豁免", "变体", "父子体", "佣金", "sku", "upc", "ean", "parent_sku",
+    "归因", "广告报表", "搜索词报告", "广告位", "竞价策略", "自然排名", "流量池", "权重",
+    "税务", "结算", "对账", "退货", "退款", "索赔", "safe-t", "brand registry", "品牌备案",
+    "透明计划", "transparency", "展示广告", "display ads", "amazon dsp", "程序化广告", "amc", "营销云",
+)
 
 METHODOLOGY = """\
 你是亚马逊广告运营专家，遵循以下方法论（用户长期沉淀）：
@@ -202,6 +284,18 @@ def _upload_history_file() -> Path:
     return _user_base() / "uploads.jsonl"
 
 
+def _mutation_lock_file() -> Path:
+    return _user_base() / ".mutation.lock"
+
+
+def _versions_file() -> Path:
+    return _user_base() / "versions.jsonl"
+
+
+def _versions_dir() -> Path:
+    return _user_base() / "versions"
+
+
 def list_cards() -> list[dict[str, Any]]:
     """Return bundled and user knowledge card metadata."""
     text = _base().joinpath("index.json").read_text(encoding="utf-8")
@@ -227,6 +321,10 @@ def _enrich_builtin_card(card: dict[str, Any]) -> dict[str, Any]:
     card.setdefault("source_quality", _source_quality(card))
     card.setdefault("license", "amazon_public_docs_summary")
     card.setdefault("scope", "builtin")
+    card.setdefault("authority_tier", _authority_tier(card))
+    card.setdefault("evidence_class", _evidence_class(card))
+    card.setdefault("marketplaces", ["GLOBAL"])
+    card.setdefault("locales", ["en-US", "zh-CN"])
     try:
         body = _base().joinpath(card["path"]).read_text(encoding="utf-8")
         card.setdefault("body_hash", _hash(body))
@@ -259,6 +357,10 @@ def list_user_cards() -> list[dict[str, Any]]:
             except Exception:
                 card["body_hash"] = ""
         card.setdefault("scope", "user")
+        card.setdefault("authority_tier", _authority_tier(card))
+        card.setdefault("evidence_class", _evidence_class(card))
+        card.setdefault("marketplaces", ["ACCOUNT_LOCAL"])
+        card.setdefault("locales", ["USER_SUPPLIED"])
         rows.append(card)
     return rows
 
@@ -272,6 +374,10 @@ def _confidence(source_type: str) -> str:
         return "medium"
     if source_type == "user":
         return "user_supplied"
+    if source_type == "account_authorized_official_evidence":
+        return "account_observed"
+    if source_type.startswith("internal"):
+        return "high_control_only"
     return "unknown"
 
 
@@ -284,9 +390,68 @@ def _source_quality(card: dict[str, Any]) -> str:
         return "synthesized_with_official_anchor"
     if source_type.startswith("community"):
         return "directional_requires_account_validation"
+    if source_type == "account_authorized_official_evidence":
+        return "account_observed_official_context"
+    if source_type == "legacy_gbrain":
+        return "operator_local_requires_official_or_account_validation"
     if scope == "user" or source_type == "user":
         return "account_local_overrides_generic_knowledge"
+    if source_type.startswith("internal"):
+        return "internal_control_not_external_evidence"
     return "unknown_requires_review"
+
+
+def _authority_tier(card: dict[str, Any]) -> str:
+    source_type = str(card.get("source_type") or "")
+    scope = str(card.get("scope") or "")
+    if source_type == "official":
+        return "primary"
+    if source_type.startswith("official_plus"):
+        return "secondary_synthesis"
+    if source_type.startswith("community"):
+        return "community_directional"
+    if source_type == "account_authorized_official_evidence":
+        return "account_local"
+    if source_type == "legacy_gbrain":
+        return "operator_local"
+    if scope == "user" or source_type == "user":
+        return "account_local"
+    if source_type.startswith("internal"):
+        return "internal_governance"
+    return "unclassified"
+
+
+def _evidence_class(card: dict[str, Any]) -> str:
+    source_type = str(card.get("source_type") or "")
+    category = str(card.get("category") or "")
+    if source_type == "official":
+        if category == "policies":
+            return "official_policy_summary"
+        return "official_documentation_summary"
+    if source_type.startswith("official_plus"):
+        return "official_anchored_operating_synthesis"
+    if source_type.startswith("community"):
+        return "operator_hypothesis"
+    if source_type == "account_authorized_official_evidence":
+        return "account_authorized_official_evidence"
+    if source_type == "legacy_gbrain":
+        return "operator_hypothesis"
+    if card.get("scope") == "user" or source_type == "user":
+        return "account_local_evidence"
+    return "unclassified"
+
+
+def _authority_score(card: dict[str, Any]) -> int:
+    tier = str(card.get("authority_tier") or _authority_tier(card))
+    return {
+        "primary": 12,
+        "primary_dynamic": 12,
+        "account_local": 10,
+        "secondary_synthesis": 6,
+        "internal_governance": 4,
+        "community_directional": 1,
+        "operator_local": 2,
+    }.get(tier, 0)
 
 
 def _freshness(card: dict[str, Any]) -> str:
@@ -352,10 +517,17 @@ def search(query: str, limit: int = 5) -> list[dict[str, Any]]:
     for card in list_cards():
         body = _read_body(card)
         hay = " ".join([card["id"], card["title"], " ".join(card.get("tags", [])), body])
-        score = _score(hay, terms)
-        if score:
+        lexical_score = _score(hay, terms)
+        if lexical_score:
+            score = lexical_score * 10 + _authority_score(card)
             snippet = _snippet(body, terms)
-            rows.append({**card, "score": score, "snippet": snippet})
+            rows.append({
+                **card,
+                "score": score,
+                "lexical_score": lexical_score,
+                "authority_score": _authority_score(card),
+                "snippet": snippet,
+            })
     rows.sort(key=lambda r: (-r["score"], r["id"]))
     return rows[:limit]
 
@@ -379,13 +551,13 @@ def render_search(query: str, limit: int = 5) -> str:
     if not hits:
         return "（无匹配知识）"
     lines = []
-    for h in hits:
+    for idx, h in enumerate(hits, 1):
         source = f" · {h['source_url']}" if h.get("source_url") else ""
         meta = (
             f"{h['source_type']} confidence={h.get('confidence', 'unknown')} "
             f"freshness={h.get('freshness', '-')} quality={h.get('source_quality', '-')}"
         )
-        lines.append(f"- {h['id']} · {h['title']} [{meta}]{source}\n  {h['snippet']}")
+        lines.append(f"- [K{idx}] {h['id']} · {h['title']} [{meta}]{source}\n  {h['snippet']}")
     return "\n".join(lines)
 
 
@@ -439,6 +611,11 @@ def source_registry() -> dict[str, Any]:
             "freshness": card.get("freshness", ""),
             "confidence": card.get("confidence", ""),
             "body_hash": card.get("body_hash", ""),
+            "authority_tier": card.get("authority_tier", ""),
+            "evidence_class": card.get("evidence_class", ""),
+            "marketplaces": list(card.get("marketplaces") or []),
+            "locales": list(card.get("locales") or []),
+            "evidence_id": card.get("evidence_id", ""),
         })
         row["card_count"] += 1
         if card.get("freshness") == "stale_needs_review":
@@ -569,6 +746,14 @@ def audit() -> dict[str, Any]:
             "source_url": card.get("source_url", ""),
             "tags": list(card.get("tags") or []),
             "body_hash": card.get("body_hash", ""),
+            "authority_tier": card.get("authority_tier", ""),
+            "evidence_class": card.get("evidence_class", ""),
+            "marketplaces": list(card.get("marketplaces") or []),
+            "locales": list(card.get("locales") or []),
+            "evidence_id": card.get("evidence_id", ""),
+            "evidence_kind": card.get("evidence_kind", ""),
+            "observed_at": card.get("observed_at", ""),
+            "diagnostic": card.get("diagnostic") or {},
         })
     conflict_rows = conflicts()
     registry = source_registry()
@@ -588,22 +773,293 @@ def audit() -> dict[str, Any]:
 
 def context_for_query(query: str, limit: int = 3, max_chars: int = 1200) -> tuple[str, list[str]]:
     """Return compact context snippets for prompt injection plus selected card ids."""
-    hits = search(query, limit=limit)
-    if not hits:
-        return "", []
-    lines = []
-    ids = []
-    for h in hits:
-        ids.append(h["id"])
-        lines.append(
-            f"[{h['id']}] {h['title']} "
-            f"(confidence={h.get('confidence', 'unknown')}, freshness={h.get('freshness', '-')}, "
-            f"quality={h.get('source_quality', '-')})：{h['snippet']}"
-        )
-    text = "\n".join(lines)
+    evidence = evidence_context(query, limit=limit, max_chars=max_chars)
+    text = str(evidence.get("text") or "")
     if len(text) > max_chars:
         text = text[:max_chars].rstrip() + "\n..."
-    return text, ids
+    return text, list(evidence.get("ids") or [])
+
+
+def retrieval_decision(query: str) -> dict[str, Any]:
+    """Decide whether Amazon evidence should be injected and how strict to be."""
+    low = str(query or "").lower().strip()
+    high_matches = sorted({term for term in _HIGH_RISK_TERMS if term in low})
+    domain_matches = sorted({term for term in _AMAZON_DOMAIN_TERMS if term in low})
+    diagnostic_issue = bool(domain_matches) and any(
+        term in low for term in (
+            "错误", "失败", "异常", "被拒", "不通过", "报错", "issue", "suppressed", "invalid", "required",
+        )
+    )
+    diagnostic_issue = diagnostic_issue or (
+        bool(domain_matches) and bool(re.search(r"\b(?:[a-z]{1,8}\d{3,}|\d{4,})\b", low))
+    )
+    if diagnostic_issue and not high_matches:
+        high_matches = ["amazon_diagnostic_issue"]
+    if high_matches:
+        return {
+            "should_retrieve": True,
+            "risk": "high",
+            "reason": "policy_or_account_impact",
+            "matched_terms": high_matches,
+        }
+    if domain_matches:
+        risk = "medium" if any(term in low for term in (
+            "广告", "流量", "算法", "listing", "fba", "转化", "sponsored products", "sponsored brands",
+            "sponsored display", "acos", "roas", "ctr", "cpc", "cvr", "归因", "attribution", "搜索词",
+            "search term", "广告位", "placement", "campaign manager",
+            "展示广告", "display ads", "amazon dsp", "程序化广告", "amc", "营销云", "clean room",
+        )) else "low"
+        return {
+            "should_retrieve": True,
+            "risk": risk,
+            "reason": "amazon_domain_question",
+            "matched_terms": domain_matches,
+        }
+    return {
+        "should_retrieve": False,
+        "risk": "none",
+        "reason": "no_amazon_domain_signal",
+        "matched_terms": [],
+    }
+
+
+def evidence_context(query: str, limit: int = 4, max_chars: int = 2600) -> dict[str, Any]:
+    """Return ranked evidence, stable citation keys and a prompt-ready context block."""
+    decision = retrieval_decision(query)
+    if not decision["should_retrieve"]:
+        return {
+            **decision, "text": "", "citations": [], "ids": [], "hits": [],
+            "freshness_review_required": False,
+        }
+    requested = max(1, min(int(limit or 4), 10))
+    hits = search(query, limit=min(50, requested * 3))
+    algorithm_question = any(term in str(query or "").lower() for term in ("算法", "algorithm", "流量池", "权重", "自然排名", "organic rank"))
+    query_low = str(query or "").lower()
+    specific_terms = [
+        term.lower() for term in re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]{5,}", str(query or ""))
+        if (re.search(r"[A-Za-z]", term) and (re.search(r"\d", term) or "-" in term or "_" in term))
+    ]
+
+    def topic_bonus(hit: dict[str, Any]) -> int:
+        category = str(hit.get("category") or "")
+        hay = " ".join([
+            str(hit.get("id") or ""), str(hit.get("title") or ""), category,
+            " ".join(hit.get("tags") or []), str(hit.get("snippet") or ""),
+        ]).lower()
+        bonus = 0
+        for exact in re.findall(r"\b(?:[A-Za-z]{1,8}\d{3,}|\d{4,})\b", str(query or "")):
+            if exact.lower() in hay:
+                bonus += 200
+        category_rules = [
+            (("注册", "registration", "身份验证", "verification"), {"seller_registration", "registration_errors"}),
+            (("费用", "fee", "佣金", "referral"), {"seller_fees"}),
+            (("受限", "restricted"), {"restricted_products"}),
+            (("危险品", "危品", "hazmat", "sds"), {"dangerous_goods"}),
+            (("gtin", "upc", "ean", "条码"), {"listing_requirements"}),
+            (("变体", "variation", "parent_sku", "父子体"), {"listing_requirements"}),
+            (("绩效", "account health", "停用", "申诉", "appeal"), {"account_health", "policies"}),
+            (("报错", "错误", "error", "invalid", "required"), {"listing_errors", "registration_errors"}),
+            (("广告", "acos", "roas", "ctr", "cpc", "cvr", "归因", "attribution"), {"ads_measurement"}),
+            (("报表", "报告", "report", "搜索词", "search term", "广告位", "placement"), {"ads_reporting"}),
+            (("实验", "测试", "experiment", "因果", "causal"), {"ads_experimentation"}),
+            (("算法", "algorithm", "流量池", "权重", "自然排名", "organic rank"), {"traffic_governance"}),
+            (("税务", "tax", "vat", "gst", "sales tax"), {"tax_compliance"}),
+            (("结算", "对账", "settlement", "reconciliation", "payment"), {"finance_settlement"}),
+            (("退货", "退款", "索赔", "returns", "refund", "safe-t", "claim"), {"returns_claims"}),
+            (("品牌备案", "brand registry", "商标", "trademark"), {"brand_registry"}),
+            (("透明计划", "transparency", "防伪", "serialization"), {"brand_protection"}),
+            (("sponsored brands", "品牌广告"), {"sponsored_brands"}),
+            (("展示广告", "display ads", "sponsored display"), {"display_ads"}),
+            (("amazon dsp", "程序化广告"), {"amazon_dsp"}),
+            (("amazon marketing cloud", "amc", "营销云", "clean room"), {"ads_clean_room"}),
+        ]
+        for terms, categories in category_rules:
+            if category in categories and any(term in query_low for term in terms):
+                bonus += 60
+        hit_id = str(hit.get("id") or "")
+        hit_markets = {str(value).upper() for value in hit.get("marketplaces") or []}
+        if any(term in query_low for term in ("日本", "japan", "jp")) and "JP" in hit_markets:
+            bonus += 90
+        if any(term in query_low for term in ("英国", "uk", "欧洲", "europe", "eu")) and hit_markets.intersection({"UK", "DE", "FR", "IT", "ES", "NL", "SE", "PL"}):
+            bonus += 90
+        if hit_id == "amazon_ads.bid_stack_and_auction" and any(
+            term in query_low for term in ("动态竞价", "dynamic bidding", "叠加", "effective bid")
+        ):
+            bonus += 100
+        return bonus
+
+    def evidence_priority(hit: dict[str, Any]) -> tuple[int, int, int, str]:
+        tier = str(hit.get("authority_tier") or "")
+        hit_hay = " ".join([
+            str(hit.get("id") or ""), str(hit.get("title") or ""), str(hit.get("snippet") or ""),
+            " ".join(hit.get("tags") or []),
+        ]).lower()
+        account_specific = tier == "account_local" and any(term in hit_hay for term in specific_terms)
+        if account_specific:
+            priority = 130
+        elif algorithm_question and hit.get("id") == "governance.traffic_algorithm_evidence":
+            priority = 120
+        elif algorithm_question and hit.get("id") == "governance.professional_knowledge_standard":
+            priority = 115
+        elif tier.startswith("primary"):
+            priority = 110
+        elif tier == "internal_governance":
+            priority = 100
+        elif tier == "account_local":
+            priority = 90
+        elif tier == "secondary_synthesis":
+            priority = 80
+        elif tier in {"operator_local", "community_directional"}:
+            priority = 30
+        else:
+            priority = 10
+        freshness = str(hit.get("freshness") or "")
+        if freshness == "stale_needs_review":
+            priority -= 25
+        elif freshness in {"aging_review_soon", "undated"}:
+            priority -= 10
+        return priority, topic_bonus(hit), int(hit.get("score") or 0), str(hit.get("id") or "")
+
+    hits.sort(key=lambda hit: (
+        -evidence_priority(hit)[0], -evidence_priority(hit)[1],
+        -evidence_priority(hit)[2], evidence_priority(hit)[3],
+    ))
+    hits = hits[:requested]
+    freshness_review_required = any(
+        hit.get("freshness") in {"stale_needs_review", "aging_review_soon", "undated"} for hit in hits
+    )
+    citations: list[dict[str, Any]] = []
+    lines: list[str] = []
+    for idx, hit in enumerate(hits, 1):
+        key = f"K{idx}"
+        citation = {
+            "key": key,
+            "id": hit["id"],
+            "title": hit["title"],
+            "url": str(hit.get("source_url") or ""),
+            "source_type": hit.get("source_type", "unknown"),
+            "authority_tier": hit.get("authority_tier", "unclassified"),
+            "evidence_class": hit.get("evidence_class", "unclassified"),
+            "freshness": hit.get("freshness", "unknown"),
+            "retrieved_at": hit.get("retrieved_at", ""),
+            "marketplaces": list(hit.get("marketplaces") or ["GLOBAL"]),
+            "locales": list(hit.get("locales") or []),
+            "snippet": hit["snippet"],
+        }
+        citations.append(citation)
+        lines.append(
+            f"[{key}] {citation['title']} | id={citation['id']} | authority={citation['authority_tier']} | "
+            f"evidence={citation['evidence_class']} | confidence={hit.get('confidence', 'unknown')} | "
+            f"freshness={citation['freshness']} | marketplace={','.join(citation['marketplaces'])} | "
+            f"url={citation['url'] or '(internal/no-url)'}\n"
+            f"excerpt: {citation['snippet']}"
+        )
+    if lines:
+        text = (
+            f"检索决策：risk={decision['risk']} reason={decision['reason']}。\n"
+            + "\n".join(lines)
+            + "\n引用规则：仅在结论确实由摘录支持时使用对应 [K#]；官方事实、数据推断、运营假设必须明确区分。"
+        )
+        if freshness_review_required:
+            text += "\n时效门禁：命中证据包含过期、临期或无日期内容；高风险结论必须先核对当前官方来源。"
+    else:
+        text = (
+            f"检索决策：risk={decision['risk']} reason={decision['reason']}，但内部知识库没有命中。"
+            "不得把猜测写成亚马逊官方规则；应明确知识缺口，并建议核对对应站点的最新官方页面。"
+        )
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "\n..."
+        visible_keys = set(citation_keys(text))
+        visible_pairs = [
+            (citation, hit) for citation, hit in zip(citations, hits)
+            if citation["key"] in visible_keys
+        ]
+        citations = [pair[0] for pair in visible_pairs]
+        hits = [pair[1] for pair in visible_pairs]
+    return {
+        **decision,
+        "text": text,
+        "citations": citations,
+        "ids": [hit["id"] for hit in hits],
+        "hits": hits,
+        "freshness_review_required": freshness_review_required,
+    }
+
+
+def citation_keys(text: str) -> list[str]:
+    """Extract unique citation keys in their first-use order."""
+    seen: set[str] = set()
+    keys: list[str] = []
+    for match in re.finditer(r"\[(K\d+)\]", str(text or ""), flags=re.IGNORECASE):
+        key = match.group(1).upper()
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
+
+
+def validate_citations(text: str, citations: list[dict[str, Any]]) -> dict[str, Any]:
+    available = {str(row.get("key") or "").upper() for row in citations if row.get("key")}
+    used = citation_keys(text)
+    valid = [key for key in used if key in available]
+    invalid = [key for key in used if key not in available]
+    return {
+        "ok": bool(valid) and not invalid,
+        "available": sorted(available, key=lambda key: int(key[1:]) if key[1:].isdigit() else 0),
+        "used": used,
+        "valid": valid,
+        "invalid": invalid,
+        "missing": not bool(valid),
+    }
+
+
+def merge_citations(
+    existing: list[dict[str, Any]], incoming: list[dict[str, Any]], text: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Merge evidence from repeated searches and remap incoming keys without collisions."""
+    merged = [dict(row) for row in existing]
+    by_id = {str(row.get("id") or ""): str(row.get("key") or "") for row in merged if row.get("id")}
+    numbers = [int(key[1:]) for key in (str(row.get("key") or "") for row in merged)
+               if re.fullmatch(r"K\d+", key)]
+    next_number = max(numbers, default=0) + 1
+    mapping: dict[str, str] = {}
+    for raw in incoming:
+        row = dict(raw)
+        old_key = str(row.get("key") or "").upper()
+        card_id = str(row.get("id") or "")
+        new_key = by_id.get(card_id, "")
+        if not new_key:
+            new_key = f"K{next_number}"
+            next_number += 1
+            row["key"] = new_key
+            merged.append(row)
+            if card_id:
+                by_id[card_id] = new_key
+        mapping[old_key] = new_key
+
+    def replace(match: re.Match[str]) -> str:
+        old_key = match.group(1).upper()
+        return f"[{mapping.get(old_key, old_key)}]"
+
+    rewritten = re.sub(r"\[(K\d+)\]", replace, str(text or ""), flags=re.IGNORECASE)
+    return merged, rewritten
+
+
+def append_citation_footer(text: str, citations: list[dict[str, Any]]) -> str:
+    """Append only the sources actually cited by the answer."""
+    check = validate_citations(text, citations)
+    if not check["valid"] or "\n引用知识：\n" in text:
+        return text
+    by_key = {str(row.get("key") or "").upper(): row for row in citations}
+    lines = ["引用知识："]
+    for key in check["valid"]:
+        row = by_key[key]
+        source = row.get("url") or f"ivyea://knowledge/{row.get('id', '')}"
+        lines.append(
+            f"- [{key}] {row.get('title') or row.get('id')} — {source} "
+            f"({row.get('authority_tier', 'unclassified')}, {row.get('freshness', 'unknown')})"
+        )
+    return str(text or "").rstrip() + "\n\n" + "\n".join(lines)
 
 
 def _slug(value: str) -> str:
@@ -663,6 +1119,159 @@ def _tag_list(tags: list[str] | str | None) -> list[str]:
     return []
 
 
+def _write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".{time.time_ns()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _write_json_atomic(path: Path, value: Any) -> None:
+    _write_text_atomic(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def _version_rows() -> list[dict[str, Any]]:
+    path = _versions_file()
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _new_version_id(card_id: str, revision: int, body_hash: str) -> str:
+    material = f"{card_id}|{revision}|{body_hash}|{time.time_ns()}"
+    return "kv-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+
+
+def _record_version_unlocked(
+    card: dict[str, Any],
+    body: str,
+    *,
+    action: str,
+    actor: str,
+    actor_source: str,
+    rollback_from: str = "",
+) -> dict[str, Any]:
+    version_id = str(card.get("current_version_id") or "")
+    if not version_id:
+        raise ValueError("versioned card is missing current_version_id")
+    card_id = str(card.get("id") or "")
+    created_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    snapshot_path = _versions_dir() / _slug(card_id) / f"{version_id}.json"
+    snapshot = {
+        "version_id": version_id,
+        "card_id": card_id,
+        "revision": int(card.get("revision") or 1),
+        "created_at": created_at,
+        "action": action,
+        "actor": security.redact_text(str(actor or "local-operator"))[:120],
+        "actor_source": str(actor_source or "local_operation")[:80],
+        "rollback_from": str(rollback_from or ""),
+        "body_hash": str(card.get("body_hash") or _hash(body)),
+        "parent_version_id": str(card.get("parent_version_id") or ""),
+        "card": dict(card),
+        "body": body,
+    }
+    _write_json_atomic(snapshot_path, snapshot)
+    ledger = {key: value for key, value in snapshot.items() if key not in {"card", "body"}}
+    ledger["snapshot"] = str(snapshot_path)
+    path = _versions_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(ledger, ensure_ascii=False) + "\n")
+        fh.flush()
+    return ledger
+
+
+def list_versions(card_id: str = "", limit: int = 100) -> dict[str, Any]:
+    """List immutable user-card revisions without exposing snapshot bodies."""
+    clean_id = str(card_id or "").strip()
+    rows = _version_rows()
+    if clean_id:
+        rows = [row for row in rows if row.get("card_id") == clean_id]
+    rows = rows[-max(1, min(int(limit or 100), 1000)):]
+    rows.reverse()
+    return {
+        "summary": {"versions": len(rows), "card_id": clean_id},
+        "versions": rows,
+        "ledger": str(_versions_file()),
+    }
+
+
+def rollback_version(
+    card_id: str,
+    version_id: str,
+    *,
+    confirm: bool = False,
+    rebuild_indexes: bool = True,
+    actor: str = "local-operator",
+    actor_source: str = "local_cli",
+) -> dict[str, Any]:
+    """Restore a user card from an immutable version snapshot."""
+    clean_card_id = str(card_id or "").strip()
+    clean_version_id = str(version_id or "").strip()
+    if not confirm:
+        return {
+            "ok": False,
+            "rolled_back": False,
+            "error": "confirmation_required",
+            "card_id": clean_card_id,
+            "version_id": clean_version_id,
+        }
+    row = next(
+        (
+            item for item in reversed(_version_rows())
+            if item.get("card_id") == clean_card_id and item.get("version_id") == clean_version_id
+        ),
+        None,
+    )
+    if not row:
+        raise ValueError(f"unknown knowledge version: {clean_card_id}@{clean_version_id}")
+    snapshot = json.loads(Path(str(row["snapshot"])).read_text(encoding="utf-8"))
+    stored_card = snapshot.get("card") or {}
+    body = str(snapshot.get("body") or "")
+    current = next((item for item in list_user_cards() if item.get("id") == clean_card_id), None)
+    expected_hash = str((current or {}).get("body_hash") or "") if current else None
+    card = import_text(
+        str(stored_card.get("title") or clean_card_id),
+        body,
+        source_url=str(stored_card.get("source_url") or ""),
+        source_type=str(stored_card.get("source_type") or "user"),
+        confidence=str(stored_card.get("confidence") or ""),
+        tags=_tag_list(stored_card.get("tags")),
+        card_id=clean_card_id,
+        license=str(stored_card.get("license") or "user_supplied"),
+        expected_old_hash=expected_hash,
+        actor=actor,
+        actor_source=actor_source,
+        version_action="rollback",
+        rollback_from=clean_version_id,
+    )
+    indexes: dict[str, Any] = {}
+    if rebuild_indexes:
+        indexes["knowledge"] = rebuild_index()
+        try:
+            from . import retrieval
+            indexes["retrieval"] = retrieval.rebuild_index()
+        except Exception as exc:
+            indexes["retrieval_error"] = security.redact_text(str(exc))
+    return {
+        "ok": True,
+        "rolled_back": True,
+        "card": card,
+        "restored_version_id": clean_version_id,
+        "created_version_id": card.get("current_version_id"),
+        "indexes": indexes,
+    }
+
+
 def _upload_rows() -> list[dict[str, Any]]:
     p = _upload_history_file()
     if not p.exists():
@@ -681,14 +1290,13 @@ def _upload_rows() -> list[dict[str, Any]]:
 
 
 def _upsert_upload(row: dict[str, Any]) -> None:
-    p = _upload_history_file()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    rows = [r for r in _upload_rows() if r.get("id") != row.get("id")]
-    rows.append(row)
-    rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
-    tmp = p.with_suffix(".jsonl.tmp")
-    tmp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
-    tmp.replace(p)
+    with locking.exclusive_file_lock(_mutation_lock_file()):
+        p = _upload_history_file()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        rows = [r for r in _upload_rows() if r.get("id") != row.get("id")]
+        rows.append(row)
+        rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+        _write_text_atomic(p, "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
 
 
 def list_uploads(limit: int = 50) -> dict[str, Any]:
@@ -761,6 +1369,7 @@ def read_file(path: str, max_chars: int = 200_000) -> dict[str, Any]:
     }
 
 
+@locking.serialized(_mutation_lock_file)
 def delete_file(path: str) -> dict[str, Any]:
     rel = _safe_rel_path(path)
     target = _resolve_user_path(rel.as_posix())
@@ -777,7 +1386,9 @@ def delete_file(path: str) -> dict[str, Any]:
                 rows.append(card)
         p = _sources_file()
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + ("\n" if rows else ""), encoding="utf-8")
+        _write_text_atomic(
+            p, "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + ("\n" if rows else ""),
+        )
         rebuild_index()
     return {"ok": True, "path": rel.as_posix(), "removed_card_ids": removed_card_ids}
 
@@ -1108,16 +1719,30 @@ def apply_update(draft: dict[str, Any], *, confirm: bool = False,
     body = str(draft.get("body") or "").strip()
     if not body:
         return {"ok": False, "applied": False, "error": "draft_body_missing"}
-    card = import_text(
-        str(draft.get("title") or draft.get("card_id") or "用户知识"),
-        body,
-        source_url=str(draft.get("source_url") or ""),
-        source_type=str(draft.get("source_type") or "user"),
-        confidence=str(draft.get("confidence") or ""),
-        tags=_tag_list(draft.get("tags")),
-        card_id=str(draft.get("card_id") or ""),
-        license=str(draft.get("license") or "user_supplied"),
-    )
+    try:
+        card = import_text(
+            str(draft.get("title") or draft.get("card_id") or "用户知识"),
+            body,
+            source_url=str(draft.get("source_url") or ""),
+            source_type=str(draft.get("source_type") or "user"),
+            confidence=str(draft.get("confidence") or ""),
+            tags=_tag_list(draft.get("tags")),
+            card_id=str(draft.get("card_id") or ""),
+            license=str(draft.get("license") or "user_supplied"),
+            expected_old_hash=str(draft.get("old_hash") or ""),
+            actor=str(draft.get("reviewer") or draft.get("actor") or "local-operator"),
+            actor_source=str(draft.get("reviewer_source") or draft.get("actor_source") or "confirmed_update"),
+        )
+    except KnowledgeConflictError as exc:
+        current = get_card(str(draft.get("card_id") or "")) or {}
+        return {
+            "ok": False,
+            "applied": False,
+            "error": "knowledge_update_conflict",
+            "message": security.redact_text(str(exc)),
+            "expected_old_hash": str(draft.get("old_hash") or ""),
+            "current_hash": str(current.get("body_hash") or ""),
+        }
     indexes: dict[str, Any] = {}
     if rebuild_indexes:
         indexes["knowledge"] = rebuild_index()
@@ -1133,6 +1758,7 @@ def apply_update(draft: dict[str, Any], *, confirm: bool = False,
         "card": card,
         "indexes": indexes,
         "warnings": list(draft.get("warnings") or []),
+        "version_id": card.get("current_version_id"),
         "conflicts": conflicts(),
     }
 
@@ -1191,7 +1817,9 @@ def render_update_apply(result: dict[str, Any]) -> str:
 
 def import_text(title: str, body: str, *, source_url: str = "", source_type: str = "user",
                 confidence: str = "", tags: list[str] | None = None, card_id: str = "",
-                license: str = "user_supplied") -> dict[str, Any]:
+                license: str = "user_supplied", expected_old_hash: str | None = None,
+                actor: str = "local-operator", actor_source: str = "local_operation",
+                version_action: str = "apply", rollback_from: str = "") -> dict[str, Any]:
     """Import a user knowledge card into ~/.ivyea/knowledge."""
     config.ensure_dirs()
     base = _user_base()
@@ -1199,23 +1827,89 @@ def import_text(title: str, body: str, *, source_url: str = "", source_type: str
     safe_id = card_id or f"user.{_slug(title)}"
     rel = f"user/{_slug(safe_id)}.md"
     out = base / rel
-    out.parent.mkdir(parents=True, exist_ok=True)
     clean_body = security.redact_text(body).strip() + "\n"
-    out.write_text(clean_body, encoding="utf-8")
-    card = {
-        "id": safe_id,
-        "title": title.strip() or safe_id,
-        "category": "user",
-        "source_type": source_type or "user",
-        "confidence": confidence or _confidence(source_type or "user"),
-        "retrieved_at": time.strftime("%Y-%m-%d"),
-        "license": license or "user_supplied",
-        "source_url": source_url,
-        "path": rel,
-        "tags": tags or [],
-        "scope": "user",
-        "body_hash": _hash(clean_body),
+    with locking.exclusive_file_lock(_mutation_lock_file()):
+        existing = next((dict(row) for row in list_user_cards() if row.get("id") == safe_id), None)
+        current_hash = str((existing or {}).get("body_hash") or "")
+        if existing and not current_hash:
+            try:
+                current_hash = _hash(_user_base().joinpath(str(existing["path"])).read_text(encoding="utf-8"))
+            except OSError:
+                current_hash = ""
+        if expected_old_hash is not None and current_hash != str(expected_old_hash):
+            raise KnowledgeConflictError(
+                f"knowledge update conflict for {safe_id}: expected {expected_old_hash or '-'}, current {current_hash or '-'}"
+            )
+
+        parent_version_id = str((existing or {}).get("current_version_id") or "")
+        revision = int((existing or {}).get("revision") or 0)
+        if existing and not parent_version_id:
+            baseline_body = _user_base().joinpath(str(existing["path"])).read_text(
+                encoding="utf-8", errors="replace",
+            )
+            revision = max(1, revision)
+            parent_version_id = _new_version_id(safe_id, revision, _hash(baseline_body))
+            baseline = {
+                **existing,
+                "revision": revision,
+                "current_version_id": parent_version_id,
+                "parent_version_id": "",
+                "body_hash": _hash(baseline_body),
+            }
+            _record_version_unlocked(
+                baseline,
+                baseline_body,
+                action="baseline",
+                actor="system-migration",
+                actor_source="version_bootstrap",
+            )
+
+        revision = revision + 1 if existing else 1
+        body_hash = _hash(clean_body)
+        version_id = _new_version_id(safe_id, revision, body_hash)
+        card = {
+            "id": safe_id,
+            "title": title.strip() or safe_id,
+            "category": "user",
+            "source_type": source_type or "user",
+            "confidence": confidence or _confidence(source_type or "user"),
+            "retrieved_at": time.strftime("%Y-%m-%d"),
+            "license": license or "user_supplied",
+            "source_url": source_url,
+            "path": rel,
+            "tags": tags or [],
+            "scope": "user",
+            "body_hash": body_hash,
+            "revision": revision,
+            "current_version_id": version_id,
+            "parent_version_id": parent_version_id,
+            "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        _write_text_atomic(out, clean_body)
+        _upsert_source_unlocked(card)
+        _record_version_unlocked(
+            card,
+            clean_body,
+            action=version_action,
+            actor=actor,
+            actor_source=actor_source,
+            rollback_from=rollback_from,
+        )
+        return card
+
+
+def annotate_user_card(card_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    """Attach allowlisted structured metadata to an existing user knowledge card."""
+    card = next((dict(row) for row in list_user_cards() if row.get("id") == card_id), None)
+    if not card:
+        raise FileNotFoundError(card_id)
+    allowed = {
+        "marketplaces", "locales", "evidence_id", "evidence_kind", "observed_at",
+        "captured_at", "diagnostic", "authority_tier", "evidence_class", "source_quality",
     }
+    for key, value in metadata.items():
+        if key in allowed:
+            card[key] = value
     _upsert_source(card)
     return card
 
@@ -1423,16 +2117,20 @@ def import_url(url: str, *, title: str = "", source_type: str = "user",
     )
 
 
-def _upsert_source(card: dict[str, Any]) -> None:
+def _upsert_source_unlocked(card: dict[str, Any]) -> None:
     p = _sources_file()
     p.parent.mkdir(parents=True, exist_ok=True)
     rows = [c for c in list_user_cards() if c.get("id") != card["id"]]
     rows.append(card)
-    tmp = p.with_suffix(".jsonl.tmp")
-    tmp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
-    tmp.replace(p)
+    _write_text_atomic(p, "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
 
 
+def _upsert_source(card: dict[str, Any]) -> None:
+    with locking.exclusive_file_lock(_mutation_lock_file()):
+        _upsert_source_unlocked(card)
+
+
+@locking.serialized(_mutation_lock_file)
 def rebuild() -> dict[str, Any]:
     """Validate user knowledge metadata and prune rows with missing files."""
     rows = []
@@ -1444,7 +2142,9 @@ def rebuild() -> dict[str, Any]:
             missing.append(card["id"])
     p = _sources_file()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + ("\n" if rows else ""), encoding="utf-8")
+    _write_text_atomic(
+        p, "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + ("\n" if rows else ""),
+    )
     idx = rebuild_index()
     return {"user_cards": len(rows), "missing_pruned": missing, "sources": str(p), "index": idx}
 
@@ -1562,22 +2262,58 @@ def conflicts() -> list[dict[str, Any]]:
     official = [c for c in cards if c.get("source_type") == "official" or str(c.get("source_type", "")).startswith("official_plus")]
     user = [c for c in cards if c.get("scope") == "user"]
     rows = []
+    seen: set[str] = set()
+
+    def add(card: dict[str, Any], level: str, reason_code: str, reason: str, related: list[str] | None = None) -> None:
+        fingerprint = _hash("|".join([str(card.get("id")), reason_code, *(related or [])]))[:16]
+        if fingerprint in seen:
+            return
+        seen.add(fingerprint)
+        row = {
+            "fingerprint": fingerprint,
+            "level": level,
+            "id": card["id"],
+            "reason_code": reason_code,
+            "reason": reason,
+            "related": (related or [])[:5],
+            "review_required": True,
+        }
+        rows.append(row)
+
     for card in user:
         if not card.get("license"):
-            rows.append({"level": "warn", "id": card["id"], "reason": "用户知识卡缺 license"})
-        tags = set(card.get("tags") or [])
+            add(card, "warn", "missing_license", "用户知识卡缺 license")
+        tags = {str(tag).lower() for tag in card.get("tags") or []}
         body = _read_body(card).lower()
+        overlaps = [
+            row["id"] for row in official
+            if tags and tags.intersection({str(tag).lower() for tag in row.get("tags") or []})
+        ]
         reverse = any(k in body for k in ("不要", "禁止", "不建议", "avoid", "do not", "never"))
-        if not reverse:
-            continue
-        overlaps = [o["id"] for o in official if tags and tags.intersection(set(o.get("tags") or []))]
-        if overlaps:
-            rows.append({
-                "level": "review",
-                "id": card["id"],
-                "reason": "用户/社区知识含反向表述，且标签与官方知识重叠；需要人工确认是否冲突",
-                "related": overlaps[:5],
-            })
+        if reverse and overlaps:
+            add(
+                card, "review", "directional_claim_overlap",
+                "用户/社区知识含反向表述，且标签与官方知识重叠；需要人工确认是否冲突", overlaps,
+            )
+        undocumented_algorithm = any(term in body for term in (
+            "流量池", "算法权重", "隐藏权重", "固定权重", "traffic pool", "hidden weight", "ranking weight",
+        ))
+        universal_claim = any(term in body for term in (
+            "一定", "必然", "保证", "永远", "固定为", "guarantee", "always", "must", "will always",
+        ))
+        numeric_rule = bool(re.search(r"\b\d+(?:\.\d+)?\s*(?:%|clicks?|days?)\b|\d+(?:\.\d+)?\s*(?:次点击|天)", body))
+        if overlaps and (undocumented_algorithm or (universal_claim and numeric_rule)):
+            add(
+                card, "review", "unsupported_algorithm_or_numeric_claim",
+                "用户/旧知识包含未公开算法或绝对数值规则，且与官方主题重叠；必须降级为假设或补充当前证据", overlaps,
+            )
+        source_url = str(card.get("source_url") or "")
+        if str(card.get("source_type") or "") == "official" and not source_url.startswith((
+            "https://advertising.amazon.com/", "https://sell.amazon.",
+            "https://sellercentral.amazon.", "https://developer-docs.amazon",
+        )):
+            add(card, "fail", "official_provenance_invalid", "标记为 official 的用户知识没有可验证的 Amazon 官方 URL")
+    rows.sort(key=lambda row: ({"fail": 0, "review": 1, "warn": 2}.get(row["level"], 3), row["id"], row["reason_code"]))
     return rows
 
 
