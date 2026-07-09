@@ -125,6 +125,7 @@ _HIGH_RISK_TERMS = (
     "绩效", "账户状况", "account health", "停用", "封号", "suspension", "deactivation",
     "申诉", "appeal", "政策", "规则", "合规", "知识产权", "侵权", "费用", "fee",
     "限制", "restricted", "受限商品", "危险品", "危品", "hazmat", "sds", "税务", "vat",
+    "gst", "消费税", "jct", "インボイス", "适格请求书", "适格請求書",
     "gtin", "条码豁免", "知识产权投诉", "税务", "结算", "对账", "退款", "索赔", "safe-t",
 )
 _AMAZON_DOMAIN_TERMS = (
@@ -136,7 +137,8 @@ _AMAZON_DOMAIN_TERMS = (
     "account health", "product type", "英国站", "欧洲站", "日本站", "受限商品", "危险品",
     "危品", "gtin", "条码豁免", "变体", "父子体", "佣金", "sku", "upc", "ean", "parent_sku",
     "归因", "广告报表", "搜索词报告", "广告位", "竞价策略", "自然排名", "流量池", "权重",
-    "税务", "结算", "对账", "退货", "退款", "索赔", "safe-t", "brand registry", "品牌备案",
+    "税务", "gst", "消费税", "jct", "インボイス", "适格请求书", "适格請求書",
+    "结算", "对账", "退货", "退款", "索赔", "safe-t", "brand registry", "品牌备案",
     "透明计划", "transparency", "展示广告", "display ads", "amazon dsp", "程序化广告", "amc", "营销云",
 )
 
@@ -863,7 +865,7 @@ def evidence_context(query: str, limit: int = 4, max_chars: int = 2600) -> dict[
             (("报表", "报告", "report", "搜索词", "search term", "广告位", "placement"), {"ads_reporting"}),
             (("实验", "测试", "experiment", "因果", "causal"), {"ads_experimentation"}),
             (("算法", "algorithm", "流量池", "权重", "自然排名", "organic rank"), {"traffic_governance"}),
-            (("税务", "tax", "vat", "gst", "sales tax"), {"tax_compliance"}),
+            (("税务", "tax", "vat", "gst", "sales tax", "消费税", "jct", "インボイス", "适格请求书"), {"tax_compliance"}),
             (("结算", "对账", "settlement", "reconciliation", "payment"), {"finance_settlement"}),
             (("退货", "退款", "索赔", "returns", "refund", "safe-t", "claim"), {"returns_claims"}),
             (("品牌备案", "brand registry", "商标", "trademark"), {"brand_registry"}),

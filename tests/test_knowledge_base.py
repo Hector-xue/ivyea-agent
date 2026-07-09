@@ -559,3 +559,78 @@ def test_expanded_official_amazon_knowledge_base():
     assert categories["seller_university"] >= 1
     assert categories["fba"] >= 1
     assert categories["policies"] >= 1
+
+
+def test_phase_six_ca_mx_site_cards_and_tax_localization():
+    """North-America (CA/MX) local cards + VAT/JCT tax localization (Phase 6, B stage)."""
+    new_ids = {
+        "seller_registration.mexico_registration",
+        "policies.account_health_ca",
+        "policies.account_health_mx",
+        "fees.ca_selling_fees",
+        "fees.mx_selling_fees",
+        "policies.restricted_products_ca",
+        "policies.restricted_products_mx",
+        "fba.dangerous_goods_ca",
+        "fba.dangerous_goods_mx",
+        "tax.vat_uk",
+        "tax.vat_eu",
+        "tax.jct_japan",
+    }
+    cards = {c["id"]: c for c in knowledge.list_builtin_cards()}
+    assert new_ids.issubset(cards), new_ids - set(cards)
+    for card_id in new_ids:
+        card = cards[card_id]
+        assert card["source_type"] == "official"
+        assert card.get("source_url", "").startswith("https://")
+        assert card["authority_tier"].startswith("primary")
+        assert card.get("marketplaces"), card_id
+
+    # marketplace localization is exact (no GLOBAL padding on the new local cards).
+    assert cards["policies.account_health_ca"]["marketplaces"] == ["CA"]
+    assert cards["fees.mx_selling_fees"]["marketplaces"] == ["MX"]
+    assert cards["tax.jct_japan"]["marketplaces"] == ["JP"]
+    assert "DE" in cards["tax.vat_eu"]["marketplaces"]
+
+    recall = [
+        ("墨西哥站注册需要什么资料 Mexico registration", "seller_registration.mexico_registration"),
+        ("加拿大 账户 绩效 申诉 Canada account health", "policies.account_health_ca"),
+        ("墨西哥 账户健康 停用 绩效", "policies.account_health_mx"),
+        ("加拿大 费用 referral fee Canada fees", "fees.ca_selling_fees"),
+        ("墨西哥 费用 佣金 Mexico selling fees", "fees.mx_selling_fees"),
+        ("加拿大 受限商品 审批 restricted", "policies.restricted_products_ca"),
+        ("墨西哥 受限商品 NOM restricted", "policies.restricted_products_mx"),
+        ("加拿大 危险品 SDS 电池 dangerous goods", "fba.dangerous_goods_ca"),
+        ("墨西哥 危险品 FBA SDS", "fba.dangerous_goods_mx"),
+        ("英国 VAT 税务 申报 UK VAT", "tax.vat_uk"),
+        ("欧洲 VAT OSS 各国税率 EU VAT", "tax.vat_eu"),
+        ("日本 消费税 JCT 适格请求书 インボイス", "tax.jct_japan"),
+    ]
+    for query, expected in recall:
+        evidence = knowledge.evidence_context(query, limit=6)
+        ids = [row["id"] for row in evidence["citations"]]
+        assert expected in ids, (query, ids)
+
+
+def test_phase_six_governance_coverage_includes_north_america_and_tax():
+    from ivyea_agent import knowledge_governance
+
+    data = knowledge_governance.coverage()
+    assert data["summary"]["gaps"] == 0
+    assert data["summary"]["covered"] == data["summary"]["requirements"]
+    by_key = {(row["domain"], row["marketplace"]): row for row in data["requirements"]}
+    for key in [
+        ("seller_registration", "MX"),
+        ("account_health", "CA"),
+        ("account_health", "MX"),
+        ("seller_fees", "CA"),
+        ("seller_fees", "MX"),
+        ("restricted_products", "CA"),
+        ("restricted_products", "MX"),
+        ("dangerous_goods", "CA"),
+        ("dangerous_goods", "MX"),
+        ("tax_compliance", "UK"),
+        ("tax_compliance", "EU"),
+        ("tax_compliance", "JP"),
+    ]:
+        assert by_key[key]["status"] == "strong", (key, by_key[key]["status"])

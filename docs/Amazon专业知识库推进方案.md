@@ -121,3 +121,64 @@ ivyea knowledge changes
 - 审核人必须编辑精简后的知识正文并预览 diff；二次确认后发布独立运行时官方更新卡，不直接改写安装包中的内置卡。
 - 发布卡保留 change-event、source-hash 和 review-target，并写入独立 publication 台账；同一事件默认禁止重复发布。
 - IvyeaOps 浏览器只访问同源 FastAPI 代理，FastAPI 再访问本机 IvyeaAgent；审核、同步、草案和发布接口要求管理员权限。
+
+---
+
+## 进度快照与续做手册（2026-07-06 核查）
+
+### 已核查确认为“真跑通”的部分（不是只写了代码）
+
+- **Agent 侧**（`ivyea-agent` v1.7.1）：`knowledge` CLI 30+ 子命令齐全；`tests/test_knowledge_*`、`test_ads_evidence`、`test_retrieval_service` 共 88 passed；实时同步是真的——`knowledge sync-status` 显示 62 个官方源、47 个可公开监控，已真实抓取 `developer-docs.amazon/llms.txt` 等并存 snapshot/hash/etag。
+- **Ops 侧**（`ivyea-ops`）：`KnowledgeGovernance.tsx`（治理中心 7 视图：概览/变更审核/覆盖矩阵/时效/质量评测/证据导入/冲突）+ `client/src/api/ivyeaAgent.ts` + `server/app/routers/ivyea_agent.py`；集成测试 15 passed；`/brain?tab=governance` 已挂进侧边栏；`client/dist` 已构建含新工作台。
+- **端到端闭环（2026-07-06 隔离验证）**：在隔离 `IVYEA_HOME` 里用部署的 1.7.1 serve 跑通 变更→审核→发布 全链，且生产知识库零污染。已覆盖分支：种入真实 diff→进待审队列；**未签名的“管理员批准”被拒绝发布**（安全门禁）；HMAC 签名批准→允许生成草案；diff 预览；二次确认 apply→产出独立运行时 `user.` 卡 + 写 publication 台账；**同一事件重复发布被 409 挡掉**。验证脚本思路见本节末。
+
+### 本次修的一个尾巴
+
+- 运行中的 `agent-serve` 曾停在旧的 1.7.0（丢了 stale pidfile、未加载 `ed12841` 冲突匹配修复）。已用 `ivyea self service-stop`→精确 kill→`ivyea self service-start` 重启到 **1.7.1** 并纳入 pidfile 受管。**注意：`ivyea-agent` 源码更新后，`-m ivyea_agent.cli serve` 进程不会自动重载，必须重启 serve 才生效。**
+
+### 阶段 6：知识库横向铺站点 + 纵向深化（待做，B 阶段）
+
+覆盖矩阵当前 `requirements=41 covered=41 gaps=0`，但这是**按已写的卡量身定制的要求集**（`CRITICAL_REQUIREMENTS`），不等于亚马逊全量已覆盖。真实盲区（截至 2026-07-06、共 71 张卡）：
+
+| 域 | 已覆盖站点 | 明显缺口 |
+|---|---|---|
+| seller_registration | US / UK+EU8 / JP / CA / AU / SG / IN / AE | MX, BR |
+| account_health | US / UK / EU / JP | CA / AU / SG / IN / AE / MX / BR |
+| seller_fees | US / UK / EU / JP | CA / AU / SG / IN / AE / MX / BR |
+| restricted_products | US / UK / EU / JP | CA / AU / SG / IN / AE / MX / BR |
+| dangerous_goods | US / UK / EU / JP | CA / AU / SG / IN / AE |
+| policies（IP/合规程序） | 仅 US | UK / EU / JP 本地程序 |
+| tax_compliance | GLOBAL 1 张 | EU 各国 VAT / JP JCT / 各站分列 |
+| amazon_ads 各域 | 全 GLOBAL | 可按站点细化（次要） |
+
+核心不对称：**注册能开 9 个站，但绩效/费用/受限品/危险品的本地卡只到 US/UK/EU/JP，其余站只能靠 GLOBAL 兜底。**
+
+#### 本轮已完成（2026-07-09，北美 CA+MX 横向 + 税务 VAT/JCT 纵向）
+
+范围决策（本轮拍板）：**站点＝北美 CA+MX；纵向＝税务细化 VAT/JCT。** 已按“加一张站点卡的准确机制”落地，新增 12 张卡（71→83）：
+
+- **横向 CA**（注册卡已存在）：`policies.account_health_ca`、`fees.ca_selling_fees`、`policies.restricted_products_ca`、`fba.dangerous_goods_ca`。
+- **横向 MX**（连注册都缺，补齐）：`seller_registration.mexico_registration`、`policies.account_health_mx`、`fees.mx_selling_fees`、`policies.restricted_products_mx`、`fba.dangerous_goods_mx`。
+- **纵向税务**：`tax.vat_uk`（sell.amazon.co.uk/learn/vat-resources）、`tax.vat_eu`（sell.amazon.de/informationen/steuerinformationen）、`tax.jct_japan`（JP 适格请求书/インボイス Seller Central 帮助）。GLOBAL 报表税务卡保留。
+- 全部 `source_url` 逐个 curl 核实真实解析；**MX 费率页是 `/precios` 不是 `/pricing`（后者 404）；JP pricing 里名为“2026 FBA 改定概要”的 ref 不是税务页，已弃用另取 JCT 帮助 ref**。卡沿用既有“证据边界/决策边界/护栏”写法，不写死任何费率/阈值。
+- `CRITICAL_REQUIREMENTS` 加 12 条（41→53），`ivyea knowledge coverage` = **requirements=53 covered=53 gaps=0 100%**，12 个新格全部 `strong`。
+- 检索侧补 JCT 路由关键词（`消费税/jct/gst/インボイス/适格请求书`）到高风险词表、Amazon 域识别、类目路由三处，日本消费税/インボイス查询现命中 `tax.jct_japan`。
+- 测试：`tests/test_knowledge_base.py` 加两条阶段6断言；**全套 698 passed**（含 quality==41、retrieval、governance 覆盖矩阵）。
+- 生效提醒：改完 serve 需重启才加载（见上）；本轮未重启生产 serve、未 push/发版。
+
+**剩余待拍板（下次续做）：**
+- 站点：中东+南亚 AE/SG/IN 本地域 / 澳洲 AU / 巴西 BR（连注册都缺，工作量最大）。
+- 纵向：policies 补非 US 站（IP/合规程序 UK/EU/JP）/ 税务继续细化到 EU 各国单列。
+
+### 加一张站点卡的准确机制（续做时照做）
+
+`index.json` 是**手维护的元数据真源**（`knowledge.py` 只 `read_text` 加载，md 无 frontmatter，也没有从 md 生成 index 的脚本）。新增一张卡要改这些地方：
+
+1. 正文：`ivyea_agent/knowledge_base/<category>/<name>.md`（纯正文，含 Source basis / Required evidence / Decision boundary / Guardrails 段，参考 `policies/account_health_uk.md`）。
+2. 元数据：在 `ivyea_agent/knowledge_base/index.json` 的 `cards` 加条目——`id/title/category/source_type/version/retrieved_at/path/source_url/license/authority_tier/evidence_class/marketplaces/locales/tags`。**`source_url` 必须是真实亚马逊官方页，内容必须核实、不许瞎编费率/政策。**
+3. 计入覆盖：在 `ivyea_agent/knowledge_governance.py` 的 `CRITICAL_REQUIREMENTS` 加 `(domain, marketplace)` 元组。
+4. （可选）监控源：`ivyea_agent/knowledge_base/knowledge_sources.json` 加官方来源；质量基准题在 `knowledge_quality.py` / 评测数据。
+5. 测试：在 `tests/test_knowledge_base.py` 扩断言，跑 `python -m pytest tests/test_knowledge_base.py tests/test_knowledge_governance.py -q`。
+6. 生效：改完 serve 要重启（见上）；ops 侧无需改代码，工作台读的是同一份知识库。
+
+端到端发布闭环的隔离验证脚本思路：设临时 `IVYEA_HOME`→用 `knowledge_sync.sync(fetcher=...)` 造一条 change→起 serve（带 `--api-token`）→`/v1/knowledge/changes` 取 event_id→`/changes/review`（`reviewer_source=ops_authenticated_admin` + HMAC `identity_assertion`）→`/changes/draft`→`/changes/apply confirm=true`→查 `/v1/knowledge/cards` 与 publication 台账。发布卡 `id` 必须以 `user.` 开头。
