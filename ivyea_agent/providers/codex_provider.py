@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from typing import Any, Iterable, Iterator
 
 import httpx
 
-from .base import LLMError, LLMProvider
+from .base import LLMError, LLMProvider, RETRIES, RETRYABLE_STATUS, retry_backoff
 
 CODEX_MODEL_FALLBACKS = ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5-codex")
 
@@ -322,20 +323,28 @@ class CodexProvider(LLMProvider):
     def _post(self, payload: dict, timeout: float) -> dict:
         if not self.api_key:
             raise LLMError("OpenAI Codex OAuth token 未配置")
-        try:
-            resp = httpx.post(f"{self.base_url}/responses", headers=self._headers(),
-                              json=payload, timeout=timeout)
-        except httpx.HTTPError as exc:
-            raise LLMError(f"Codex Responses 连接失败：{exc}") from exc
-        if resp.status_code >= 400:
-            raise LLMError(f"Codex Responses HTTP {resp.status_code}: {resp.text[:200]}")
-        try:
-            data = resp.json()
-        except ValueError as exc:
-            raise LLMError(f"Codex Responses 返回非 JSON：{exc}") from exc
-        if not isinstance(data, dict):
-            raise LLMError("Codex Responses 返回格式异常")
-        return data
+        last = ""
+        for attempt in range(RETRIES):
+            try:
+                resp = httpx.post(f"{self.base_url}/responses", headers=self._headers(),
+                                  json=payload, timeout=timeout)
+            except httpx.HTTPError as exc:
+                last = f"Codex Responses 连接失败：{exc}"   # 网络/超时可重试
+            else:
+                if resp.status_code < 400:
+                    try:
+                        data = resp.json()
+                    except ValueError as exc:
+                        raise LLMError(f"Codex Responses 返回非 JSON：{exc}") from exc
+                    if not isinstance(data, dict):
+                        raise LLMError("Codex Responses 返回格式异常")
+                    return data
+                last = f"Codex Responses HTTP {resp.status_code}: {resp.text[:200]}"
+                if resp.status_code not in RETRYABLE_STATUS:
+                    raise LLMError(last)   # 4xx 等不可重试
+            if attempt < RETRIES - 1:
+                time.sleep(retry_backoff(attempt))
+        raise LLMError(f"Codex Responses 已重试 {RETRIES} 次仍失败：{last}")
 
     def _normalize(self, data: dict) -> dict:
         return _normalize_response(data)
@@ -389,22 +398,36 @@ class CodexProvider(LLMProvider):
             if converted_tools:
                 payload["tools"] = converted_tools
                 payload["tool_choice"] = "auto"
-            try:
-                with httpx.stream("POST", f"{self.base_url}/responses",
-                                  headers=self._headers(), json=payload, timeout=timeout) as resp:
-                    if resp.status_code >= 400:
-                        body = resp.read().decode("utf-8", "replace")
-                        err = LLMError(f"Codex Responses stream HTTP {resp.status_code}: {body[:200]}")
-                        if _unsupported_model_error(err):
-                            last_error = err
-                            continue
-                        raise err
-                    self.model = model
-                    for ev in parse_responses_sse(resp.iter_lines()):
-                        yield ev
-                    return
-            except httpx.HTTPError as exc:
-                raise LLMError(f"Codex Responses 流式连接失败：{exc}") from exc
+            for attempt in range(RETRIES):
+                yielded = False
+                retryable = False
+                try:
+                    with httpx.stream("POST", f"{self.base_url}/responses",
+                                      headers=self._headers(), json=payload, timeout=timeout) as resp:
+                        if resp.status_code >= 400:
+                            body = resp.read().decode("utf-8", "replace")
+                            err = LLMError(f"Codex Responses stream HTTP {resp.status_code}: {body[:200]}")
+                            if _unsupported_model_error(err):
+                                last_error = err
+                                break                       # 换下一个候选模型
+                            if resp.status_code not in RETRYABLE_STATUS:
+                                raise err                    # 硬错误(如 401/400)不重试
+                            last_error, retryable = err, True
+                        else:
+                            self.model = model
+                            for ev in parse_responses_sse(resp.iter_lines()):
+                                yielded = True
+                                yield ev
+                            return
+                except httpx.HTTPError as exc:
+                    last_error = LLMError(f"Codex Responses 流式连接失败：{exc}")   # 网络/超时可重试
+                    retryable = True
+                if yielded:                                  # 已吐 token，不能安全重试
+                    raise last_error
+                if retryable and attempt < RETRIES - 1:
+                    time.sleep(retry_backoff(attempt))
+                    continue
+                break                                        # 重试耗尽 → 试下一个模型
         raise last_error or LLMError("Codex Responses 没有可用模型")
 
 

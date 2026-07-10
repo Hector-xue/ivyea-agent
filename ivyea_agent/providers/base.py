@@ -12,6 +12,17 @@ class LLMError(Exception):
     pass
 
 
+# Shared transient-error retry policy for providers that speak HTTP directly
+# (openai_compat, codex). SDK-backed providers (anthropic, bedrock) rely on their
+# own client-level retries instead.
+RETRIES = 3
+RETRYABLE_STATUS = {429, 500, 502, 503, 504, 529}   # 限流/服务端瞬时错误可重试
+
+
+def retry_backoff(attempt: int) -> float:
+    return min(8.0, 0.8 * (2 ** attempt))      # 0.8s, 1.6s, 3.2s…封顶 8s
+
+
 class LLMProvider:
     """所有模型适配器的统一接口。"""
 

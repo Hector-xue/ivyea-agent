@@ -634,3 +634,30 @@ def test_phase_six_governance_coverage_includes_north_america_and_tax():
         ("tax_compliance", "JP"),
     ]:
         assert by_key[key]["status"] == "strong", (key, by_key[key]["status"])
+
+
+def test_knowledge_cache_isolates_copies_and_reflects_mutations(ivyea_home):
+    """v1.8.1 caching: cached cards must be copied per call (mutations don't leak)
+    and user-card writes must invalidate the cache immediately (mtime/size sig)."""
+    # mutate-isolation: mutating a returned card must not poison the cache
+    card = knowledge.get_card("policies.account_health_ca")
+    assert card and "Canada" in card["body"]
+    card["title"] = "MUTATED-DO-NOT-PERSIST"
+    assert knowledge.get_card("policies.account_health_ca")["title"] != "MUTATED-DO-NOT-PERSIST"
+    again = next(c for c in knowledge.list_cards() if c["id"] == "policies.account_health_ca")
+    assert again["title"] != "MUTATED-DO-NOT-PERSIST"
+
+    # user-card create → immediately visible (cache invalidated by sources.jsonl sig)
+    assert knowledge.get_card("user.cache_probe") is None
+    knowledge.import_text("Cache probe", "# Cache probe\n\nfirst body", card_id="user.cache_probe")
+    got = knowledge.get_card("user.cache_probe")
+    assert got and "first body" in got["body"]
+
+    # edit → immediately reflected
+    draft = knowledge.draft_update("Cache probe", "# Cache probe\n\nsecond body EDITED", card_id="user.cache_probe")
+    knowledge.apply_update(draft, confirm=True, rebuild_indexes=False)
+    assert "EDITED" in knowledge.get_card("user.cache_probe")["body"]
+
+    # delete → immediately gone
+    knowledge.delete_file(knowledge.get_card("user.cache_probe")["path"])
+    assert knowledge.get_card("user.cache_probe") is None

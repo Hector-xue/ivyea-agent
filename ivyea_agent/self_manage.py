@@ -72,6 +72,7 @@ def _pid_running(pid: int) -> bool:
             text=True,
             encoding="utf-8",
             errors="replace",
+            timeout=15,
         )
         return str(pid) in proc.stdout
     try:
@@ -297,7 +298,7 @@ def service_stop(timeout: float = 10.0, force: bool = False) -> dict[str, Any]:
         cmd = ["taskkill", "/PID", str(pid), "/T"]
         if force:
             cmd.append("/F")
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", timeout=15)
         stopped = proc.returncode == 0
     else:
         os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)

@@ -5,6 +5,7 @@ P1.5 起改为从 GBrain (amazon-ops/*) 检索注入；现在先内置精炼版�
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
 import hashlib
@@ -298,22 +299,59 @@ def _versions_dir() -> Path:
     return _user_base() / "versions"
 
 
+# Card metadata + bodies are re-read on every retrieval; caching them keyed by
+# file signature turns a per-query O(cards) burst of disk reads into ~zero.
+# Callers mutate the cards they receive (search adds snippet/score, get_card adds
+# body), so public accessors return deep copies while the caches stay immutable.
+_BUILTIN_CACHE: dict[str, Any] = {"sig": None, "cards": [], "by_id": {}}
+_USER_CACHE: dict[str, Any] = {"sig": None, "cards": []}
+_BODY_CACHE: dict[str, tuple[tuple[float, int], str]] = {}
+
+
+def _sig(path: Any) -> tuple[float, int]:
+    """(mtime, size) signature for cache invalidation. (-1, -1) when unavailable —
+    the bundled knowledge_base is read-only, so a stable value just caches for the
+    process lifetime; any card add/edit changes index.json/sources.jsonl."""
+    try:
+        st = Path(str(path)).stat()
+        return (st.st_mtime, st.st_size)
+    except OSError:
+        return (-1.0, -1)
+
+
+def _builtin_cached() -> list[dict[str, Any]]:
+    """Parsed + enriched bundled cards, invalidated by index.json signature.
+    Returns the shared list (do not mutate) and maintains the id->card map.
+    Note: date-derived ``freshness`` is frozen at build time and refreshes on the
+    next index.json change or process restart (serve restarts on updates)."""
+    idx = _base().joinpath("index.json")
+    sig = _sig(idx)
+    if _BUILTIN_CACHE["sig"] != sig:
+        rows = json.loads(idx.read_text(encoding="utf-8"))
+        for card in rows:
+            _enrich_builtin_card(card)
+        _BUILTIN_CACHE["sig"] = sig
+        _BUILTIN_CACHE["cards"] = rows
+        _BUILTIN_CACHE["by_id"] = {c.get("id"): c for c in rows}
+    return _BUILTIN_CACHE["cards"]
+
+
+def _live_copies(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deep-copy cached cards and refresh date-derived ``freshness`` so caching the
+    (expensive) file reads never freezes time-sensitive fields."""
+    out = copy.deepcopy(cards)
+    for card in out:
+        card["freshness"] = _freshness(card)
+    return out
+
+
 def list_cards() -> list[dict[str, Any]]:
     """Return bundled and user knowledge card metadata."""
-    text = _base().joinpath("index.json").read_text(encoding="utf-8")
-    cards = json.loads(text)
-    for card in cards:
-        _enrich_builtin_card(card)
-    cards.extend(list_user_cards())
-    return cards
+    return list_builtin_cards() + list_user_cards()
 
 
 def list_builtin_cards() -> list[dict[str, Any]]:
-    text = _base().joinpath("index.json").read_text(encoding="utf-8")
-    rows = json.loads(text)
-    for card in rows:
-        _enrich_builtin_card(card)
-    return rows
+    return _live_copies(_builtin_cached())
 
 
 def _enrich_builtin_card(card: dict[str, Any]) -> dict[str, Any]:
@@ -336,6 +374,22 @@ def _enrich_builtin_card(card: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_user_cards() -> list[dict[str, Any]]:
+    return _live_copies(_user_cached())
+
+
+def _user_cached() -> list[dict[str, Any]]:
+    """Enriched user cards, invalidated by sources.jsonl signature. All user-card
+    mutations (import/apply/upload/rollback/delete/rebuild) rewrite sources.jsonl,
+    so its (mtime, size) is a reliable cache key. Returns the shared list."""
+    p = _sources_file()
+    sig = _sig(p) if p.exists() else (0.0, 0)
+    if _USER_CACHE["sig"] != sig:
+        _USER_CACHE["sig"] = sig
+        _USER_CACHE["cards"] = _load_user_cards()
+    return _USER_CACHE["cards"]
+
+
+def _load_user_cards() -> list[dict[str, Any]]:
     p = _sources_file()
     if not p.exists():
         return []
@@ -479,18 +533,29 @@ def _freshness(card: dict[str, Any]) -> str:
 
 
 def get_card(card_id: str) -> dict[str, Any] | None:
-    for card in list_cards():
-        if card["id"] == card_id:
-            body = _read_body(card)
-            return {**card, "body": body}
-    return None
+    _builtin_cached()  # refresh the id->card map
+    card = _BUILTIN_CACHE["by_id"].get(card_id)
+    if card is None:
+        card = next((c for c in _user_cached() if c.get("id") == card_id), None)
+    if card is None:
+        return None
+    out = copy.deepcopy(card)
+    out["freshness"] = _freshness(out)
+    out["body"] = _read_body(card)
+    return out
 
 
 def _read_body(card: dict[str, Any]) -> str:
-    if card.get("scope") == "user":
-        p = _user_base().joinpath(card["path"])
-        return p.read_text(encoding="utf-8")
-    return _base().joinpath(card["path"]).read_text(encoding="utf-8")
+    base = _user_base() if card.get("scope") == "user" else _base()
+    p = base.joinpath(card["path"])
+    key = str(p)
+    sig = _sig(p)
+    cached = _BODY_CACHE.get(key)
+    if cached is not None and cached[0] == sig and sig != (-1.0, -1):
+        return cached[1]
+    text = p.read_text(encoding="utf-8")
+    _BODY_CACHE[key] = (sig, text)
+    return text
 
 
 def _score(text: str, terms: list[str]) -> int:

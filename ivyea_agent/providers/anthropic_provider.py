@@ -188,6 +188,8 @@ class AnthropicProvider(LLMProvider):
                 kw["api_key"] = self.api_key
             if self.base_url:
                 kw["base_url"] = self.base_url
+            from .base import RETRIES
+            kw["max_retries"] = RETRIES   # 与其它 provider 对齐：SDK 对 429/5xx/连接错误退避重试
             self._client = anthropic.Anthropic(**kw)
         return self._client
 

@@ -207,3 +207,45 @@ def test_codex_provider_falls_back_from_unsupported_model(monkeypatch):
     assert seen[:2] == ["gpt-5.3-codex", "gpt-5.5"]
     assert p.model == "gpt-5.5"
     assert out["content"] == "hello"
+
+
+def test_codex_provider_retries_transient_then_succeeds(monkeypatch):
+    """v1.8.1: a retryable 5xx on the streaming path (no tokens yet) is retried
+    and then succeeds — the production main brain no longer fails a whole turn on
+    a transient blip."""
+    from ivyea_agent.providers import codex_provider
+    from ivyea_agent.providers.codex_provider import CodexProvider
+    calls = {"n": 0}
+
+    def fake_stream(method, url, headers=None, json=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _StreamResp(status_code=503, body="upstream busy")
+        return _StreamResp()
+
+    monkeypatch.setattr(codex_provider.httpx, "stream", fake_stream)
+    monkeypatch.setattr(codex_provider.time, "sleep", lambda *a, **k: None)   # skip backoff
+    p = CodexProvider("codex-token", "gpt-5.5", "https://chatgpt.com/backend-api/codex")
+    out = p.chat([{"role": "user", "content": "hi"}])
+    assert calls["n"] == 2            # retried exactly once
+    assert out["content"] == "hello"
+
+
+def test_codex_provider_does_not_retry_hard_4xx(monkeypatch):
+    """A non-retryable client error (401) fails immediately, without retrying."""
+    import pytest
+    from ivyea_agent.providers import codex_provider
+    from ivyea_agent.providers.codex_provider import CodexProvider
+    from ivyea_agent.providers.base import LLMError
+    calls = {"n": 0}
+
+    def fake_stream(method, url, headers=None, json=None, timeout=None):
+        calls["n"] += 1
+        return _StreamResp(status_code=401, body='{"error":"unauthorized"}')
+
+    monkeypatch.setattr(codex_provider.httpx, "stream", fake_stream)
+    monkeypatch.setattr(codex_provider.time, "sleep", lambda *a, **k: None)
+    p = CodexProvider("codex-token", "gpt-5.5", "https://chatgpt.com/backend-api/codex")
+    with pytest.raises(LLMError):
+        p.chat([{"role": "user", "content": "hi"}])
+    assert calls["n"] == 1            # no retry on hard 4xx

@@ -3,10 +3,26 @@ from __future__ import annotations
 import json
 import base64
 import threading
+import time
 import urllib.error
 import urllib.request
 
 import pytest
+
+
+def _get_json(url: str, *, retries: int = 40, delay: float = 0.2, timeout: float = 5.0) -> dict:
+    """Poll a just-started local endpoint until it answers. A freshly bound server
+    on a slow/loaded CI runner can take longer than a single request timeout to
+    accept the first connection, which otherwise flakes as a spurious TimeoutError."""
+    last: Exception | None = None
+    for _ in range(retries):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            last = exc
+            time.sleep(delay)
+    raise AssertionError(f"service did not become ready at {url}: {last}")
 
 
 def test_retrieval_combines_knowledge_and_memory(ivyea_home):
@@ -764,8 +780,9 @@ def test_local_service_health_and_retrieval(ivyea_home, monkeypatch):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with urllib.request.urlopen(f"http://{host}:{port}/health", timeout=5) as resp:
-            health = json.loads(resp.read().decode("utf-8"))
+        # Readiness gate: poll until the freshly started server accepts a request,
+        # so a slow first connection on CI does not flake as a TimeoutError.
+        health = _get_json(f"http://{host}:{port}/health")
         assert health["ok"] is True
         assert health["name"] == "ivyea-agent"
         assert health["retrieval"]["local"] is True

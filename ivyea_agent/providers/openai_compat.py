@@ -9,10 +9,10 @@ from typing import Any, Iterable, Iterator
 
 import httpx
 
-from .base import LLMError, LLMProvider
-
-_RETRIES = 3
-_RETRYABLE = {429, 500, 502, 503, 504, 529}   # 限流/服务端瞬时错误可重试
+from .base import (
+    LLMError, LLMProvider,
+    RETRIES as _RETRIES, RETRYABLE_STATUS as _RETRYABLE, retry_backoff as _backoff,
+)
 
 # 推理型模型名特征（只有它们接受 reasoning_effort；给普通模型加会 400，故按名门控）
 _REASONING_MODEL_RE = re.compile(
@@ -25,10 +25,6 @@ def _reasoning_effort_for(model: str, effort: str) -> str | None:
     if not _REASONING_MODEL_RE.search(model or ""):
         return None
     return {"off": "minimal", "low": "low", "medium": "medium", "high": "high"}.get(effort or "")
-
-
-def _backoff(attempt: int) -> float:
-    return min(8.0, 0.8 * (2 ** attempt))      # 0.8s, 1.6s, 3.2s…封顶 8s
 
 
 def parse_sse(lines: Iterable[str]) -> Iterator[dict]:
