@@ -1042,7 +1042,7 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
 
     try:
         provider = provider or build_chain(model_cfg, api_key, narrate=narrate)
-        text = agent_loop.run_turn(provider, ctx, messages, max_steps=_int(payload.get("max_steps"), 12), narrate=narrate)
+        text = agent_loop.run_turn(provider, ctx, messages, max_steps=(_int(payload.get("max_steps"), 0) or None), narrate=narrate)
     except LLMError as exc:
         return {"ok": False, "error": "model_error", "detail": str(exc), "events": events}
 
@@ -1119,7 +1119,7 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None)
             provider,
             ctx,
             messages,
-            max_steps=_int(payload.get("max_steps"), 12),
+            max_steps=(_int(payload.get("max_steps"), 0) or None),
             narrate=narrate,
             render=lambda text: send("token", {"text": security.redact_text(str(text))}),
             model=model_cfg.get("model", ""),

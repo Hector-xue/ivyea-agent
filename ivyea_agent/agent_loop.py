@@ -55,8 +55,12 @@ def runtime_context_note(now: datetime | None = None) -> str:
         "务必对照此日期核对时效，发现结果不在目标时间范围内时，应调整查询重搜或明确告知用户。"
     )
 
-DEFAULT_MAX_TOOL_STEPS = 48
-DEFAULT_TOOL_WARNING_REMAINING = 5
+# 单轮工具调用预算。设得高，让 agent 像 Claude Code / Codex 那样一口气把任务做完，
+# 而不是动不动撞上限逼用户手动说"继续"。这是防跑飞的安全上限，不是常规停止点；
+# 正常任务模型不再调工具时会自然收尾，远early于此。可用 `ivyea config set
+# chat_max_tool_steps N` 调整（serve/ops 对话也读同一设置）。
+DEFAULT_MAX_TOOL_STEPS = 200
+DEFAULT_TOOL_WARNING_REMAINING = 8
 CODE_WRITE_TOOLS = {"write_file", "edit_file", "code_apply_patch"}   # 触发完成前自验证门禁的写工具
 _VERIFY_CAP = 2                                                       # 门禁最多逼修复几轮，防失控
 _NAVIGATION_TOOLS = {"grep", "glob", "code_search", "code_symbols", "code_impact"}
@@ -84,7 +88,7 @@ class TurnStatus:
             self.warned = True
             narrate(ui.message(
                 "warn",
-                f"工具预算剩余 {remaining}/{self.max_steps} 步；我会优先收敛结果，必要时请说“继续”。"
+                f"本轮工具调用较多（剩余安全预算 {remaining}/{self.max_steps} 步），我会尽快收敛出结果。"
                 "若进展不顺，先停下重列假设/换定位思路，别把疑似错误的路径走到底。",
             ))
 
@@ -118,8 +122,8 @@ def _resolve_max_steps(value: int | None, setting_key: str) -> int:
 
 
 def _limit_text(max_steps: int) -> str:
-    return (f"（已达到本轮工具调用步数上限 {max_steps}。可以直接说“继续”，"
-            "或执行 `ivyea config set chat_max_tool_steps 80` 提高单轮上限。）")
+    return (f"（本轮工具调用已连续执行到安全上限 {max_steps} 步仍未收尾——这通常意味着任务很大或某处卡住了。"
+            f"可以直接说“继续”接着做，或用 `ivyea config set chat_max_tool_steps {max_steps * 2}` 进一步提高单轮上限。）")
 
 
 def _limit_payload(max_steps: int, status: TurnStatus, ctx: ToolContext | None = None) -> str:
