@@ -1107,7 +1107,12 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None)
     if payload.get("asin"):
         ctx.asin = str(payload.get("asin") or "")
 
-    messages, created_at = _chat_messages(message, payload, ctx)
+    try:
+        messages, created_at = _chat_messages(message, payload, ctx)
+    except ValueError as exc:
+        data = {"ok": False, "error": str(exc)}
+        send("error", data)
+        return data
     send("start", {"ok": True, "session_id": ctx.session_id, "read_only": bool(plan_mode), "model": health()["model"]})
 
     def narrate(text: str) -> None:
@@ -1803,8 +1808,29 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext) -> t
         ctx.knowledge_retrieval_expected = False
         ctx.knowledge_risk = "none"
         ctx.knowledge_query = message
-    messages.append({"role": "user", "content": user_content})
+    messages.append({"role": "user", "content": _with_payload_images(user_content, payload)})
     return messages, created_at
+
+
+def _with_payload_images(user_content: str, payload: dict[str, Any]):
+    """可选多模态：payload["images"] 为 data URI 列表时，把 user 消息升级成
+    OpenAI 多模态 list-content（provider 适配器各自转换，codex→input_image、
+    anthropic→image block）。主脑无视觉能力时显式报错——复核/看图类调用
+    不允许静默丢图后瞎编结论。"""
+    images = payload.get("images")
+    if not isinstance(images, list) or not images:
+        return user_content
+    uris = [str(u) for u in images if isinstance(u, str) and u.startswith("data:image/")][:4]
+    if not uris:
+        return user_content
+    from . import config as _config
+    from .vision import main_has_vision
+    if not main_has_vision(_config.get_model_config()):
+        raise ValueError("main_brain_no_vision: 当前主脑不支持图片输入，无法处理带图请求")
+    parts: list[dict[str, Any]] = [{"type": "text", "text": user_content}]
+    for uri in uris:
+        parts.append({"type": "image_url", "image_url": {"url": uri}})
+    return parts
 
 
 def _public_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -1816,6 +1842,11 @@ def _public_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
         content = msg.get("content")
         if content is None:
             content = ""
+        if isinstance(content, list):  # 多模态：只回显文本部分，不吐 base64
+            texts = [str(p.get("text") or "") for p in content
+                     if isinstance(p, dict) and p.get("type") == "text"]
+            imgs = sum(1 for p in content if isinstance(p, dict) and p.get("type") == "image_url")
+            content = "\n".join(t for t in texts if t) + (f"\n[附图 {imgs} 张]" if imgs else "")
         rows.append({"role": str(role), "content": security.redact_text(str(content))})
     return rows[-30:]
 

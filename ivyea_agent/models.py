@@ -533,7 +533,9 @@ def provider_capabilities(provider: dict[str, Any]) -> dict[str, Any]:
         "chat": provider.get("status", "usable") == "usable",
         "tools": api_mode in tool_modes,
         "streaming": api_mode in stream_modes,
-        "vision": pid in {"openai", "anthropic", "anthropic-oauth", "gemini"} or api_mode == "gemini_native",
+        # openai-codex（Responses API）适配器已支持 input_image 多模态，GPT-5 系自带视觉
+        "vision": pid in {"openai", "anthropic", "anthropic-oauth", "gemini", "openai-codex"}
+        or api_mode in {"gemini_native", "codex_responses"},
         "oauth": auth in {"oauth_external", "oauth_device_code", "copilot"},
         "api_key": auth == "api_key",
         "local": auth == "none" or base.startswith(("http://localhost", "http://127.0.0.1")),
