@@ -1771,6 +1771,17 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext) -> t
                 pass
     if payload.get("system"):
         system += "\n\n[调用方系统上下文]\n" + str(payload.get("system") or "")
+    # Explicit skill injection: caller passes `skill` (id) to load a built-in /
+    # user skill's playbook into this turn's system prompt. Unlike retrieval
+    # (which injects knowledge only), this makes the skill body actually present
+    # so the agent follows it instead of trying to discover it on the filesystem.
+    skill_id = str(payload.get("skill") or "").strip()
+    if skill_id:
+        sk = skills.get_skill(skill_id)
+        if sk:
+            system += "\n\n[必须遵循的技能 Skill]\n" + skills.render_skill(sk)
+        else:
+            system += f"\n\n[提示] 调用方请求的技能 `{skill_id}` 未找到，请按通用流程处理。"
     created_at = None
     saved = sessions.load(ctx.session_id) if ctx.session_id else None
     if saved and isinstance(saved.get("messages"), list):

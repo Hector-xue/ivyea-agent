@@ -1,0 +1,15 @@
+{
+  "id": "amazon.asin_cosmo_rufus_audit",
+  "title": "Amazon ASIN COSMO + Rufus Audit",
+  "domain": "amazon",
+  "version": "2026.07",
+  "description": "Evidence-driven audit of a single Amazon ASIN across COSMO semantic retrieval, Rufus Q&A, listing conversion and ad readiness. Pulls page/review/competitor data through whatever MCP data-source is configured, scores 7 dimensions, and produces the standard 11-section report plus concrete rewrites and an ad plan. Vendor-agnostic: discovers data tools via mcp_list_tools rather than hard-coding any provider.",
+  "triggers": [
+    "分析这个ASIN", "分析 ASIN", "asin审计", "ASIN 审计", "COSMO审计", "cosmo audit",
+    "Rufus审计", "rufus audit", "为什么卖不好", "listing 为什么卖不好",
+    "重写标题", "重写五点", "重写bullet", "补Q&A", "backend search terms",
+    "AI搜索搜不到", "曝光差还是转化差", "listing诊断", "listing audit"
+  ],
+  "knowledge_ids": [],
+  "tools": ["mcp_list_tools", "mcp_call_tool", "knowledge_search", "recall"]
+}

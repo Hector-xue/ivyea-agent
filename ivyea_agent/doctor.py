@@ -122,16 +122,24 @@ def _lingxing() -> Check:
 def _mcp() -> Check:
     servers = config.load_mcp().get("mcpServers", {})
     if not servers:
-        return Check("MCP", "warn", "未配置 MCP 服务器")
+        return Check("MCP", "warn", "未配置 MCP 服务器",
+                     "ASIN 深度审计等取数任务需要至少一个 trusted 数据源 MCP："
+                     "`ivyea mcp add`（配好后选“信任/免审批”）")
+    trusted = [name for name, spec in servers.items() if isinstance(spec, dict) and spec.get("trusted")]
     try:
         from . import mcp_write
         writable = [name for name, spec in servers.items() if not mcp_write.validate_spec(spec)]
     except Exception:
         writable = []
-    if not writable:
-        return Check("MCP", "warn", f"{len(servers)} 个服务器，但未发现完整 writeActions 映射",
-                     "运行 `ivyea mcp template` 查看示例，`ivyea mcp validate <名称>` 校验")
-    return Check("MCP", "ok", f"{len(servers)} 个服务器，{len(writable)} 个具备写入映射")
+    # trusted 服务器 = 无人值守取数（ASIN 审计等）可直接调用的数据源。
+    if not trusted:
+        return Check("MCP", "warn", f"{len(servers)} 个服务器，但没有 trusted（免审批）数据源",
+                     "ASIN 审计走 ivyea-agent 需要一个 trusted 数据源 MCP："
+                     "`ivyea mcp add`（选“信任/免审批”），或在 mcp.json 里给该服务器加 \"trusted\": true")
+    detail = f"{len(servers)} 个服务器，{len(trusted)} 个 trusted 数据源"
+    if writable:
+        detail += f"，{len(writable)} 个具备写入映射"
+    return Check("MCP", "ok", detail)
 
 
 def _disk() -> Check:

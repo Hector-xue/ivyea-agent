@@ -739,6 +739,12 @@ def _mcp_add_wizard() -> int:
         print(f"不支持的传输方式: {transport}", file=sys.stderr)
         return 2
 
+    # 信任 = 调用该服务器的工具时免人工审批。数据源类 MCP（供 ASIN 审计等无人值守
+    # 任务取数）需要信任，否则后台任务会卡在审批上。
+    trusted = (_ask("信任此服务器？工具调用免审批（数据源 MCP 建议 y）y/N", "N") or "N").strip().lower()
+    if trusted in ("y", "yes", "是"):
+        spec["trusted"] = True
+
     config.mcp_set_server(name, spec)
     safe = {k: ("***" if k in ("headers", "query") else v) for k, v in spec.items()}
     print(f"\n✓ 已保存 MCP 服务器 '{name}' → {config.MCP_FILE}")
