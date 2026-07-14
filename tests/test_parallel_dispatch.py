@@ -12,7 +12,7 @@ def _silent(_s):
 
 
 def test_parallel_readonly_preserves_order_and_runs_concurrently(monkeypatch):
-    sleep_s, n = 0.3, 4
+    sleep_s, n = 0.5, 4
 
     def fake(name, args, ctx):
         time.sleep(sleep_s)
@@ -30,9 +30,11 @@ def test_parallel_readonly_preserves_order_and_runs_concurrently(monkeypatch):
     assert [m["tool_call_id"] for m in messages] == [f"c{i}" for i in range(n)]
     assert [m["content"] for m in messages] == [f"got-{i}" for i in range(n)]
     assert status.tool_calls == n
-    # sequential would be n*sleep; concurrent must be well under (generous margin
-    # for thread-startup overhead on slow CI runners — proves real concurrency).
-    assert elapsed < sleep_s * n * 0.6, f"not concurrent: {elapsed:.2f}s"
+    # Sequential would take n*sleep_s; require finishing faster than (n-1) sleeps
+    # to prove real overlap. This keeps a large absolute margin for thread-startup
+    # / GIL overhead on slow, contended CI runners — a tighter 0.6*n*sleep bound
+    # with sleep_s=0.3 was flaky on windows-latest · py3.11 (0.86s vs 0.72s).
+    assert elapsed < sleep_s * (n - 1), f"not concurrent: {elapsed:.2f}s"
 
 
 def test_mixed_batch_runs_sequentially(monkeypatch):
