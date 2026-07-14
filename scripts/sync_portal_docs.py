@@ -12,12 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def project_version() -> str:
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        import tomli as tomllib  # type: ignore[no-redef]
-    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    return str(data["project"]["version"])
+    # Single source of truth: ivyea_agent/__init__.py.__version__ (pyproject.toml
+    # declares version dynamically from this same attr, so it's no longer static).
+    for line in (ROOT / "ivyea_agent" / "__init__.py").read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s.startswith("__version__"):
+            return s.split("=", 1)[1].strip().strip('"').strip("'")
+    raise SystemExit("could not read __version__ from ivyea_agent/__init__.py")
 
 
 def replace_versions(text: str, version: str) -> str:
