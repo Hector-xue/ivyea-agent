@@ -121,6 +121,7 @@ def manifest() -> dict[str, Any]:
             {"method": "POST", "path": "/v1/system/service/autostart", "description": "write local autostart template"},
             {"method": "GET", "path": "/v1/chat/sessions", "description": "list persisted embedded chat sessions"},
             {"method": "POST", "path": "/v1/chat/sessions", "description": "create an embedded chat session"},
+            {"method": "POST", "path": "/v1/chat/sessions/import", "description": "seed a chat session with pre-existing messages (migration, no LLM turn)"},
             {"method": "GET", "path": "/v1/chat/sessions/{id}", "description": "load embedded chat session"},
             {"method": "POST", "path": "/v1/chat", "description": "run one read-only embedded agent turn"},
             {"method": "POST", "path": "/v1/chat/stream", "description": "run one read-only embedded agent turn as server-sent events"},
@@ -1178,6 +1179,34 @@ def chat_session_create(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "session": _public_session_detail(data)}
 
 
+def chat_session_import(payload: dict[str, Any]) -> dict[str, Any]:
+    """Seed a persisted session with pre-existing messages (no LLM turn).
+
+    Used to migrate an external transcript store into the embedded session
+    library so both callers share one history. Only plain text turns are kept."""
+    raw = payload.get("messages")
+    messages: list[dict[str, Any]] = []
+    if isinstance(raw, list):
+        for m in raw:
+            if not isinstance(m, dict):
+                continue
+            role = str(m.get("role") or "")
+            content = m.get("content")
+            if role in {"system", "user", "assistant"} and isinstance(content, str) and content.strip():
+                messages.append({"role": role, "content": content})
+    if not messages:
+        return {"ok": False, "error": "no messages"}
+    session_id = str(payload.get("id") or "") or sessions.new_id()
+    created = payload.get("created")
+    sessions.save(
+        session_id,
+        messages,
+        model=str(payload.get("model") or config.get_model_config().get("model", "")),
+        created=float(created) if isinstance(created, (int, float)) else None,
+    )
+    return {"ok": True, "id": session_id, "turns": sum(1 for m in messages if m["role"] == "user")}
+
+
 def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, api_token: str = "") -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((host, int(port)), _Handler)
     server.api_token = api_token or ""  # type: ignore[attr-defined]
@@ -1414,6 +1443,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(200, chat_run(body))
             except ValueError as exc:
                 self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/chat/sessions/import":
+            self._json(200, chat_session_import(body))
             return
         if parsed.path == "/v1/chat/sessions":
             self._json(200, chat_session_create(body))
