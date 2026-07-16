@@ -1130,6 +1130,9 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None)
             narrate=narrate,
             render=lambda text: send("token", {"text": security.redact_text(str(text))}),
             model=model_cfg.get("model", ""),
+            # Web 前端以 final.text 为准整体替换气泡：带知识引证也照常流式，
+            # 否则命中检索的问题（运营问题几乎全命中）从头到尾一个字不吐。
+            defer_citation_text=False,
         )
     except LLMError as exc:
         data = {"ok": False, "error": "model_error", "detail": str(exc)}
