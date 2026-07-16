@@ -1,3 +1,3 @@
 """Ivyea Agent — 自托管的亚马逊运营 CLI Agent。"""
 
-__version__ = "1.8.6"
+__version__ = "1.8.7"
