@@ -7,6 +7,7 @@ import hashlib
 import os
 import base64
 import binascii
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -1436,7 +1437,43 @@ class _Handler(BaseHTTPRequestHandler):
         body = self._read_json()
         if parsed.path == "/v1/chat/stream":
             self._sse_begin()
-            chat_stream(body, self._sse_send)
+            # 心跳：单个慢工具（如市场调研 MCP）可能几分钟不产出任何 SSE 事件，
+            # 中间代理/客户端的"单次 read 静默超时"会掐断仍在健康执行的轮次。
+            # 每 15s 写一行 SSE 注释（": ping"）保持链路有字节流动；注释行没有
+            # data 字段，所有标准 SSE 解析器都会忽略。写锁保证与事件写入互斥。
+            write_lock = threading.Lock()
+            done = threading.Event()
+            client_gone = threading.Event()
+
+            def _locked_send(event: str, data: dict[str, Any]) -> None:
+                # 客户端断开不打断轮次：写失败后降级为"无声跑完"，让 chat_stream
+                # 正常收尾并把完整会话落盘——用户随后能在历史会话里拿到回答。
+                if client_gone.is_set():
+                    return
+                try:
+                    with write_lock:
+                        self._sse_send(event, data)
+                except Exception:
+                    client_gone.set()
+
+            def _heartbeat() -> None:
+                while not done.wait(15.0):
+                    if client_gone.is_set():
+                        return
+                    try:
+                        with write_lock:
+                            self.wfile.write(b": ping\n\n")
+                            self.wfile.flush()
+                    except Exception:
+                        client_gone.set()
+                        return  # 客户端已断开：心跳退出，轮次本身继续跑
+
+            beat = threading.Thread(target=_heartbeat, daemon=True, name="chat-stream-heartbeat")
+            beat.start()
+            try:
+                chat_stream(body, _locked_send)
+            finally:
+                done.set()
             return
         if parsed.path == "/v1/chat":
             try:
