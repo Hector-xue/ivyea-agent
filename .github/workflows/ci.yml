@@ -35,5 +35,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install ruff
+      # 版本要 pin：无约束装的是"当天最新"，上游一改默认规则集，没动过代码的
+      # 推送也会变红（0.16.0 就这么来的）。升级 ruff 是主动改这个数字的事。
+      - run: pip install ruff==0.16.0
       - run: ruff check ivyea_agent

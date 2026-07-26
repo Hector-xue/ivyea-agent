@@ -52,6 +52,11 @@ extend-exclude = ["ivyea_agent/rule_engine_scripts", "build"]  # vendored 第三
 
 [tool.ruff.lint]
 # 务实：放过长行/裸 except/分号一行(conn.commit();close() 的刻意紧凑)，主抓真错(未用导入/未定义名)
+#
+# select 必须显式写死，不能吃 ruff 的默认值：默认集是会随版本变的。0.16.0 就把
+# flake8-pie / refurb 等风格规则纳入默认，一次没改过代码的推送凭空多出 421 条
+# （re.M 建议写成 re.MULTILINE 之类），CI 一夜变红。写死之后规则只由本文件决定。
+select = ["E4", "E7", "E9", "F"]
 ignore = ["E501", "E722", "E741", "E702"]
 
 [project.scripts]
