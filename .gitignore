@@ -8,3 +8,5 @@ venv/
 outputs/
 .DS_Store
 ivyea_patrol_out/
+# 运行时日志：serve 跑起来就一直在追加写，跟踪它等于仓库永远是脏的
+*.log
