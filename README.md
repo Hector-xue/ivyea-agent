@@ -58,6 +58,7 @@
 - [安全与护栏](#安全与护栏)
 - [配置与数据目录](#配置与数据目录)
 - [文档](#文档)
+- [请作者喝杯咖啡](#-请作者喝杯咖啡)
 
 ---
 
@@ -383,3 +384,24 @@ ivyea self status / backup / upgrade / uninstall   # 安装识别 / 备份 / 升
 - [docs/IvyeaAgent产品化路线图.md](docs/IvyeaAgent产品化路线图.md) —— 产品规划
 
 如有问题，欢迎到 [Issues](https://github.com/Hector-xue/ivyea-agent/issues) 反馈，或扫码进群交流。
+
+---
+
+## ☕ 请作者喝杯咖啡
+
+Ivyea Agent 一直是免费开源、没有内购也不卖服务的。如果它帮你省下了时间、少踩了坑，欢迎请作者喝杯咖啡——一杯咖啡就是下个版本的动力。当然，点个 Star、提个 Issue、写篇使用心得，同样是很大的支持。
+
+- **公众号**：Ivyea 的精神股东们（版本更新、用法与踩坑复盘都发在这里）
+- **作者**：薛海涛
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="docs/assets/wechat-pay-qr.png" alt="微信收款码" width="300" />
+      <br />
+      <strong>微信扫码 · 支持作者</strong>
+      <br />
+      <sub>金额随意，心意都收到了</sub>
+    </td>
+  </tr>
+</table>
