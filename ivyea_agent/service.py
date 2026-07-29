@@ -1134,7 +1134,9 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None)
             model=model_cfg.get("model", ""),
             # Web 前端以 final.text 为准整体替换气泡：带知识引证也照常流式，
             # 否则命中检索的问题（运营问题几乎全命中）从头到尾一个字不吐。
-            defer_citation_text=False,
+            # 只累加 token、不认 final 的调用方（IvyeaOps 的报告合成）传 true：
+            # 引证门会让模型带着 [K#] 把整篇重写一遍，不 defer 就会收到两份报告。
+            defer_citation_text=payload.get("defer_citation_text") is True,
         )
     except LLMError as exc:
         data = {"ok": False, "error": "model_error", "detail": str(exc)}

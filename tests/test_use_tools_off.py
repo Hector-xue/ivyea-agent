@@ -48,3 +48,34 @@ def test_service_payload_flag():
     assert service._tools_for({"use_tools": False}) == []
     assert service._tools_for({"use_tools": True}) is None
     assert service._tools_for({}) is None          # 默认不变：带全量工具
+
+
+def test_defer_citation_text_suppresses_the_superseded_draft():
+    """引证门会让模型带 [K#] 重写整篇；只累加 token 的调用方不 defer 会收到两份。"""
+    from ivyea_agent.agent_tools import ToolContext
+
+    class _TwoPass:
+        def __init__(self):
+            self.n = 0
+
+        def stream_chat(self, messages, tools=None, **kw):
+            self.n += 1
+            text = "初稿正文" if self.n == 1 else "终稿正文 [K1]"
+            yield {"type": "text", "text": text}
+            yield {"type": "final", "content": text, "tool_calls": [], "usage": {}}
+
+    def run(defer):
+        ctx = ToolContext()
+        ctx.knowledge_citations = [{"id": "K1", "title": "知识卡"}]
+        out, seen = [], _TwoPass()
+        res = agent_loop.run_turn_stream(seen, ctx, [{"role": "user", "content": "写报告"}],
+                                         tools=[], render=out.append,
+                                         defer_citation_text=defer)
+        return "".join(out), res["text"]
+
+    streamed_defer, final_defer = run(True)
+    assert "初稿正文" not in streamed_defer          # 被压住，不外泄
+    assert final_defer in streamed_defer            # 终稿只出一次
+
+    streamed_live, _ = run(False)
+    assert "初稿正文" in streamed_live               # 默认（Web 以 final 整体替换）行为不变
