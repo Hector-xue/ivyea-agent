@@ -1044,7 +1044,8 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
 
     try:
         provider = provider or build_chain(model_cfg, api_key, narrate=narrate)
-        text = agent_loop.run_turn(provider, ctx, messages, max_steps=(_int(payload.get("max_steps"), 0) or None), narrate=narrate)
+        text = agent_loop.run_turn(provider, ctx, messages, max_steps=(_int(payload.get("max_steps"), 0) or None),
+                                   narrate=narrate, tools=_tools_for(payload))
     except LLMError as exc:
         return {"ok": False, "error": "model_error", "detail": str(exc), "events": events}
 
@@ -1128,11 +1129,14 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None)
             messages,
             max_steps=(_int(payload.get("max_steps"), 0) or None),
             narrate=narrate,
+            tools=_tools_for(payload),
             render=lambda text: send("token", {"text": security.redact_text(str(text))}),
             model=model_cfg.get("model", ""),
             # Web 前端以 final.text 为准整体替换气泡：带知识引证也照常流式，
             # 否则命中检索的问题（运营问题几乎全命中）从头到尾一个字不吐。
-            defer_citation_text=False,
+            # 只累加 token、不认 final 的调用方（IvyeaOps 的报告合成）传 true：
+            # 引证门会让模型带着 [K#] 把整篇重写一遍，不 defer 就会收到两份报告。
+            defer_citation_text=payload.get("defer_citation_text") is True,
         )
     except LLMError as exc:
         data = {"ok": False, "error": "model_error", "detail": str(exc)}
@@ -1803,6 +1807,15 @@ def _int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _tools_for(payload: dict[str, Any]) -> list | None:
+    """工具集：use_tools=false → 不挂任何工具（纯文本生成，模型不会绕去查工具，
+    也不会在正文里夹带工具叙述）；默认 None = 全量 TOOL_SCHEMAS。
+    IvyeaOps 把 agent 当文本引擎用（报告合成/JSON 抽取）时传 false。"""
+    if payload.get("use_tools") is False:
+        return []
+    return None
 
 
 def _model_requires_key(settings: dict[str, Any]) -> bool:
