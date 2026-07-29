@@ -412,9 +412,10 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
              max_steps: int | None = None, narrate: Callable[[str], None] = print,
              tools: list | None = None) -> str:
     """跑一轮对话（messages 含 system+历史+本次 user）。就地追加消息，返回最终回答。
-    tools 可传受限工具子集（如只读子 agent）；默认用全量 TOOL_SCHEMAS。"""
+    tools 可传受限工具子集（如只读子 agent）；传 [] = 不挂工具（纯文本生成）；
+    None = 全量 TOOL_SCHEMAS。"""
     task_scope.prepare_messages(ctx, messages)
-    tool_schemas = tools or TOOL_SCHEMAS
+    tool_schemas = TOOL_SCHEMAS if tools is None else tools
     max_steps = _resolve_max_steps(max_steps, "chat_max_tool_steps")
     status = TurnStatus(max_steps=max_steps, behavioral_task=bool(getattr(ctx, "behavioral_task", False)))
     for step_idx in range(max_steps):
@@ -457,12 +458,12 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
     返回 True 则抛 KeyboardInterrupt，交给上层保留会话并恢复输入。
     emit(event)：结构化事件回调（stream-json），每个模型步发一条 assistant 事件、
     每个工具结果发一条 tool_result 事件；默认 None 零开销。
-    tools：受限工具子集（与 run_turn 对齐）；默认全量 TOOL_SCHEMAS。
+    tools：受限工具子集（与 run_turn 对齐）；[] = 不挂工具，None = 全量 TOOL_SCHEMAS。
     defer_citation_text：带 [K#] 知识引证时是否把正文压到引证门通过后一次性输出。
     终端（CLI）保持 True——中间草稿打出去收不回来；Web/serve 传 False 边生成边流式，
     前端以 final 事件的 text 为准整体替换，引证重写不会留下脏文本。"""
     task_scope.prepare_messages(ctx, messages)
-    tool_schemas = tools or TOOL_SCHEMAS
+    tool_schemas = TOOL_SCHEMAS if tools is None else tools
     render = render or (lambda s: print(s, end="", flush=True))
     render_reasoning = render_reasoning or (lambda s: None)
     cancel_check = cancel_check or (lambda: False)
