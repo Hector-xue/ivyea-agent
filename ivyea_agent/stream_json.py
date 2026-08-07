@@ -45,6 +45,87 @@ def tool_result_event(session_id: str, tool_use_id: str, text: str, is_error: bo
                  "content": text, "is_error": bool(is_error)}]}}
 
 
+# 一次工具调用的参数里，值得放进事件的键。整包参数可能很大（文件内容、报表行），
+# 事件是给 UI 画芯片用的，只带够画一行摘要的量。
+_ARG_KEEP = (
+    "query", "q", "keyword", "asin", "pattern", "path", "url", "command",
+    "name", "tool", "server", "marketplace", "country", "site", "mode", "days",
+    "project_id", "job_id", "sid", "skill_name", "task", "limit",
+)
+_ARG_VALUE_MAX = 200
+
+
+def _slim_args(args: dict | None) -> dict:
+    """裁剪工具参数：只留可读的标量键，长值截断。"""
+    out: dict = {}
+    for key in _ARG_KEEP:
+        val = (args or {}).get(key)
+        if val is None or isinstance(val, (dict, list)):
+            continue
+        text = str(val)
+        if not text:
+            continue
+        out[key] = text[:_ARG_VALUE_MAX]
+    return out
+
+
+def step_event(session_id: str, turn_id: str, call_id: str, seq: int, name: str,
+               arguments: dict | None, status: str, duration_ms: int | None = None) -> dict:
+    """一次工具调用的步骤事件（开始 running，收尾 ok/error）。
+
+    stream-json 的 assistant/tool_result 事件足够回放对话，但不足以画出参考产品
+    那种「中文工具名 · ✓ · 5.2s」的执行时间线：它既没有耗时，也没有把真正被调用
+    的东西说清楚 —— agent 不把 MCP / 板块工具扁平化进工具名空间，真实工具藏在
+    参数里（`mcp_call_tool(server=…, tool=…)`、`ivyea_ops_call_tool(name=…)`）。
+    这里统一拆包提到顶层，消费方不必再去猜参数结构。
+
+    耗时本来只进 traces.db；同时放进事件流，UI 就不用为了显示一个秒数去 join 另一张表。
+    """
+    args = arguments or {}
+    phase = "tool"
+    tool = ""
+    server = ""
+    if name == "mcp_call_tool":
+        phase = "mcp"
+        server = str(args.get("server") or "")
+        tool = str(args.get("tool") or "")
+    elif name == "ivyea_ops_call_tool":
+        phase = "board"
+        tool = str(args.get("name") or "")
+    elif name == "dispatch_subagent":
+        phase = "subagent"
+    elif name in ("knowledge_search", "recall", "skill_search"):
+        phase = "knowledge"
+    elif name in ("todo_write", "progress_update", "self_critique"):
+        # 规划/汇报类调用在一轮里能占到大多数步（实测 19 步里 12 步是它们）。
+        # 它们不是"做了什么"，是"在组织怎么做"。单独归一类，UI 可以折成一行，
+        # 免得真正干活的那两三步被埋掉。
+        phase = "plan"
+
+    # MCP / 板块工具的真实入参在嵌套的 arguments 里，摘要要看那一层。
+    inner = args.get("arguments") if isinstance(args.get("arguments"), dict) else None
+    ev = {
+        "type": "step", "session_id": session_id, "turn_id": turn_id,
+        "id": call_id, "seq": int(seq), "phase": phase, "name": name,
+        "status": status, "args": _slim_args(inner if inner is not None else args),
+    }
+    if tool:
+        ev["tool"] = tool
+    if server:
+        ev["server"] = server
+    if duration_ms is not None:
+        ev["ms"] = int(duration_ms)
+    return ev
+
+
+def skill_match_event(session_id: str, skills: list) -> dict:
+    """本轮命中的 skill —— 对应参考产品的「✓ 理解问题，匹配最合适的技能」。
+
+    skills 里每项形如 {id, title, domain, score}。
+    """
+    return {"type": "skill_match", "session_id": session_id, "skills": list(skills or [])}
+
+
 def result_event(session_id: str, text: str, usage: dict, cost_cny: float,
                  duration_ms: int, num_turns: int = 1, is_error: bool = False) -> dict:
     """收尾事件：最终答案 + 用量/花费汇总。is_error 覆盖 blocked/异常收尾。"""

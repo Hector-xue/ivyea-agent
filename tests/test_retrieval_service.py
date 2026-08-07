@@ -836,7 +836,9 @@ def test_local_service_health_and_retrieval(ivyea_home, monkeypatch):
         assert chat["ok"] is True
         assert chat["text"] == "hello"
 
-        monkeypatch.setattr(service, "chat_stream", lambda body, send: send("final", {"ok": True, "text": "stream"}))
+        # **_kw：handler 会额外传 client_gone（远程审批用它判断"页面还在不在"）。
+        monkeypatch.setattr(service, "chat_stream",
+                            lambda body, send, **_kw: send("final", {"ok": True, "text": "stream"}))
         req = urllib.request.Request(
             f"http://{host}:{port}/v1/chat/stream",
             data=json.dumps({"message": "hello"}).encode("utf-8"),

@@ -259,7 +259,8 @@ def _observe_tool_discipline(ctx: ToolContext, tc: dict, res: ToolResult) -> Non
 
 def _record_tool_result(ctx: ToolContext, messages: list, tc: dict, res, duration_ms: int,
                         narrate: Callable[[str], None],
-                        emit: Callable[[dict], None] | None = None) -> None:
+                        emit: Callable[[dict], None] | None = None, seq: int = 0,
+                        blocked: bool = False) -> None:
     _observe_tool_discipline(ctx, tc, res)
     progress_reporting.observe_tool_result(ctx, tc.get("name") or "", res)
     result = res.text
@@ -277,13 +278,26 @@ def _record_tool_result(ctx: ToolContext, messages: list, tc: dict, res, duratio
         narrate(ui.tool_result(result, ok=res.ok))
     _emit_safe(emit, stream_json.tool_result_event(
         getattr(ctx, "session_id", ""), tc["id"], result, not res.ok))
+    # 步骤收尾事件：耗时在这里才拿得到（traces 记的也是这个数），一并进事件流，
+    # UI 画执行时间线就不用再去 join traces.db。
+    _emit_safe(emit, stream_json.step_event(
+        getattr(ctx, "session_id", ""), getattr(ctx, "turn_id", ""),
+        tc["id"], seq, tc["name"], tc.get("arguments") or {},
+        "blocked" if blocked else ("ok" if res.ok else "error"), duration_ms))
     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
 
 
 def _run_one(tc: dict, ctx: ToolContext):
+    """执行一个工具调用，返回 (结果, 耗时ms, 是否被前置护栏拦下)。
+
+    "被护栏拦下"和"工具真的失败了"对模型是一回事（都要改做法），对用户不是：
+    前者是流程纠偏（先列计划再动手），后者才是出错。分开标出来，UI 才不会把
+    一次正常的流程纠偏画成红叉。
+    """
     started = time.time()
-    res = _guard_tool_call(ctx, tc) or dispatch_result(tc["name"], tc["arguments"], ctx)
-    return res, int((time.time() - started) * 1000)
+    guarded = _guard_tool_call(ctx, tc)
+    res = guarded or dispatch_result(tc["name"], tc["arguments"], ctx)
+    return res, int((time.time() - started) * 1000), guarded is not None
 
 
 def _dispatch_tool_calls(ctx: ToolContext, messages: list, status: TurnStatus, tool_calls: list,
@@ -292,21 +306,35 @@ def _dispatch_tool_calls(ctx: ToolContext, messages: list, status: TurnStatus, t
     """派发本步所有工具调用：叙述、执行、记 trace、把结果按原顺序回灌到 messages。
     当本步全部是只读且并行安全的工具时并发执行（降延迟）；否则顺序执行（保留审批/写入语义）。"""
     parallel = len(tool_calls) > 1 and all(tc["name"] in PARALLEL_SAFE for tc in tool_calls)
+
+    def announce(tc: dict) -> int:
+        """叙述 + 发"开始"步骤事件，返回本步在整轮里的序号。
+
+        序号取 status.tool_calls（record_tool_call 刚自增过），全轮单调递增，
+        UI 靠它排时间线；配对靠 tc["id"]，与 tool_result 事件同一把钥匙。
+        """
+        status.record_tool_call()
+        seq = status.tool_calls
+        narrate(ui.tool_call(tc["name"], tc.get("arguments") or {}))
+        _emit_safe(emit, stream_json.step_event(
+            getattr(ctx, "session_id", ""), getattr(ctx, "turn_id", ""),
+            tc["id"], seq, tc["name"], tc.get("arguments") or {}, "running"))
+        return seq
+
     if parallel:
-        for tc in tool_calls:
-            status.record_tool_call()
-            narrate(ui.tool_call(tc["name"], tc.get("arguments") or {}))
+        # 并行分支：先把所有"开始"发出去（UI 同时亮起几枚芯片），再并发执行；
+        # 收尾按原调用顺序回灌，与结果顺序保持一致。
+        seqs = [announce(tc) for tc in tool_calls]
         with ThreadPoolExecutor(max_workers=min(len(tool_calls), 8)) as ex:
             outcomes = list(ex.map(lambda tc: _run_one(tc, ctx), tool_calls))
-        for tc, (res, dur) in zip(tool_calls, outcomes):
-            _record_tool_result(ctx, messages, tc, res, dur, narrate, emit=emit)
+        for tc, (res, dur, blocked), seq in zip(tool_calls, outcomes, seqs):
+            _record_tool_result(ctx, messages, tc, res, dur, narrate, emit=emit, seq=seq, blocked=blocked)
             status.observe_tool_result(tc["name"], res)
         return
     for tc in tool_calls:
-        status.record_tool_call()
-        narrate(ui.tool_call(tc["name"], tc.get("arguments") or {}))
-        res, dur = _run_one(tc, ctx)
-        _record_tool_result(ctx, messages, tc, res, dur, narrate, emit=emit)
+        seq = announce(tc)
+        res, dur, blocked = _run_one(tc, ctx)
+        _record_tool_result(ctx, messages, tc, res, dur, narrate, emit=emit, seq=seq, blocked=blocked)
         status.observe_tool_result(tc["name"], res)
 
 

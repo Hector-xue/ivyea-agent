@@ -24,7 +24,7 @@ def test_deadend_forces_list_dir_before_another_search(tmp_path, monkeypatch):
     agent_loop._dispatch_tool_calls(ctx, messages, status, [_call("g1", "grep", pattern="x")],
                                     0, 10, lambda _s: None)
     assert ctx.search_recovery_required is True
-    blocked, _ = agent_loop._run_one(_call("g2", "grep", pattern="y"), ctx)
+    blocked, _, _guarded = agent_loop._run_one(_call("g2", "grep", pattern="y"), ctx)
     assert blocked.ok is False
     assert "先 list_dir" in blocked.text
 
@@ -36,7 +36,7 @@ def test_deadend_forces_list_dir_before_another_search(tmp_path, monkeypatch):
 def test_navigation_budget_stops_unbounded_search(tmp_path, monkeypatch):
     ctx = ToolContext(workspace=str(tmp_path), navigation_since_read=8)
     monkeypatch.setattr(agent_loop, "dispatch_result", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must block")))
-    result, _ = agent_loop._run_one(_call("g", "glob", pattern="**/*.py"), ctx)
+    result, _, _guarded = agent_loop._run_one(_call("g", "glob", pattern="**/*.py"), ctx)
     assert result.ok is False
     assert "已经导航 8 次" in result.text
     assert "read_file" in result.text
@@ -64,7 +64,7 @@ def test_ambiguous_scope_blocks_search_and_mutation(tmp_path):
     ctx = ToolContext(workspace=str(tmp_path), scope_ambiguous=True)
     for name, args in (("grep", {"pattern": "x"}), ("edit_file", {"path": "a"}),
                        ("run_command", {"command": "echo x"})):
-        result, _ = agent_loop._run_one({"id": name, "name": name, "arguments": args}, ctx)
+        result, _, _guarded = agent_loop._run_one({"id": name, "name": name, "arguments": args}, ctx)
         assert result.ok is False
         assert "目标尚未锁定" in result.text
 
