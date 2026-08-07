@@ -142,3 +142,49 @@ def test_sessions_new_id_is_unique(ivyea_home):
 def test_sessions_load_missing(ivyea_home):
     from ivyea_agent import sessions
     assert sessions.load("nope-does-not-exist") is None
+
+
+# ── 会话 id 是不可信输入 ────────────────────────────────────────────────────
+# session_id 直接拼进文件名，而它是**调用方给的**（serve 的 payload.session_id、
+# 导入接口的 id）。曾实测可打通：往 /v1/chat/sessions POST 一个
+# id="../../../tmp/PWNED"，daemon（常以 root 跑）就在会话目录之外写出了文件。
+
+def test_path_for_rejects_traversal(tmp_path, monkeypatch):
+    import pytest
+
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    for bad in ["../../../../tmp/PWNED", "/tmp/PWNED", "..", "a/b", "a\\b", "", "x" * 200]:
+        with pytest.raises(ValueError):
+            sessions.path_for(bad)
+
+
+def test_path_for_accepts_real_ids(tmp_path, monkeypatch):
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    # new_id() 的产物、以及更老的不带随机后缀的历史 id，都必须继续可用
+    assert sessions.path_for(sessions.new_id()).parent == tmp_path
+    assert sessions.path_for("20260617-120252").name == "20260617-120252.json"
+    assert sessions.path_for("imp-assistant-1743001").name == "imp-assistant-1743001.json"
+
+
+def test_save_refuses_to_write_outside_the_sessions_dir(tmp_path, monkeypatch):
+    import pytest
+
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    with pytest.raises(ValueError):
+        sessions.save("../escaped", [{"role": "user", "content": "x"}])
+    assert not (tmp_path.parent / "escaped.json").exists()
+
+
+def test_load_and_delete_treat_bad_ids_as_missing(tmp_path, monkeypatch):
+    """查询语义：非法 id 等同"查无此会话"，不该把异常甩给调用方。"""
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    assert sessions.load("../../etc/passwd") is None
+    assert sessions.delete("../../etc/passwd") is False

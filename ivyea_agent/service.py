@@ -1119,7 +1119,7 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
         ctx.ops_bridge = dict(payload.get("ops_bridge") or {})
     if isinstance(payload.get("ops_context"), dict):
         ctx.ops_context = dict(payload.get("ops_context") or {})
-    ctx.session_id = str(payload.get("session_id") or "") or sessions.new_id()
+    ctx.session_id = _checked_session_id(payload.get("session_id"))
     ctx.turn_id = str(payload.get("turn_id") or "")
     if payload.get("workspace"):
         ctx.workspace_declared = str(payload.get("workspace") or "")
@@ -1203,7 +1203,7 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         ctx.ops_bridge = dict(payload.get("ops_bridge") or {})
     if isinstance(payload.get("ops_context"), dict):
         ctx.ops_context = dict(payload.get("ops_context") or {})
-    ctx.session_id = str(payload.get("session_id") or "") or sessions.new_id()
+    ctx.session_id = _checked_session_id(payload.get("session_id"))
     ctx.turn_id = str(payload.get("turn_id") or "")
     # 调用方显式给了工作区 = 一条边界，范围锁定只能在里面收窄，不能往上放宽。
     if payload.get("workspace"):
@@ -1301,7 +1301,7 @@ def chat_session_delete(session_id: str) -> dict[str, Any]:
 
 
 def chat_session_create(payload: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(payload.get("id") or "") or sessions.new_id()
+    session_id = _checked_session_id(payload.get("id"))
     initial = str(payload.get("message") or payload.get("title") or "").strip()
     messages: list[dict[str, Any]] = []
     if initial:
@@ -1309,6 +1309,20 @@ def chat_session_create(payload: dict[str, Any]) -> dict[str, Any]:
     sessions.save(session_id, messages, model=config.get_model_config().get("model", ""))
     data = sessions.load(session_id) or {"id": session_id, "messages": messages}
     return {"ok": True, "session": _public_session_detail(data)}
+
+
+def _checked_session_id(raw: Any) -> str:
+    """把调用方给的 session_id 收成安全 id，留空则新生成。
+
+    id 直接拼成文件名，所以非法值必须在入口就打回 —— 拖到 sessions.save 才炸
+    就变成 500，调用方只能看到"服务器错误"，查不出是自己传了个越界的 id。
+    """
+    sid = str(raw or "")
+    if not sid:
+        return sessions.new_id()
+    if not sessions.is_safe_id(sid):
+        raise ValueError("invalid session_id")
+    return sid
 
 
 def chat_session_import(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1328,7 +1342,7 @@ def chat_session_import(payload: dict[str, Any]) -> dict[str, Any]:
                 messages.append({"role": role, "content": content})
     if not messages:
         return {"ok": False, "error": "no messages"}
-    session_id = str(payload.get("id") or "") or sessions.new_id()
+    session_id = _checked_session_id(payload.get("id"))
     created = payload.get("created")
     sessions.save(
         session_id,
@@ -1604,6 +1618,10 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 # client_gone 传下去，远程审批才知道"页面已经关了，别再等人确认"。
                 chat_stream(body, _locked_send, client_gone=client_gone)
+            except ValueError as exc:
+                # 入参问题（如非法 session_id）。响应头早发出去了，退不回 400，
+                # 只能走 error 事件 —— 直接抛会让连接无声断掉，前端只看到"卡住了"。
+                _locked_send("error", {"detail": str(exc)})
             finally:
                 done.set()
             return
@@ -1629,10 +1647,16 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(400, {"ok": False, "error": str(exc)})
             return
         if parsed.path == "/v1/chat/sessions/import":
-            self._json(200, chat_session_import(body))
+            try:
+                self._json(200, chat_session_import(body))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
             return
         if parsed.path == "/v1/chat/sessions":
-            self._json(200, chat_session_create(body))
+            try:
+                self._json(200, chat_session_create(body))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
             return
         if parsed.path == "/v1/knowledge/cards":
             try:
