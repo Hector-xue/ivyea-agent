@@ -253,3 +253,126 @@ def test_board_tool_unchanged_when_no_approval_channel(ivyea_home, monkeypatch):
     ctx.ops_bridge = {"base_url": "http://x/api", "token": "t"}
     agent_tools._t_ivyea_ops_call_tool({"name": "lingxing_operate_enable", "arguments": {}}, ctx)
     assert called == ["lingxing_operate_enable"]
+
+
+# ── 工作区目录（ctx.workspace）──────────────────────────────────────────────
+
+def test_file_tools_resolve_relative_paths_against_workspace(tmp_path, monkeypatch):
+    """相对路径要按 ctx.workspace 解，不是按进程 cwd。
+
+    ToolContext.workspace 一直写着"通用工具的工作目录"，但 read_file / list_dir /
+    write_file / edit_file 都是直接 Path(...).resolve()。CLI 下 workspace == cwd
+    所以一直没暴露；嵌进 IvyeaOps 跑时进程 cwd 是 ops 的安装目录，实测
+    list_dir(".") 列出来的是 /root/ivyea-ops 而不是用户绑定的工作区。
+    """
+    from ivyea_agent import tools_general as tg
+    from ivyea_agent.agent_tools import ToolContext
+
+    ws = tmp_path / "myws"
+    ws.mkdir()
+    (ws / "inside.txt").write_text("我在工作区里", encoding="utf-8")
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)                    # 进程 cwd 故意指向别处
+
+    ctx = ToolContext(workspace=str(ws))
+    assert "inside.txt" in tg.t_list_dir({"path": "."}, ctx)
+    assert "我在工作区里" in tg.t_read_file({"path": "inside.txt"}, ctx)
+
+    # 没设 workspace 时保持老行为：按进程 cwd
+    bare = ToolContext()
+    assert "inside.txt" not in tg.t_list_dir({"path": "."}, bare)
+
+
+def test_absolute_paths_are_untouched_by_workspace(tmp_path, monkeypatch):
+    from ivyea_agent import tools_general as tg
+    from ivyea_agent.agent_tools import ToolContext
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    target = tmp_path / "abs.txt"
+    target.write_text("绝对路径", encoding="utf-8")
+    ctx = ToolContext(workspace=str(ws))
+    assert "绝对路径" in tg.t_read_file({"path": str(target)}, ctx)
+
+
+def test_cli_behaviour_unchanged_when_workspace_equals_cwd(tmp_path, monkeypatch):
+    """CLI 把 workspace 设成 os.getcwd()，两者一致 —— 行为必须和以前一模一样。"""
+    from ivyea_agent import tools_general as tg
+    from ivyea_agent.agent_tools import ToolContext
+
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    ctx = ToolContext(workspace=str(tmp_path))
+    assert "a.txt" in tg.t_list_dir({"path": "."}, ctx)
+
+
+def test_declared_workspace_is_never_widened_by_scope_locking(tmp_path, monkeypatch):
+    """显式声明的工作区，范围锁定只能在里面收窄，不能往上放宽。
+
+    task_scope 的 project_root_for 是**向上**找 .git / 项目标记的 —— 对 CLI
+    （cwd 深在仓库里）正好，但嵌入式调用把工作区绑到某个数据目录时，它会一路走到
+    那个"看起来像项目"的祖先去。实测：绑定 /tmp/…/wsdir 被放宽成 /tmp，agent 于是
+    对着 5.5 万个文件找一个相对路径文件，既找不到、扫描面也大得离谱。
+    """
+    from ivyea_agent import task_scope
+    from ivyea_agent.agent_tools import ToolContext
+
+    # 祖先目录伪装成一个"项目"（.git 存在）
+    ancestor = tmp_path / "looks-like-a-repo"
+    (ancestor / ".git").mkdir(parents=True)
+    ws = ancestor / "data" / "myws"
+    ws.mkdir(parents=True)
+
+    ctx = ToolContext(workspace=str(ws), workspace_declared=str(ws))
+    task_scope.prepare_messages(ctx, [
+        {"role": "system", "content": "x"},
+        {"role": "user", "content": "读一下 marker.txt"},
+    ])
+    assert ctx.workspace == str(ws)          # 没被放宽到 ancestor
+
+    # 没声明工作区时保持老行为：允许向上锁到项目根（CLI 就靠这个）
+    ctx2 = ToolContext(workspace=str(ws))
+    task_scope.prepare_messages(ctx2, [
+        {"role": "system", "content": "x"},
+        {"role": "user", "content": "读一下 marker.txt"},
+    ])
+    assert ctx2.workspace == str(ancestor)
+
+
+def test_declared_workspace_still_allows_narrowing_inside(tmp_path):
+    """收窄是允许的 —— 边界只挡"往上"，不挡"往里"。"""
+    from ivyea_agent import task_scope
+    from ivyea_agent.agent_tools import ToolContext
+
+    base = tmp_path / "base"
+    inner = base / "sub"
+    inner.mkdir(parents=True)
+    ctx = ToolContext(workspace=str(base), workspace_declared=str(base))
+    task_scope.apply_to_context(
+        ctx, task_scope.ScopeResolution(root=str(inner), project="sub"))
+    assert ctx.workspace == str(inner)
+
+
+def test_tool_evidence_cannot_widen_past_the_declared_workspace(tmp_path):
+    """读到文件后的"顺势锁定项目根"同样受边界约束。
+
+    少了这道闸，第一次 read_file 之后工作区又被悄悄放宽回祖先目录 ——
+    实测收尾会带一句"[范围已锁定] 后续代码搜索根：/tmp"。
+    """
+    from ivyea_agent import task_scope
+    from ivyea_agent.agent_tools import ToolContext
+
+    ancestor = tmp_path / "repo"
+    (ancestor / ".git").mkdir(parents=True)
+    ws = ancestor / "data"
+    ws.mkdir()
+    (ws / "f.txt").write_text("x", encoding="utf-8")
+
+    ctx = ToolContext(workspace=str(ws), workspace_declared=str(ws))
+    assert task_scope.adopt_project_from_path(ctx, ws / "f.txt") == ""
+    assert ctx.workspace == str(ws)          # 没被放宽
+
+    # 没声明边界时保持老行为
+    ctx2 = ToolContext(workspace=str(ws))
+    assert task_scope.adopt_project_from_path(ctx2, ws / "f.txt") == str(ancestor)

@@ -1121,6 +1121,8 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
         ctx.ops_context = dict(payload.get("ops_context") or {})
     ctx.session_id = str(payload.get("session_id") or "") or sessions.new_id()
     ctx.turn_id = str(payload.get("turn_id") or "")
+    if payload.get("workspace"):
+        ctx.workspace_declared = str(payload.get("workspace") or "")
     if payload.get("asin"):
         ctx.asin = str(payload.get("asin") or "")
 
@@ -1203,6 +1205,9 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         ctx.ops_context = dict(payload.get("ops_context") or {})
     ctx.session_id = str(payload.get("session_id") or "") or sessions.new_id()
     ctx.turn_id = str(payload.get("turn_id") or "")
+    # 调用方显式给了工作区 = 一条边界，范围锁定只能在里面收窄，不能往上放宽。
+    if payload.get("workspace"):
+        ctx.workspace_declared = str(payload.get("workspace") or "")
     if payload.get("asin"):
         ctx.asin = str(payload.get("asin") or "")
     if remote_approval:

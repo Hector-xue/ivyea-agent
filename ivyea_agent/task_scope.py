@@ -292,13 +292,30 @@ def render_note(scope: ScopeResolution, query: str) -> str:
     return "\n".join(lines)
 
 
+def _within(root: str, boundary: str) -> bool:
+    try:
+        Path(root).resolve().relative_to(Path(boundary).resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def apply_to_context(ctx: Any, scope: ScopeResolution) -> None:
     ctx.scope_ambiguous = bool(scope.ambiguous)
     ctx.behavioral_task = bool(scope.behavioral)
     if scope.root and not scope.ambiguous:
-        ctx.workspace = scope.root
-        ctx.target_root = scope.root
-        ctx.target_project = scope.project
+        root = scope.root
+        # 调用方**显式声明**了工作区时，范围锁定只能在它内部收窄，绝不能往上放宽。
+        # project_root_for 是向上找 .git / 项目标记的，对 CLI（cwd 深在仓库里）正好；
+        # 但嵌入式调用把工作区绑到某个数据目录时，它会一路走到那个"看起来像项目"的
+        # 祖先目录去。实测：绑定 /tmp/…/wsdir 被放宽成 /tmp，于是 agent 对着 5.5 万
+        # 个文件找一个相对路径文件 —— 既找不到，扫描面也大得离谱。
+        boundary = str(getattr(ctx, "workspace_declared", "") or "")
+        if boundary and not _within(root, boundary):
+            root = boundary
+        ctx.workspace = root
+        ctx.target_root = root
+        ctx.target_project = Path(root).name if root != scope.root else scope.project
         ctx.target_explicit = bool(scope.explicit)
         ctx.scope_confidence = scope.confidence
 
@@ -358,6 +375,12 @@ def adopt_project_from_path(ctx: Any, path: str | os.PathLike[str] | None) -> st
     """Adopt concrete file/list evidence when no conflicting explicit lock exists."""
     root = project_root_for(path)
     if root is None:
+        return ""
+    # 和 apply_to_context 同一条规矩：读到一个文件之后顺势"锁定项目根"时，同样不能
+    # 越过调用方声明的工作区往上走。少了这道闸，第一次 read_file 之后工作区又会被
+    # 悄悄放宽回祖先目录（实测收尾会带一句"后续代码搜索根：/tmp"）。
+    boundary = str(getattr(ctx, "workspace_declared", "") or "")
+    if boundary and not _within(str(root), boundary):
         return ""
     current = str(getattr(ctx, "target_root", "") or "")
     if getattr(ctx, "target_explicit", False) and current and Path(current).resolve() != root:

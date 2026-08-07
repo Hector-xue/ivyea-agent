@@ -93,7 +93,7 @@ def _gate(ctx, kind: str, preview: str, detail: dict | None = None) -> tuple[boo
 
 # ── 读类（自动放行）──────────────────────────────────────────────────────────
 def t_read_file(args: dict, ctx) -> str:
-    p = Path(os.path.expanduser(args.get("path", ""))).resolve()
+    p = _ws_path(ctx, args.get("path", ""))
     ok, msg = policy.check_path(p, "read")
     if not ok:
         return msg
@@ -125,7 +125,7 @@ def t_read_file(args: dict, ctx) -> str:
 
 
 def t_list_dir(args: dict, ctx) -> str:
-    p = Path(os.path.expanduser(args.get("path", ".") or ".")).resolve()
+    p = _ws_path(ctx, args.get("path", "."), ".")
     ok, msg = policy.check_path(p, "read")
     if not ok:
         return msg
@@ -197,6 +197,27 @@ _GREP_BINARY = re.compile(rb"\x00")
 def _ws_root(ctx):
     from . import workspace
     return workspace.resolve_root(getattr(ctx, "workspace", "") or None)
+
+
+def _ws_path(ctx, raw: str, default: str = "") -> Path:
+    """把工具参数里的路径解析成绝对路径：**相对路径按 ctx.workspace 解，不按进程 cwd。**
+
+    ``ToolContext.workspace`` 一直被文档描述为"通用工具的工作目录"，但只有
+    grep/glob/code_* 这几个走 `_ws_root` 的工具真的照做；read_file / list_dir /
+    write_file / edit_file 都是直接 `Path(...).resolve()`，也就是按**进程**的 cwd。
+
+    CLI 下两者恰好一致（`ctx.workspace = os.getcwd()`），所以一直没暴露。但嵌进
+    IvyeaOps 跑时，进程 cwd 是 ops 的安装目录，工作区却可能指向别处 —— 实测
+    `list_dir(".")` 列出来的是 /root/ivyea-ops，而不是用户绑定的工作区目录。
+
+    绝对路径不受影响；`~` 照常展开。
+    """
+    raw = str(raw or default or "")
+    expanded = os.path.expanduser(raw)
+    p = Path(expanded)
+    if not p.is_absolute():
+        p = _ws_root(ctx) / p
+    return p.resolve()
 
 
 def _expand_braces(pattern: str) -> list[str]:
@@ -575,11 +596,11 @@ def t_mcp_get_prompt(args: dict, ctx) -> str:
 
 # ── 写/执行类（门控）─────────────────────────────────────────────────────────
 def t_write_file(args: dict, ctx) -> str:
-    path = os.path.expanduser(args.get("path", ""))
+    path = str(args.get("path", "") or "")
     content = args.get("content", "")
     if not path:
         return "path 为空。"
-    p = Path(path).resolve()
+    p = _ws_path(ctx, path)
     ok, msg = policy.check_path(p, "write")
     if not ok:
         return msg
@@ -602,7 +623,7 @@ def t_write_file(args: dict, ctx) -> str:
 
 
 def t_edit_file(args: dict, ctx) -> str:
-    p = Path(os.path.expanduser(args.get("path", ""))).resolve()
+    p = _ws_path(ctx, args.get("path", ""))
     ok, msg = policy.check_path(p, "write")
     if not ok:
         return msg
