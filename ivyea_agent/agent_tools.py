@@ -40,6 +40,9 @@ class ToolContext:
     ops_context: dict[str, Any] = field(default_factory=dict)  # 当前 Ops 页面/板块上下文
     provider: Any = None                                       # 当前主脑 provider（供 dispatch_subagent）
     read_paths: set = field(default_factory=set)               # 本会话已 read_file 过的绝对路径（改前必读软护栏）
+    # 本轮改过的文件（工具写进来，agent_loop 排空后发成 file_change 事件）。
+    # 放在 ctx 上是因为工具函数拿不到 emit —— 它只在 agent_loop 那一层。
+    file_changes: list = field(default_factory=list)
     workspace_base: str = ""                                  # 会话最初工作区；跨仓库目标解析始终从这里发现候选
     target_project: str = ""                                  # 当前锁定的工程目标（跨轮保留，显式新目标可切换）
     target_root: str = ""

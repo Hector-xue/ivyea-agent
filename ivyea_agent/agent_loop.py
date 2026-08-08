@@ -284,6 +284,16 @@ def _record_tool_result(ctx: ToolContext, messages: list, tc: dict, res, duratio
         getattr(ctx, "session_id", ""), getattr(ctx, "turn_id", ""),
         tc["id"], seq, tc["name"], tc.get("arguments") or {},
         "blocked" if blocked else ("ok" if res.ok else "error"), duration_ms))
+    # 文件变更：工具拿不到 emit（它只在这一层），所以工具把改动记在 ctx 上，
+    # 这里排空发出去。排在 step 收尾之后 —— 先说"这一步改完了"，再说"改了什么"。
+    changes = getattr(ctx, "file_changes", None)
+    if changes:
+        for ch in changes:
+            _emit_safe(emit, stream_json.file_change_event(
+                getattr(ctx, "session_id", ""), getattr(ctx, "turn_id", ""),
+                ch.get("path", ""), ch.get("action", ""), ch.get("diff", ""),
+                ch.get("scope", "file")))
+        changes.clear()
     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
 
 

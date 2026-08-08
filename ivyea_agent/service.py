@@ -1242,7 +1242,7 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         # 步骤类事件：assistant/tool_result 的内容前端已经能从 token/final 拿到，
         # 再发一份就是重复。
         kind = str(ev.get("type") or "")
-        if kind in ("step", "skill_match"):
+        if kind in ("step", "skill_match", "file_change"):
             send(kind, ev)
 
     try:

@@ -595,6 +595,31 @@ def t_mcp_get_prompt(args: dict, ctx) -> str:
 
 
 # ── 写/执行类（门控）─────────────────────────────────────────────────────────
+# 一轮里最多记多少条文件变更。写循环跑飞时不至于把事件流灌爆。
+_MAX_FILE_CHANGES = 40
+
+
+def _record_change(ctx, path, action: str, old: str, new: str, scope: str = "file") -> None:
+    """把一次文件改动记到 ctx 上，交给 agent_loop 发成 file_change 事件。
+
+    **只在真的写成功之后调**：写之前记的话，被审批拒掉、或写盘失败的改动也会
+    出现在界面的 diff 里 —— 那比不显示更糟，用户会以为改已经落地了。
+
+    diff 复用审批卡那套 `panels.render_diff`，但要 color=False：这份是给网页看的，
+    带 ANSI 转义只会变成一串乱码。
+    """
+    try:
+        changes = getattr(ctx, "file_changes", None)
+        if changes is None or len(changes) >= _MAX_FILE_CHANGES:
+            return
+        changes.append({
+            "path": str(path), "action": action, "scope": scope,
+            "diff": panels.render_diff(old, new, getattr(path, "name", ""), color=False),
+        })
+    except Exception:  # noqa: BLE001 — 记录失败绝不能影响这次写入本身
+        return
+
+
 def t_write_file(args: dict, ctx) -> str:
     path = str(args.get("path", "") or "")
     content = args.get("content", "")
@@ -615,8 +640,15 @@ def t_write_file(args: dict, ctx) -> str:
     if not ok:
         return msg
     try:
+        before = ""
+        if exists:
+            try:
+                before = p.read_text(encoding="utf-8")
+            except Exception:  # noqa: BLE001 — 读不到就当新建，diff 退化成全量新增
+                before = ""
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
+        _record_change(ctx, p, "overwrite" if exists else "create", before, content)
         return f"已写入 {p}（{len(content)} 字）"
     except Exception as e:  # noqa: BLE001
         return f"写入失败：{e}"
@@ -653,6 +685,9 @@ def t_edit_file(args: dict, ctx) -> str:
         return msg
     try:
         p.write_text(text.replace(old, new, 1), encoding="utf-8")
+        # scope=fragment：这里的 diff 只是被替换的那一段，不是整文件。
+        # 行号是片段内的相对行号，界面上要标明，否则会被当成文件行号去对。
+        _record_change(ctx, p, "edit", old, new, scope="fragment")
         return f"已编辑 {p}（替换 1 处）"
     except Exception as e:  # noqa: BLE001
         return f"编辑失败：{e}"

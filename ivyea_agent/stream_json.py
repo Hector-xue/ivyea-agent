@@ -69,6 +69,36 @@ def _slim_args(args: dict | None) -> dict:
     return out
 
 
+# 单条 diff 的上限。写一个几万行的文件时，整段 diff 塞进 SSE 会把一轮的事件流
+# 撑到几 MB —— 浏览器要全收下来才画得出那一格，代价不成比例。
+_DIFF_MAX = 6000
+
+
+def file_change_event(session_id: str, turn_id: str, path: str, action: str,
+                      diff: str, scope: str = "file") -> dict:
+    """Agent 改过一个文件。
+
+    step 事件里虽然有 `path`，但它只说明"调用了 write_file"，说不出**改了什么**。
+    这个事件带上 diff，UI 才画得出 diff 那一格。
+
+    `scope` 区分两种粒度，界面上不能混为一谈：
+      - "file"     write_file：整文件的前后对比
+      - "fragment" edit_file：只有被替换的那一段，行号是片段内的相对行号
+    """
+    body = diff or ""
+    truncated = len(body) > _DIFF_MAX
+    return {
+        "type": "file_change",
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "path": path,
+        "action": action,          # create / overwrite / edit
+        "scope": scope,
+        "diff": body[:_DIFF_MAX],
+        "truncated": truncated,
+    }
+
+
 def step_event(session_id: str, turn_id: str, call_id: str, seq: int, name: str,
                arguments: dict | None, status: str, duration_ms: int | None = None) -> dict:
     """一次工具调用的步骤事件（开始 running，收尾 ok/error）。
