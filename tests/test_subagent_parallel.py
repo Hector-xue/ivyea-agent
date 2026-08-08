@@ -93,3 +93,38 @@ def test_subagent_max_steps_cap_configurable(ivyea_home):
         assert captured["max_steps"] == 25            # 配置生效
     finally:
         agent_loop.run_turn = orig
+
+
+def test_parallel_branch_announces_everything_before_executing(tmp_path):
+    """并行分支必须**先把所有「开始」发完，再执行**。
+
+    这不只是个内部细节 —— 工作台靠它判断"这几步是不是真的同时在跑"：一条 running
+    到达时若已有同类还在 running，就断定重叠，界面上才敢写「并行调研」。顺序执行的
+    话上一条早就收尾了，写"并行"就是撒谎。
+
+    改成"边announce边执行"不会让任何后端测试变红，但会让界面开始说假话，所以钉在这。
+    """
+    from ivyea_agent import agent_loop
+    from ivyea_agent.agent_tools import ToolContext
+    from ivyea_agent.agent_loop import TurnStatus
+
+    events: list[tuple[str, str]] = []
+
+    def emit(ev):
+        if ev.get("type") == "step":
+            events.append((ev.get("status"), ev.get("call_id") or ev.get("id") or ""))
+
+    d = tmp_path / "x.txt"
+    d.write_text("hi", encoding="utf-8")
+    calls = [
+        {"id": f"c{i}", "name": "read_file", "arguments": {"path": str(d)}}
+        for i in range(3)
+    ]
+    ctx = ToolContext(workspace=str(tmp_path), session_id="s", turn_id="t")
+    agent_loop._dispatch_tool_calls(
+        ctx, [], TurnStatus(max_steps=40), calls, 1, 40, narrate=lambda _t: None, emit=emit)
+
+    kinds = [st for st, _ in events]
+    first_terminal = next(i for i, k in enumerate(kinds) if k != "running")
+    assert kinds[:first_terminal] == ["running"] * 3, (
+        f"并行分支没有先发完所有 running：{kinds}")
