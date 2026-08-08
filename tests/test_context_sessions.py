@@ -292,3 +292,65 @@ def test_only_exact_device_names_are_reserved(tmp_path, monkeypatch):
     monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
     for name in ["CONSOLE", "NULL", "com10", "COM", "LPT", "nul-1", "imp-brain-con"]:
         assert sessions.is_safe_id(name) is True, name
+
+
+def test_temp_file_name_is_unique_per_writer(tmp_path, monkeypatch):
+    """临时文件名不能是固定的 `<id>.json.tmp`。
+
+    两个**进程**同时写同一条会话（工作台的 serve + 一个 `ivyea chat`）会写进同一个
+    临时文件，互相踩出半截 JSON —— 进程内的会话锁管不到跨进程。
+    """
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    seen = []
+    real_write = sessions.Path.write_text
+
+    def spy(self, *a, **k):
+        if self.suffix == ".tmp":
+            seen.append(self.name)
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(sessions.Path, "write_text", spy)
+    for _ in range(3):
+        sessions.save("20260808-000000-000-aaaa", [{"role": "user", "content": "x"}])
+    assert len(set(seen)) == 3, seen                       # 每次都不同
+    assert not list(tmp_path.glob("*.tmp"))                # 也没留下垃圾
+
+
+def test_save_retries_when_windows_holds_the_target_open(tmp_path, monkeypatch):
+    """Windows 上 os.replace 会在别的进程正开着目标文件时抛 PermissionError
+    （POSIX 从不会）。目标恰恰是会被并发读的会话文件，而 Windows 是主要用户环境
+    —— 不重试的话，赶上一次就是这一轮的回答没落盘。"""
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    monkeypatch.setattr(sessions.time, "sleep", lambda _s: None)
+    calls = {"n": 0}
+    real_replace = sessions.Path.replace
+
+    def flaky(self, target):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError(13, "被占用")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(sessions.Path, "replace", flaky)
+    sessions.save("20260808-000000-000-aaaa", [{"role": "user", "content": "撑过去了"}])
+    assert calls["n"] == 3
+    assert sessions.load("20260808-000000-000-aaaa")["messages"][0]["content"] == "撑过去了"
+
+
+def test_save_gives_up_cleanly_if_the_file_stays_locked(tmp_path, monkeypatch):
+    """一直占着就得抛，但别把半截临时文件留在会话目录里。"""
+    import pytest
+
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    monkeypatch.setattr(sessions.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(sessions.Path, "replace",
+                        lambda self, t: (_ for _ in ()).throw(PermissionError(13, "一直被占用")))
+    with pytest.raises(PermissionError):
+        sessions.save("20260808-000000-000-aaaa", [{"role": "user", "content": "x"}])
+    assert not list(tmp_path.glob("*.tmp"))

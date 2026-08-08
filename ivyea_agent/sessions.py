@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re as _re
 import secrets
 import threading
@@ -90,9 +91,23 @@ def _save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[di
     p = path_for(sid)
     data = {"id": sid, "created": created or time.time(), "updated": time.time(),
             "model": model, "messages": messages, "usage": usage or {}}
-    tmp = p.with_suffix(".json.tmp")
+    # 临时文件名带进程号和随机后缀。固定成 `<id>.json.tmp` 的话，两个**进程**同时
+    # 写同一条会话（比如工作台的 serve 和一个 `ivyea chat`）会写进同一个临时文件，
+    # 互相踩出半截 JSON。进程内的会话锁管不到跨进程。
+    tmp = p.with_name(f"{p.stem}.{os.getpid()}.{secrets.token_hex(3)}.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(p)
+    # Windows 上 os.replace 会在**别的进程正开着目标文件**时抛 PermissionError
+    # （POSIX 从不会）。这里的目标恰恰是会被并发读的会话文件，而 Windows 是主要
+    # 用户环境 —— 不重试的话，赶上一次就是这一轮的回答没落盘。
+    for attempt in range(6):
+        try:
+            tmp.replace(p)
+            return
+        except PermissionError:
+            if attempt == 5:
+                tmp.unlink(missing_ok=True)   # 别把半截临时文件留在会话目录里
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 def append_turn(sid: str, system: str, new_messages: list[dict], *, model: str = "",
