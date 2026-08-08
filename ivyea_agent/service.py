@@ -1126,7 +1126,7 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
     if payload.get("asin"):
         ctx.asin = str(payload.get("asin") or "")
 
-    messages, created_at = _chat_messages(message, payload, ctx)
+    messages, created_at, turn_base = _chat_messages(message, payload, ctx)
     events: list[dict[str, Any]] = []
 
     def narrate(text: str) -> None:
@@ -1156,9 +1156,10 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
         except (FileNotFoundError, OSError, ValueError):
             pass
     if payload.get("persist", True):
-        sessions.save(
+        sessions.append_turn(
             ctx.session_id,
-            messages,
+            str(messages[0].get("content") or "") if messages else "",
+            messages[turn_base:],
             model=model_cfg.get("model", ""),
             usage={},
             created=created_at,
@@ -1217,7 +1218,7 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         ).prompt
 
     try:
-        messages, created_at = _chat_messages(message, payload, ctx)
+        messages, created_at, turn_base = _chat_messages(message, payload, ctx)
     except ValueError as exc:
         data = {"ok": False, "error": str(exc)}
         send("error", data)
@@ -1268,7 +1269,11 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         return data
 
     if payload.get("persist", True):
-        sessions.save(ctx.session_id, messages, model=model_cfg.get("model", ""), usage={}, created=created_at)
+        sessions.append_turn(
+            ctx.session_id,
+            str(messages[0].get("content") or "") if messages else "",
+            messages[turn_base:],
+            model=model_cfg.get("model", ""), usage={}, created=created_at)
     data = {
         "ok": True,
         "session_id": ctx.session_id,
@@ -1989,7 +1994,8 @@ def _model_requires_key(settings: dict[str, Any]) -> bool:
     return bool(settings.get("key_env") or auth in ("oauth_external", "oauth_device_code", "copilot"))
 
 
-def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext) -> tuple[list[dict[str, Any]], float | None]:
+def _chat_messages(message: str, payload: dict[str, Any],
+                   ctx: ToolContext) -> tuple[list[dict[str, Any]], float | None, int]:
     system = agent_loop.SYSTEM_PROMPT + agent_loop.runtime_context_note()
     if ctx.plan_mode:
         system += agent_loop.PLAN_NOTE
@@ -2068,8 +2074,11 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext) -> t
         ctx.knowledge_retrieval_expected = False
         ctx.knowledge_risk = "none"
         ctx.knowledge_query = message
+    # 本轮起点：这之前都是历史，这之后（含这条 user 和后续工具/回答）才是本轮新增。
+    # 落盘时只写这一段，见 sessions.append_turn —— 整份覆盖会吃掉并发的另一轮。
+    base = len(messages)
     messages.append({"role": "user", "content": _with_payload_images(user_content, payload)})
-    return messages, created_at
+    return messages, created_at, base
 
 
 def _auto_skill_context(message: str, messages: list) -> list[dict[str, Any]]:

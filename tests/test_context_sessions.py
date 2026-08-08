@@ -188,3 +188,80 @@ def test_load_and_delete_treat_bad_ids_as_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
     assert sessions.load("../../etc/passwd") is None
     assert sessions.delete("../../etc/passwd") is False
+
+
+# ── 并发落盘 ────────────────────────────────────────────────────────────────
+# 一轮的流程是"开始读全部历史 → 跑 → 结束写回全部"。两个标签页同时在一条会话里
+# 发消息，各自读到那一刻的历史，结束时各自写回自己那份 —— 后写的赢，先写的整轮
+# （连问带答）就没了，而且**没有任何报错**。实测复现过。
+
+def test_append_turn_keeps_both_concurrent_turns(tmp_path, monkeypatch):
+    import threading
+
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    sid = "20260808-000000-000-abcd"
+    sessions.save(sid, [{"role": "system", "content": "sys"},
+                        {"role": "user", "content": "第一轮"},
+                        {"role": "assistant", "content": "答一"}])
+
+    start = threading.Barrier(2)
+
+    def turn(tag):
+        # 模拟真实流程：先读历史，再（并发地）写回自己这一轮
+        base = sessions.load(sid)["messages"]
+        start.wait()
+        sessions.append_turn(sid, "sys", [
+            {"role": "user", "content": f"问-{tag}"},
+            {"role": "assistant", "content": f"答-{tag}"},
+        ])
+        return len(base)
+
+    threads = [threading.Thread(target=turn, args=(t,)) for t in ("甲", "乙")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    msgs = sessions.load(sid)["messages"]
+    users = [m["content"] for m in msgs if m["role"] == "user"]
+    # 顺序按落盘先后交错，但**一条都不能少**
+    assert sorted(users) == sorted(["第一轮", "问-甲", "问-乙"]), users
+    assert len([m for m in msgs if m["role"] == "assistant"]) == 3
+    assert msgs[0]["role"] == "system" and len(msgs) == 7
+
+
+def test_append_turn_refreshes_the_system_prompt(tmp_path, monkeypatch):
+    """system 是这一轮的运行时上下文（带着当前技能/知识注入），要用新的那份。"""
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    sid = "20260808-000000-000-abce"
+    sessions.save(sid, [{"role": "system", "content": "旧"},
+                        {"role": "user", "content": "上一轮"}])
+    sessions.append_turn(sid, "新", [{"role": "user", "content": "这一轮"}])
+    msgs = sessions.load(sid)["messages"]
+    assert msgs[0] == {"role": "system", "content": "新"}
+    assert [m["content"] for m in msgs if m["role"] == "user"] == ["上一轮", "这一轮"]
+
+
+def test_append_turn_creates_the_session_when_absent(tmp_path, monkeypatch):
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    sid = "20260808-000000-000-abcf"
+    sessions.append_turn(sid, "sys", [{"role": "user", "content": "第一句"}])
+    msgs = sessions.load(sid)["messages"]
+    assert msgs[0]["role"] == "system" and msgs[1]["content"] == "第一句"
+
+
+def test_append_turn_preserves_the_original_created_time(tmp_path, monkeypatch):
+    """创建时间是会话的身份之一，后续轮次不该把它刷成"刚刚"。"""
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    sid = "20260808-000000-000-abd0"
+    sessions.save(sid, [{"role": "user", "content": "x"}], created=1000.0)
+    sessions.append_turn(sid, "sys", [{"role": "user", "content": "y"}], created=9999.0)
+    assert sessions.load(sid)["created"] == 1000.0
