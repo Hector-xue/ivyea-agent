@@ -30,6 +30,7 @@ class ToolContext:
     lingxing_result: dict = field(default_factory=dict)   # 最近一次领星巡检候选
     plan_mode: bool = False                                # 计划模式：禁止写入执行
     workspace: str = ""                                    # 通用工具的工作目录（默认 cwd）
+    workspace_declared: str = ""                           # 调用方显式指定的工作区；范围锁定不得越过它往上放宽
     todos: list = field(default_factory=list)              # 当前任务计划（todo_write 维护）
     perm: permission.PermissionState = field(default_factory=permission.PermissionState)
     session_id: str = ""                                   # 用于运行时间线
@@ -527,14 +528,51 @@ def _t_ivyea_ops_list_tools(args: dict, ctx: ToolContext) -> str:
     return _compact_json_text(data, limit=12000)
 
 
+def _ops_tool_catalog(ctx: ToolContext) -> dict[str, dict[str, Any]]:
+    """板块能力目录（name → 元数据），按 ctx 缓存一次。
+
+    目录里每条自带中文 title 和 destructive 标记，是审批卡文案和"要不要拦"的
+    判断依据。一轮里可能调好几个板块工具，没必要每次都去问一遍。
+    """
+    cached = getattr(ctx, "_ops_tool_catalog", None)
+    if cached is not None:
+        return cached
+    catalog: dict[str, dict[str, Any]] = {}
+    data = _ops_bridge_request(ctx, "/tools", {}, timeout=20.0)
+    for row in (data.get("tools") or []):
+        if isinstance(row, dict) and row.get("name"):
+            catalog[str(row["name"])] = row
+    try:
+        ctx._ops_tool_catalog = catalog          # noqa: SLF001 — 就近缓存，随 ctx 生灭
+    except Exception:  # noqa: BLE001
+        pass
+    return catalog
+
+
 def _t_ivyea_ops_call_tool(args: dict, ctx: ToolContext) -> str:
     name = str(args.get("name") or "").strip()
     if not name:
         return "错误：需要提供工具名 name。"
-    payload = {
-        "name": name,
-        "arguments": args.get("arguments") if isinstance(args.get("arguments"), dict) else {},
-    }
+    arguments = args.get("arguments") if isinstance(args.get("arguments"), dict) else {}
+
+    # 写类板块能力（建项目、启动审计、开领星可写开关…）在**有人可问**的时候必须
+    # 先过审批。只在接了审批通道（serve 的远程确认卡）时才拦：没有通道就说明
+    # 没人能确认，此时保持既有行为不变——嵌入式对话一直是这么跑的，这里不改。
+    if ctx.perm.prompt_fn is not None:
+        meta = _ops_tool_catalog(ctx).get(name) or {}
+        if meta.get("destructive"):
+            title = str(meta.get("title") or name)
+            preview_lines = [f"调用板块能力：{title}（{name}）"]
+            for key, val in list(arguments.items())[:8]:
+                preview_lines.append(f"- {key}: {str(val)[:120]}")
+            decision = permission.request_intent(
+                {"op_type": "ops_tool_call", "tool": name},
+                "\n".join(preview_lines), ctx.perm,
+            )
+            if decision != permission.APPROVE:
+                return f"已取消：用户未批准调用板块能力「{title}」。"
+
+    payload = {"name": name, "arguments": arguments}
     # 板块工具里有长任务（如生成市场调研/打法报告，要采集+AI合成），给宽限超时。
     data = _ops_bridge_request(ctx, "/call", payload, timeout=300.0)
     return _compact_json_text(data)

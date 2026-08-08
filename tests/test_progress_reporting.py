@@ -46,11 +46,11 @@ def test_progress_tool_registered():
 def test_substantive_tool_blocked_until_plan_and_start(tmp_path):
     ctx = ToolContext(workspace=str(tmp_path), progress_required=True)
     call = {"id": "r", "name": "read_file", "arguments": {"path": str(tmp_path / "a.py")}}
-    blocked, _ = agent_loop._run_one(call, ctx)
+    blocked, _, _guarded = agent_loop._run_one(call, ctx)
     assert blocked.ok is False and "todo_write" in blocked.text
 
     _plan(ctx)
-    blocked, _ = agent_loop._run_one(call, ctx)
+    blocked, _, _guarded = agent_loop._run_one(call, ctx)
     assert blocked.ok is False and "progress_update" in blocked.text
 
     assert "开始执行" in _start(ctx)

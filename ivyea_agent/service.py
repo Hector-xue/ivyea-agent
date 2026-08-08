@@ -7,8 +7,10 @@ import hashlib
 import os
 import base64
 import binascii
+import queue
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -16,14 +18,100 @@ from urllib.parse import parse_qs, urlparse
 from . import (
     __version__, ads_evidence, agent_loop, code_agent, config, knowledge, knowledge_evidence,
     knowledge_governance, knowledge_quality, knowledge_sync, models,
-    progress_reporting, retrieval, security, self_manage, sessions, skills, task_runner,
-    traces, workspace,
+    progress_reporting, retrieval, security, self_manage, sessions, skills, stream_json,
+    task_runner, traces, workspace,
 )
 from .agent_tools import ToolContext
 
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+
+# ---------------------------------------------------------------------------
+# 远程人在环审批
+#
+# CLI 里写操作会弹 tui.select 等人选；嵌进网页后没有 TTY，所以 serve 一直强制
+# 只读（execute=False + plan_mode=True），写工具直接回一句"计划模式：不执行"。
+# 这条通道把那张审批卡投影到网页上：审批引擎、选项、语义完全复用 permission.py，
+# 只是把"在终端等一个按键"换成"在队列上等一个 HTTP 决策"。
+#
+# 每个待决策请求一个单槽队列，键是 request_id。跑轮次的那个请求线程阻塞在
+# queue.get 上；决策由 POST /v1/chat/permission 从另一个线程 put 进来
+# （ThreadingHTTPServer 每请求一线程，不会互相饿死）。
+#
+# 三条兜底路径都收敛到"拒绝"，绝不把 agent 永久挂在一个没人会回的确认上：
+# 超时、客户端断开、以及进程重启（队列在内存里，重启即失效，轮次本身也没了）。
+# ---------------------------------------------------------------------------
+_PENDING_APPROVALS: dict[str, "queue.Queue[str]"] = {}
+_APPROVALS_LOCK = threading.Lock()
+DEFAULT_APPROVAL_TIMEOUT = 600.0   # 10 分钟没人理 = 拒绝
+
+
+def resolve_permission(request_id: str, choice: str) -> bool:
+    """回送一个审批决策，解开阻塞中的那一步。未知/已过期的 request_id 返回 False。"""
+    with _APPROVALS_LOCK:
+        slot = _PENDING_APPROVALS.get(str(request_id or ""))
+    if slot is None:
+        return False
+    try:
+        slot.put_nowait(str(choice or ""))
+    except queue.Full:
+        return False    # 已经有决策在路上，忽略重复提交
+    return True
+
+
+def pending_permissions() -> list[str]:
+    with _APPROVALS_LOCK:
+        return list(_PENDING_APPROVALS.keys())
+
+
+class RemoteApproval:
+    """permission.PromptFn 的远程实现：发事件 → 阻塞等决策 → 返回选项 key。"""
+
+    def __init__(self, send: Any, session_id: str,
+                 client_gone: "threading.Event | None" = None,
+                 timeout: float = DEFAULT_APPROVAL_TIMEOUT) -> None:
+        self._send = send
+        self._session_id = session_id
+        self._client_gone = client_gone
+        self._timeout = float(timeout)
+
+    def prompt(self, title: str, body: str, options: list, meta: dict) -> str:
+        keys = [str(o[0]) for o in options]
+        fallback = "deny" if "deny" in keys else (keys[-1] if keys else "deny")
+        request_id = uuid.uuid4().hex[:16]
+        slot: "queue.Queue[str]" = queue.Queue(maxsize=1)
+        with _APPROVALS_LOCK:
+            _PENDING_APPROVALS[request_id] = slot
+        deadline = time.time() + self._timeout
+        try:
+            self._send("permission_request", {
+                "request_id": request_id,
+                "session_id": self._session_id,
+                "op_type": str(meta.get("op_type") or ""),
+                "title": title,
+                "preview": body,
+                "options": [{"key": str(k), "label": str(label)} for k, label in options],
+                "destructive": bool(meta.get("destructive", True)),
+                "expires_at": deadline,
+            })
+            # 分段等待而不是一次 get(timeout=600)：这样客户端一断开就能尽早收摊，
+            # 不用把那一步在服务端干挂十分钟。
+            while True:
+                try:
+                    choice = slot.get(timeout=1.0)
+                except queue.Empty:
+                    if self._client_gone is not None and self._client_gone.is_set():
+                        return fallback     # 页面已经关了，没人能确认了 → 拒绝
+                    if time.time() >= deadline:
+                        self._send("permission_timeout", {"request_id": request_id})
+                        return fallback
+                    continue
+                # 只认这次真发出去的选项，别让前端塞个奇怪的值改变语义。
+                return choice if choice in keys else fallback
+        finally:
+            with _APPROVALS_LOCK:
+                _PENDING_APPROVALS.pop(request_id, None)
 
 
 def health() -> dict[str, Any]:
@@ -1031,12 +1119,14 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
         ctx.ops_bridge = dict(payload.get("ops_bridge") or {})
     if isinstance(payload.get("ops_context"), dict):
         ctx.ops_context = dict(payload.get("ops_context") or {})
-    ctx.session_id = str(payload.get("session_id") or "") or sessions.new_id()
+    ctx.session_id = _checked_session_id(payload.get("session_id"))
     ctx.turn_id = str(payload.get("turn_id") or "")
+    if payload.get("workspace"):
+        ctx.workspace_declared = str(payload.get("workspace") or "")
     if payload.get("asin"):
         ctx.asin = str(payload.get("asin") or "")
 
-    messages, created_at = _chat_messages(message, payload, ctx)
+    messages, created_at, turn_base = _chat_messages(message, payload, ctx)
     events: list[dict[str, Any]] = []
 
     def narrate(text: str) -> None:
@@ -1066,9 +1156,10 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
         except (FileNotFoundError, OSError, ValueError):
             pass
     if payload.get("persist", True):
-        sessions.save(
+        sessions.append_turn(
             ctx.session_id,
-            messages,
+            str(messages[0].get("content") or "") if messages else "",
+            messages[turn_base:],
             model=model_cfg.get("model", ""),
             usage={},
             created=created_at,
@@ -1076,7 +1167,8 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
     return result
 
 
-def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None) -> dict[str, Any]:
+def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
+                client_gone: "threading.Event | None" = None) -> dict[str, Any]:
     """Run one embedded agent turn and emit SSE-style events through send(event, data)."""
     from .providers import LLMError, build_chain
 
@@ -1092,11 +1184,18 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None)
         send("error", data)
         return data
 
+    # 远程审批模式：只有调用方明确要（approval="remote"）才放开写。
+    # 不传 approval 时下面这几行的结果与改动前逐字一致 —— 老调用方零影响。
+    remote_approval = str(payload.get("approval") or "none").strip() == "remote"
     plan_mode = payload.get("plan_mode")
     if plan_mode is None:
+        # 只读仍是默认。开了远程审批的调用方通常会显式传 plan_mode=false；
+        # 没传就仍按只读走，宁可少做也不要在没人看着的时候动线上数据。
         plan_mode = True
     ctx = ToolContext(
-        execute=False,
+        # execute 只在"能真的问到人"的前提下打开：写工具落地前必过 permission，
+        # 而 permission 这时走的是网页确认卡。
+        execute=bool(remote_approval and not plan_mode),
         plan_mode=bool(plan_mode),
         workspace=str(payload.get("workspace") or ""),
         task_id=str(payload.get("task_id") or ""),
@@ -1105,21 +1204,46 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None)
         ctx.ops_bridge = dict(payload.get("ops_bridge") or {})
     if isinstance(payload.get("ops_context"), dict):
         ctx.ops_context = dict(payload.get("ops_context") or {})
-    ctx.session_id = str(payload.get("session_id") or "") or sessions.new_id()
+    ctx.session_id = _checked_session_id(payload.get("session_id"))
     ctx.turn_id = str(payload.get("turn_id") or "")
+    # 调用方显式给了工作区 = 一条边界，范围锁定只能在里面收窄，不能往上放宽。
+    if payload.get("workspace"):
+        ctx.workspace_declared = str(payload.get("workspace") or "")
     if payload.get("asin"):
         ctx.asin = str(payload.get("asin") or "")
+    if remote_approval:
+        ctx.perm.prompt_fn = RemoteApproval(
+            send, ctx.session_id, client_gone=client_gone,
+            timeout=float(payload.get("approval_timeout") or DEFAULT_APPROVAL_TIMEOUT),
+        ).prompt
 
     try:
-        messages, created_at = _chat_messages(message, payload, ctx)
+        messages, created_at, turn_base = _chat_messages(message, payload, ctx)
     except ValueError as exc:
         data = {"ok": False, "error": str(exc)}
         send("error", data)
         return data
-    send("start", {"ok": True, "session_id": ctx.session_id, "read_only": bool(plan_mode), "model": health()["model"]})
+    send("start", {"ok": True, "session_id": ctx.session_id, "read_only": bool(plan_mode),
+                   "approval": "remote" if remote_approval else "none",
+                   "model": health()["model"]})
+
+    # 自动技能匹配：serve 一直只注入知识证据、不选技能（CLI 会）。开了 auto_skill
+    # 就用同一套 skills.context_for_query，并把命中结果发给前端画技能芯片。
+    if payload.get("auto_skill") and not str(payload.get("skill") or "").strip():
+        matched = _auto_skill_context(message, messages)
+        if matched:
+            send("skill_match", stream_json.skill_match_event(ctx.session_id, matched))
 
     def narrate(text: str) -> None:
         send("event", {"type": "event", "text": security.redact_text(str(text))})
+
+    def emit(ev: dict) -> None:
+        # run_turn_stream 的结构化事件通道原本只喂 CLI 的 stream-json。这里只放行
+        # 步骤类事件：assistant/tool_result 的内容前端已经能从 token/final 拿到，
+        # 再发一份就是重复。
+        kind = str(ev.get("type") or "")
+        if kind in ("step", "skill_match"):
+            send(kind, ev)
 
     try:
         provider = provider or build_chain(model_cfg, api_key, narrate=narrate)
@@ -1129,6 +1253,7 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None)
             messages,
             max_steps=(_int(payload.get("max_steps"), 0) or None),
             narrate=narrate,
+            emit=emit,
             tools=_tools_for(payload),
             render=lambda text: send("token", {"text": security.redact_text(str(text))}),
             model=model_cfg.get("model", ""),
@@ -1144,7 +1269,11 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None)
         return data
 
     if payload.get("persist", True):
-        sessions.save(ctx.session_id, messages, model=model_cfg.get("model", ""), usage={}, created=created_at)
+        sessions.append_turn(
+            ctx.session_id,
+            str(messages[0].get("content") or "") if messages else "",
+            messages[turn_base:],
+            model=model_cfg.get("model", ""), usage={}, created=created_at)
     data = {
         "ok": True,
         "session_id": ctx.session_id,
@@ -1177,7 +1306,7 @@ def chat_session_delete(session_id: str) -> dict[str, Any]:
 
 
 def chat_session_create(payload: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(payload.get("id") or "") or sessions.new_id()
+    session_id = _checked_session_id(payload.get("id"))
     initial = str(payload.get("message") or payload.get("title") or "").strip()
     messages: list[dict[str, Any]] = []
     if initial:
@@ -1185,6 +1314,20 @@ def chat_session_create(payload: dict[str, Any]) -> dict[str, Any]:
     sessions.save(session_id, messages, model=config.get_model_config().get("model", ""))
     data = sessions.load(session_id) or {"id": session_id, "messages": messages}
     return {"ok": True, "session": _public_session_detail(data)}
+
+
+def _checked_session_id(raw: Any) -> str:
+    """把调用方给的 session_id 收成安全 id，留空则新生成。
+
+    id 直接拼成文件名，所以非法值必须在入口就打回 —— 拖到 sessions.save 才炸
+    就变成 500，调用方只能看到"服务器错误"，查不出是自己传了个越界的 id。
+    """
+    sid = str(raw or "")
+    if not sid:
+        return sessions.new_id()
+    if not sessions.is_safe_id(sid):
+        raise ValueError("invalid session_id")
+    return sid
 
 
 def chat_session_import(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1204,7 +1347,7 @@ def chat_session_import(payload: dict[str, Any]) -> dict[str, Any]:
                 messages.append({"role": role, "content": content})
     if not messages:
         return {"ok": False, "error": "no messages"}
-    session_id = str(payload.get("id") or "") or sessions.new_id()
+    session_id = _checked_session_id(payload.get("id"))
     created = payload.get("created")
     sessions.save(
         session_id,
@@ -1478,9 +1621,29 @@ class _Handler(BaseHTTPRequestHandler):
             beat = threading.Thread(target=_heartbeat, daemon=True, name="chat-stream-heartbeat")
             beat.start()
             try:
-                chat_stream(body, _locked_send)
+                # client_gone 传下去，远程审批才知道"页面已经关了，别再等人确认"。
+                chat_stream(body, _locked_send, client_gone=client_gone)
+            except ValueError as exc:
+                # 入参问题（如非法 session_id）。响应头早发出去了，退不回 400，
+                # 只能走 error 事件 —— 直接抛会让连接无声断掉，前端只看到"卡住了"。
+                _locked_send("error", {"detail": str(exc)})
             finally:
                 done.set()
+            return
+        if parsed.path == "/v1/chat/permission":
+            request_id = str(body.get("request_id") or "").strip()
+            choice = str(body.get("choice") or "").strip()
+            if not request_id or not choice:
+                self._json(400, {"ok": False, "error": "request_id 与 choice 必填"})
+                return
+            ok = resolve_permission(request_id, choice)
+            self._json(200 if ok else 404, {
+                "ok": ok,
+                "request_id": request_id,
+                # 过期/未知一律照实说：这一步多半已经超时被拒或轮次已收尾，
+                # 前端据此把卡片改成"已失效"，而不是让用户以为点成功了。
+                "error": "" if ok else "unknown_or_expired_request",
+            })
             return
         if parsed.path == "/v1/chat":
             try:
@@ -1489,10 +1652,16 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(400, {"ok": False, "error": str(exc)})
             return
         if parsed.path == "/v1/chat/sessions/import":
-            self._json(200, chat_session_import(body))
+            try:
+                self._json(200, chat_session_import(body))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
             return
         if parsed.path == "/v1/chat/sessions":
-            self._json(200, chat_session_create(body))
+            try:
+                self._json(200, chat_session_create(body))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
             return
         if parsed.path == "/v1/knowledge/cards":
             try:
@@ -1825,7 +1994,8 @@ def _model_requires_key(settings: dict[str, Any]) -> bool:
     return bool(settings.get("key_env") or auth in ("oauth_external", "oauth_device_code", "copilot"))
 
 
-def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext) -> tuple[list[dict[str, Any]], float | None]:
+def _chat_messages(message: str, payload: dict[str, Any],
+                   ctx: ToolContext) -> tuple[list[dict[str, Any]], float | None, int]:
     system = agent_loop.SYSTEM_PROMPT + agent_loop.runtime_context_note()
     if ctx.plan_mode:
         system += agent_loop.PLAN_NOTE
@@ -1904,8 +2074,61 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext) -> t
         ctx.knowledge_retrieval_expected = False
         ctx.knowledge_risk = "none"
         ctx.knowledge_query = message
+    # 本轮起点：这之前都是历史，这之后（含这条 user 和后续工具/回答）才是本轮新增。
+    # 落盘时只写这一段，见 sessions.append_turn —— 整份覆盖会吃掉并发的另一轮。
+    base = len(messages)
     messages.append({"role": "user", "content": _with_payload_images(user_content, payload)})
-    return messages, created_at
+    return messages, created_at, base
+
+
+def _auto_skill_context(message: str, messages: list) -> list[dict[str, Any]]:
+    """按用户问题自动匹配 skill、注入本轮 user 消息，返回命中列表供 skill_match 事件用。
+
+    serve 一直只做知识证据注入、不选技能（选技能只有 CLI 会做），于是同一个问题
+    在终端和网页会走出两套流程。这里复用 cli.py 那条路上的同一个
+    skills.context_for_query 和同一段注入文案，把两边拉齐。
+
+    不另设"是不是亚马逊问题"的闸：skills 库全是亚马逊域，纯代码问题打分为 0
+    自然不会命中，多一道判断反而多一处会跟 CLI 走偏的地方。
+    """
+    try:
+        sctx, sids = skills.context_for_query(message, limit=2)
+    except Exception:  # noqa: BLE001 — 技能匹配失败绝不该让整轮对话挂掉
+        return []
+    if not sctx or not sids:
+        return []
+    note = ("\n\n[Ivyea Skill：本轮相关可复用流程]\n" + sctx
+            + "\n\n要求：优先按 skill workflow 组织执行步骤；涉及事实依据时再结合知识库。")
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            msg["content"] = content + note
+        elif isinstance(content, list):
+            # 多模态消息：追加到文本块，图片块原样不动。
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    part["text"] = str(part.get("text") or "") + note
+                    break
+            else:
+                content.insert(0, {"type": "text", "text": note})
+        break
+    scores = {}
+    try:
+        scores = {sk.id: score for sk, score in skills.search(message, limit=len(sids))}
+    except Exception:  # noqa: BLE001
+        pass
+    out: list[dict[str, Any]] = []
+    for sid in sids:
+        sk = skills.get_skill(sid)
+        out.append({
+            "id": sid,
+            "title": (sk.title if sk else sid),
+            "domain": (sk.domain if sk else ""),
+            "score": scores.get(sid, 0),
+        })
+    return out
 
 
 def _with_payload_images(user_content: str, payload: dict[str, Any]):

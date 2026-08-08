@@ -142,3 +142,215 @@ def test_sessions_new_id_is_unique(ivyea_home):
 def test_sessions_load_missing(ivyea_home):
     from ivyea_agent import sessions
     assert sessions.load("nope-does-not-exist") is None
+
+
+# ── 会话 id 是不可信输入 ────────────────────────────────────────────────────
+# session_id 直接拼进文件名，而它是**调用方给的**（serve 的 payload.session_id、
+# 导入接口的 id）。曾实测可打通：往 /v1/chat/sessions POST 一个
+# id="../../../tmp/PWNED"，daemon（常以 root 跑）就在会话目录之外写出了文件。
+
+def test_path_for_rejects_traversal(tmp_path, monkeypatch):
+    import pytest
+
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    for bad in ["../../../../tmp/PWNED", "/tmp/PWNED", "..", "a/b", "a\\b", "", "x" * 200]:
+        with pytest.raises(ValueError):
+            sessions.path_for(bad)
+
+
+def test_path_for_accepts_real_ids(tmp_path, monkeypatch):
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    # new_id() 的产物、以及更老的不带随机后缀的历史 id，都必须继续可用
+    assert sessions.path_for(sessions.new_id()).parent == tmp_path
+    assert sessions.path_for("20260617-120252").name == "20260617-120252.json"
+    assert sessions.path_for("imp-assistant-1743001").name == "imp-assistant-1743001.json"
+
+
+def test_save_refuses_to_write_outside_the_sessions_dir(tmp_path, monkeypatch):
+    import pytest
+
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    with pytest.raises(ValueError):
+        sessions.save("../escaped", [{"role": "user", "content": "x"}])
+    assert not (tmp_path.parent / "escaped.json").exists()
+
+
+def test_load_and_delete_treat_bad_ids_as_missing(tmp_path, monkeypatch):
+    """查询语义：非法 id 等同"查无此会话"，不该把异常甩给调用方。"""
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    assert sessions.load("../../etc/passwd") is None
+    assert sessions.delete("../../etc/passwd") is False
+
+
+# ── 并发落盘 ────────────────────────────────────────────────────────────────
+# 一轮的流程是"开始读全部历史 → 跑 → 结束写回全部"。两个标签页同时在一条会话里
+# 发消息，各自读到那一刻的历史，结束时各自写回自己那份 —— 后写的赢，先写的整轮
+# （连问带答）就没了，而且**没有任何报错**。实测复现过。
+
+def test_append_turn_keeps_both_concurrent_turns(tmp_path, monkeypatch):
+    import threading
+
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    sid = "20260808-000000-000-abcd"
+    sessions.save(sid, [{"role": "system", "content": "sys"},
+                        {"role": "user", "content": "第一轮"},
+                        {"role": "assistant", "content": "答一"}])
+
+    start = threading.Barrier(2)
+
+    def turn(tag):
+        # 模拟真实流程：先读历史，再（并发地）写回自己这一轮
+        base = sessions.load(sid)["messages"]
+        start.wait()
+        sessions.append_turn(sid, "sys", [
+            {"role": "user", "content": f"问-{tag}"},
+            {"role": "assistant", "content": f"答-{tag}"},
+        ])
+        return len(base)
+
+    threads = [threading.Thread(target=turn, args=(t,)) for t in ("甲", "乙")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    msgs = sessions.load(sid)["messages"]
+    users = [m["content"] for m in msgs if m["role"] == "user"]
+    # 顺序按落盘先后交错，但**一条都不能少**
+    assert sorted(users) == sorted(["第一轮", "问-甲", "问-乙"]), users
+    assert len([m for m in msgs if m["role"] == "assistant"]) == 3
+    assert msgs[0]["role"] == "system" and len(msgs) == 7
+
+
+def test_append_turn_refreshes_the_system_prompt(tmp_path, monkeypatch):
+    """system 是这一轮的运行时上下文（带着当前技能/知识注入），要用新的那份。"""
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    sid = "20260808-000000-000-abce"
+    sessions.save(sid, [{"role": "system", "content": "旧"},
+                        {"role": "user", "content": "上一轮"}])
+    sessions.append_turn(sid, "新", [{"role": "user", "content": "这一轮"}])
+    msgs = sessions.load(sid)["messages"]
+    assert msgs[0] == {"role": "system", "content": "新"}
+    assert [m["content"] for m in msgs if m["role"] == "user"] == ["上一轮", "这一轮"]
+
+
+def test_append_turn_creates_the_session_when_absent(tmp_path, monkeypatch):
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    sid = "20260808-000000-000-abcf"
+    sessions.append_turn(sid, "sys", [{"role": "user", "content": "第一句"}])
+    msgs = sessions.load(sid)["messages"]
+    assert msgs[0]["role"] == "system" and msgs[1]["content"] == "第一句"
+
+
+def test_append_turn_preserves_the_original_created_time(tmp_path, monkeypatch):
+    """创建时间是会话的身份之一，后续轮次不该把它刷成"刚刚"。"""
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    sid = "20260808-000000-000-abd0"
+    sessions.save(sid, [{"role": "user", "content": "x"}], created=1000.0)
+    sessions.append_turn(sid, "sys", [{"role": "user", "content": "y"}], created=9999.0)
+    assert sessions.load(sid)["created"] == 1000.0
+
+
+def test_windows_reserved_device_names_are_rejected(tmp_path, monkeypatch):
+    """`NUL.json` 在 Windows 上**就是空设备**：会话写进去内容直接消失，还不报错。
+    `CON` 会去开控制台。这些全是合法字符，字符集守卫拦不住。
+
+    无论当前跑在哪个系统都要拒 —— 会话文件会跟着备份/同步挪到 Windows 机器上，
+    daemon 本身也支持 Windows。只在 nt 上拦，等于放任生成一批到了 Windows 才炸的 id。
+    """
+    import pytest
+
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    for name in ["NUL", "CON", "PRN", "AUX", "COM1", "LPT9", "nul", "Con", "com1"]:
+        assert sessions.is_safe_id(name) is False, name
+        with pytest.raises(ValueError):
+            sessions.path_for(name)
+
+
+def test_only_exact_device_names_are_reserved(tmp_path, monkeypatch):
+    """别误伤：只有**整个 id 等于**设备名才算，前缀像的不算。"""
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    for name in ["CONSOLE", "NULL", "com10", "COM", "LPT", "nul-1", "imp-brain-con"]:
+        assert sessions.is_safe_id(name) is True, name
+
+
+def test_temp_file_name_is_unique_per_writer(tmp_path, monkeypatch):
+    """临时文件名不能是固定的 `<id>.json.tmp`。
+
+    两个**进程**同时写同一条会话（工作台的 serve + 一个 `ivyea chat`）会写进同一个
+    临时文件，互相踩出半截 JSON —— 进程内的会话锁管不到跨进程。
+    """
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    seen = []
+    real_write = sessions.Path.write_text
+
+    def spy(self, *a, **k):
+        if self.suffix == ".tmp":
+            seen.append(self.name)
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(sessions.Path, "write_text", spy)
+    for _ in range(3):
+        sessions.save("20260808-000000-000-aaaa", [{"role": "user", "content": "x"}])
+    assert len(set(seen)) == 3, seen                       # 每次都不同
+    assert not list(tmp_path.glob("*.tmp"))                # 也没留下垃圾
+
+
+def test_save_retries_when_windows_holds_the_target_open(tmp_path, monkeypatch):
+    """Windows 上 os.replace 会在别的进程正开着目标文件时抛 PermissionError
+    （POSIX 从不会）。目标恰恰是会被并发读的会话文件，而 Windows 是主要用户环境
+    —— 不重试的话，赶上一次就是这一轮的回答没落盘。"""
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    monkeypatch.setattr(sessions.time, "sleep", lambda _s: None)
+    calls = {"n": 0}
+    real_replace = sessions.Path.replace
+
+    def flaky(self, target):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError(13, "被占用")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(sessions.Path, "replace", flaky)
+    sessions.save("20260808-000000-000-aaaa", [{"role": "user", "content": "撑过去了"}])
+    assert calls["n"] == 3
+    assert sessions.load("20260808-000000-000-aaaa")["messages"][0]["content"] == "撑过去了"
+
+
+def test_save_gives_up_cleanly_if_the_file_stays_locked(tmp_path, monkeypatch):
+    """一直占着就得抛，但别把半截临时文件留在会话目录里。"""
+    import pytest
+
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    monkeypatch.setattr(sessions.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(sessions.Path, "replace",
+                        lambda self, t: (_ for _ in ()).throw(PermissionError(13, "一直被占用")))
+    with pytest.raises(PermissionError):
+        sessions.save("20260808-000000-000-aaaa", [{"role": "user", "content": "x"}])
+    assert not list(tmp_path.glob("*.tmp"))
