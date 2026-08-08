@@ -39,9 +39,23 @@ def new_id() -> str:
 # 好让外部系统的 id 迁进来。落盘的 164 个历史会话全部符合，收紧不误伤存量。
 _SAFE_ID = _re.compile(r"[A-Za-z0-9_-]{1,120}")
 
+# Windows 的保留设备名。`NUL.json` 在 Windows 上**就是空设备** —— 写进去内容直接
+# 消失，而且不报错；`CON` 会去开控制台。字符集守卫拦不住它们（全是合法字符），
+# 所以单独列一份。带扩展名也一样算设备，所以比的是整个 id。
+_WINDOWS_RESERVED = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)]
+)
+
 
 def is_safe_id(sid: str) -> bool:
-    return bool(sid) and _SAFE_ID.fullmatch(sid) is not None
+    if not sid or _SAFE_ID.fullmatch(sid) is None:
+        return False
+    # 无论当前跑在哪个系统都拒：会话文件会跟着备份/同步挪到 Windows 机器上，
+    # 而且 daemon 本身就支持 Windows。只在 nt 上拦，等于放任生成一批到了
+    # Windows 才炸的 id。
+    return sid.upper() not in _WINDOWS_RESERVED
 
 
 def path_for(sid: str) -> Path:

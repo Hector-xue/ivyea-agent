@@ -265,3 +265,30 @@ def test_append_turn_preserves_the_original_created_time(tmp_path, monkeypatch):
     sessions.save(sid, [{"role": "user", "content": "x"}], created=1000.0)
     sessions.append_turn(sid, "sys", [{"role": "user", "content": "y"}], created=9999.0)
     assert sessions.load(sid)["created"] == 1000.0
+
+
+def test_windows_reserved_device_names_are_rejected(tmp_path, monkeypatch):
+    """`NUL.json` 在 Windows 上**就是空设备**：会话写进去内容直接消失，还不报错。
+    `CON` 会去开控制台。这些全是合法字符，字符集守卫拦不住。
+
+    无论当前跑在哪个系统都要拒 —— 会话文件会跟着备份/同步挪到 Windows 机器上，
+    daemon 本身也支持 Windows。只在 nt 上拦，等于放任生成一批到了 Windows 才炸的 id。
+    """
+    import pytest
+
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    for name in ["NUL", "CON", "PRN", "AUX", "COM1", "LPT9", "nul", "Con", "com1"]:
+        assert sessions.is_safe_id(name) is False, name
+        with pytest.raises(ValueError):
+            sessions.path_for(name)
+
+
+def test_only_exact_device_names_are_reserved(tmp_path, monkeypatch):
+    """别误伤：只有**整个 id 等于**设备名才算，前缀像的不算。"""
+    from ivyea_agent import sessions
+
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
+    for name in ["CONSOLE", "NULL", "com10", "COM", "LPT", "nul-1", "imp-brain-con"]:
+        assert sessions.is_safe_id(name) is True, name
