@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import (
     __version__, ads_evidence, agent_loop, code_agent, config, knowledge, knowledge_evidence,
-    knowledge_governance, knowledge_quality, knowledge_sync, models, permission,
+    knowledge_governance, knowledge_quality, knowledge_sync, models,
     progress_reporting, retrieval, security, self_manage, sessions, skills, stream_json,
     task_runner, traces, workspace,
 )
