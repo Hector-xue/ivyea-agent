@@ -197,7 +197,7 @@ TOOL_SCHEMAS = [
             "query": {"type": "string"}}, "required": ["query"]}}},
     {"type": "function", "function": {
         "name": "ivyea_ops_list_tools",
-        "description": "仅 IvyeaOps 嵌入模式可用：列出当前用户可调用的 IvyeaOps 板块工具，包括 Home、市场、Listing、广告审计、领星、资讯、监控等。",
+        "description": "仅 IvyeaOps 嵌入模式可用：列出当前用户可调用的 IvyeaOps 板块工具，包括 Home、市场、Listing、广告审计、领星、资讯、监控，**以及 AI 作图（image_generate）**。用户提出作图/出图/画一张/生成主图之类的需求时，先用这个查一下 —— 宿主机器上通常已经配好了生图链路，别直接回答\"我没有图像生成能力\"。",
         "parameters": {"type": "object", "properties": {
             "module": {"type": "string", "description": "可选：按板块过滤，如 home/market/listing/tools/lingxing/news/servmon/skill-hub"},
             "query": {"type": "string", "description": "可选：按名称或描述搜索"}},
