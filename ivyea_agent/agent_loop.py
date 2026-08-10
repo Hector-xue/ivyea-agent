@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import config, context, knowledge, panels, progress_reporting, stream_json, task_scope, traces, ui
+from . import (config, context, knowledge, panels, progress_reporting, stream_json, task_scope,
+               traces, transcript, ui)
 from .agent_tools import PARALLEL_SAFE, TOOL_SCHEMAS, ToolContext, ToolResult, dispatch_result
 from .providers import LLMProvider
 
@@ -371,8 +372,9 @@ def _verify_gate_feedback(ctx: ToolContext, status: TurnStatus,
     if status.behavioral_task and not status.runtime_validated and status.behavior_gate_rounds < 1:
         status.behavior_gate_rounds += 1
         narrate(ui.message("warn", "行为类改动尚未验证真实运行路径，不能直接收尾。"))
-        return (
-            "[完成门禁] 这是界面/输出/交互类任务。测试通过不等于目标行为已生效；"
+        return transcript.gate_text(
+            transcript.COMPLETION_GATE,
+            " 这是界面/输出/交互类任务。测试通过不等于目标行为已生效；"
             "请用 run_command 或 run_python 验证真实运行路径（至少运行一个最小可执行场景）并核对关键输出，再给最终结论。"
         )
     if status.verify_rounds >= _VERIFY_CAP:
@@ -413,8 +415,9 @@ def _citation_gate_feedback(ctx: ToolContext, content: str, status: TurnStatus,
     available = ", ".join(f"[{key}]" for key in check["available"])
     invalid = ", ".join(f"[{key}]" for key in check["invalid"])
     detail = f" 未知引用：{invalid}。" if invalid else ""
-    return (
-        f"[知识引用门禁] 本轮已检索到证据 {available}，但当前答案没有有效、完整地引用它们。{detail}"
+    return transcript.gate_text(
+        transcript.CITATION_GATE,
+        f" 本轮已检索到证据 {available}，但当前答案没有有效、完整地引用它们。{detail}"
         "请重写最终答案：只在确实由摘录支持的事实句末标 [K#]；不得编造编号；"
         "官方事实、账户观测、分析推断、运营假设要分开表达；归因销售不等于增量销售，账户现象不等于官方算法。"
         "不要自行撰写来源清单，系统会生成。"

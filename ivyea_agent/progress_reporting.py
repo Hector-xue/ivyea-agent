@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import security
+from . import security, transcript
 
 
 TERMINAL_TODO_STATUSES = {"completed", "blocked", "skipped"}
@@ -360,22 +360,23 @@ def completion_feedback(ctx: Any) -> str | None:
         return None
     if getattr(ctx, "plan_mode", False) and not getattr(ctx, "progress_started", False):
         return None
+    gate = lambda body: transcript.gate_text(transcript.PROGRESS_GATE, body)  # noqa: E731
     has_workflow = bool(getattr(ctx, "todos", []) or getattr(ctx, "progress_started", False))
     if not has_workflow:
         if getattr(ctx, "progress_execution_expected", False):
-            return ("[汇报门禁] 用户要求实际执行复杂任务，但尚未建立执行流程。"
-                    "先 todo_write 列出阶段，再 progress_update(kind='start') 后开始工具执行。")
+            return gate(" 用户要求实际执行复杂任务，但尚未建立执行流程。"
+                        "先 todo_write 列出阶段，再 progress_update(kind='start') 后开始工具执行。")
         return None
     if not getattr(ctx, "progress_started", False):
-        return ("[汇报门禁] 已建立多步计划但尚未做开始汇报。先调用 progress_update(kind='start')，"
-                "说明目标、范围、阶段和完成标准，再继续执行。")
+        return gate(" 已建立多步计划但尚未做开始汇报。先调用 progress_update(kind='start')，"
+                    "说明目标、范围、阶段和完成标准，再继续执行。")
     active = int(getattr(ctx, "progress_active_phase", 0) or 0)
     if active:
-        return (f"[汇报门禁] 第 {active} 阶段尚未结束。先调用 progress_update(kind='phase_end')，"
-                "汇报完成/未完成、证据和注意事项，再更新 Todo。")
+        return gate(f" 第 {active} 阶段尚未结束。先调用 progress_update(kind='phase_end')，"
+                    "汇报完成/未完成、证据和注意事项，再更新 Todo。")
     if not getattr(ctx, "progress_final", {}):
-        return ("[汇报门禁] 执行结束前必须调用 progress_update(kind='final')。"
-                "最终汇总需明确已做到、未做到、验证证据和注意事项；系统会合并真实 Todo 与工具证据。")
+        return gate(" 执行结束前必须调用 progress_update(kind='final')。"
+                    "最终汇总需明确已做到、未做到、验证证据和注意事项；系统会合并真实 Todo 与工具证据。")
     return None
 
 

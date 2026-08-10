@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from . import config
+from . import config, transcript
 
 _DIR = config.IVYEA_DIR / "sessions"
 
@@ -176,9 +176,12 @@ def listing(limit: int = 20) -> list[dict[str, Any]]:
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
             msgs = d.get("messages", [])
-            first_user = next((m.get("content", "") for m in msgs if m.get("role") == "user"), "")
+            # 门禁提示和压缩摘要也是 role=user，直接数会把轮数虚高、还可能被当成首句摘要。
+            first_user = next((m.get("content", "") for m in msgs
+                               if m.get("role") == "user"
+                               and not transcript.is_injected_user_message(m.get("content"))), "")
             out.append({"id": d.get("id", f.stem), "updated": d.get("updated"),
-                        "turns": sum(1 for m in msgs if m.get("role") == "user"),
+                        "turns": transcript.visible_turns(msgs),
                         "preview": (first_user or "")[:50]})
         except Exception:
             pass

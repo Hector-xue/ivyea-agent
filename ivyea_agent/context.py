@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from . import config
+from . import config, transcript
 
 # 默认主动自动压缩（对标 Claude Code）：prompt tokens 越过软阈值即在轮后压缩历史，
 # 压缩时给提示。/compact auto off 可关。小上下文模型可 config set compact_at_tokens 调低。
@@ -124,7 +124,8 @@ def compact(messages: list[dict], provider, *, keep_system: bool = True,
     new: list[dict] = []
     if system and keep_system:
         new.append(system)
-    new.append({"role": "user", "content": f"[此前对话摘要，请据此继续]\n{summary.strip()}"})
-    new.append({"role": "assistant", "content": "（已读取摘要，请继续。）"})
+    new.append({"role": "user",
+                "content": transcript.gate_text(transcript.COMPACT_SUMMARY, f"\n{summary.strip()}")})
+    new.append({"role": "assistant", "content": transcript.COMPACT_ACK})
     new.extend(recent)
     return new, summary.strip()

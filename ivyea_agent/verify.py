@@ -13,10 +13,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import code_review, git_workflow
+from . import code_review, git_workflow, transcript
 
 _MAX_FOCUSED = 5          # 最多跑几个 focused 测试文件，封顶运行时长
-_MARK = "⚠"               # 复用 ui.tool_result 的死胡同高亮前缀
 
 
 def _focused_tests(root: Path, files: list[str]) -> list[str]:
@@ -73,7 +72,7 @@ def gate(root: str | Path = ".", *, run_tests: bool = True, timeout: int = 120) 
     if not highs and not test_fail:
         return {"ok": True, "feedback": ""}           # 无高危、focused 测试通过（或无对应测试）→ 放行
 
-    lines = [f"{_MARK} 完成前自验证发现问题，请先处理再收尾（未通过不要宣称完成）："]
+    lines = [transcript.gate_text(transcript.VERIFY_GATE, "，请先处理再收尾（未通过不要宣称完成）：")]
     if test_fail:
         lines.append(f"· focused 测试失败（{test_fail['failure_count']} 例）：`{test_fail['command']}`")
         lines.append("  失败输出（尾部）：\n" + test_fail["output"])

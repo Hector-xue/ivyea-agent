@@ -19,7 +19,7 @@ from . import (
     __version__, ads_evidence, agent_loop, code_agent, config, knowledge, knowledge_evidence,
     knowledge_governance, knowledge_quality, knowledge_sync, models,
     progress_reporting, retrieval, security, self_manage, sessions, skills, stream_json,
-    task_runner, traces, workspace,
+    task_runner, traces, transcript, workspace,
 )
 from .agent_tools import ToolContext
 
@@ -2153,8 +2153,11 @@ def _with_payload_images(user_content: str, payload: dict[str, Any]):
 
 
 def _public_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """给人看的那份记录。live 回包和历史详情共用这一个投影 —— 摘门禁注入只改这里，
+    任务台/悬浮球/存量会话文件同时干净（见 transcript.strip_injected）。
+    先摘再截末 30 条：否则名额会被门禁提示和废稿吃掉。"""
     rows = []
-    for msg in messages:
+    for msg in transcript.strip_injected(messages):
         role = msg.get("role")
         if role not in ("user", "assistant", "tool"):
             continue
