@@ -17,6 +17,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      # tag 和源码里的版本号必须一致。
+      #
+      # 这个坑这个仓库踩过两次：一次是 1e2cb0f「单一版本源，根治 __version__
+      # 漂移导致的"永远有更新"」，一次是 v1.10.0 —— 打 tag 时忘了 bump
+      # ivyea_agent/__init__.py，结果发行包里的代码是新的、自报家门是旧的。
+      #
+      # 后果不是"版本号不好看"：IvyeaOps 读 `ivyea --version` 拿到旧号，
+      # 和 GitHub 最新 Release 一比就认为有更新 —— **那个"有更新"徽标会一直
+      # 亮着，用户更新多少次都消不掉**，因为装上去之后自报的还是旧号。
+      #
+      # 放在 release 而不是 CI：只有打 tag 这一刻才知道 tag 名。
+      # 它拦不住 tag 被创建，但能拦住带着错版本号的 Release 发出去。
+      - name: 版本号必须与 tag 一致
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER=$(python -c "import ivyea_agent, sys; sys.stdout.write(ivyea_agent.__version__)")
+          echo "tag=$TAG  __version__=$VER"
+          if [ "v$VER" != "$TAG" ]; then
+            echo "::error::tag $TAG 与 ivyea_agent.__version__ ($VER) 不一致。"
+            echo "::error::打 tag 前要先改 ivyea_agent/__init__.py 的 __version__ 并提交。"
+            exit 1
+          fi
+
       - name: Build sdist + wheel
         run: python -m pip install --upgrade build && python -m build
       - name: Build offline installer bundles
