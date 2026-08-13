@@ -1262,6 +1262,11 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
             # 只累加 token、不认 final 的调用方（IvyeaOps 的报告合成）传 true：
             # 引证门会让模型带着 [K#] 把整篇重写一遍，不 defer 就会收到两份报告。
             defer_citation_text=payload.get("defer_citation_text") is True,
+            # 一轮里正文可能被吐好几遍（工具前的开场白、门禁打回后的整篇重写）。
+            # 终端叠着看没问题，网页把 token 拼进同一个气泡就成了"同一张表连出
+            # 三遍"。这条事件告诉前端：前面那一稿作废，从下一个 token 重新开始。
+            on_answer_reset=lambda reason: send(
+                "answer_reset", {"reason": str(reason), "session_id": ctx.session_id}),
         )
     except LLMError as exc:
         data = {"ok": False, "error": "model_error", "detail": str(exc)}

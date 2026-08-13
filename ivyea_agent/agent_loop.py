@@ -490,7 +490,8 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
                     render_reasoning: Callable[[str], None] = None,
                     emit: Callable[[dict], None] | None = None,
                     tools: list | None = None,
-                    defer_citation_text: bool = True) -> dict:
+                    defer_citation_text: bool = True,
+                    on_answer_reset: Callable[[str], None] | None = None) -> dict:
     """流式跑一轮：token 边出边渲染、工具实时叙述、累计用量。
     返回 {text, usage}（usage 为本轮各步累加）。render(token) 逐字输出助手文本。
 
@@ -502,13 +503,38 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
     tools：受限工具子集（与 run_turn 对齐）；[] = 不挂工具，None = 全量 TOOL_SCHEMAS。
     defer_citation_text：带 [K#] 知识引证时是否把正文压到引证门通过后一次性输出。
     终端（CLI）保持 True——中间草稿打出去收不回来；Web/serve 传 False 边生成边流式，
-    前端以 final 事件的 text 为准整体替换，引证重写不会留下脏文本。"""
+    前端以 final 事件的 text 为准整体替换，引证重写不会留下脏文本。
+
+    on_answer_reset(reason)：**上一段已经渲染出去的正文作废了**，从这里开始的是新
+    一稿。一轮里模型可能把正文吐好几遍——工具前的开场白、门禁打回后的整篇重写
+    （引用校验最多来回 2 次）——终端是一条向下的日志、叠着看没问题，但网页把
+    token 顺序拼进同一个气泡，用户看到的就是同一张表连出三遍。给了这个回调的
+    调用方（serve → 网页）会收到边界，把气泡清空重画；不给（CLI）则一个字都不变。
+    reason: tool_call | gate:verify | gate:progress | gate:citation。"""
     task_scope.prepare_messages(ctx, messages)
     tool_schemas = TOOL_SCHEMAS if tools is None else tools
     render = render or (lambda s: print(s, end="", flush=True))
     render_reasoning = render_reasoning or (lambda s: None)
     cancel_check = cancel_check or (lambda: False)
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "prompt_cache_hit_tokens": 0}
+
+    # 正文的"稿"边界。发通知的时刻是**新一稿的第一个字**——在那之前谁也不知道
+    # 模型还会不会再写一遍，提前发就会把还在用的那一稿误清。
+    rendered_any = False        # 本轮已经渲染过正文
+    draft_open = False          # 当前这一步已经开了稿（每步开头复位）
+    superseded_by = ""          # 上一稿是被什么作废的
+
+    def _render_text(chunk: str) -> None:
+        nonlocal rendered_any, draft_open
+        if not draft_open:
+            draft_open = True
+            if rendered_any and on_answer_reset is not None:
+                try:
+                    on_answer_reset(superseded_by or "restart")
+                except Exception:   # noqa: BLE001 — 通知失败绝不能打断正在跑的轮次
+                    pass
+        rendered_any = True
+        render(chunk)
 
     def _accum(u: dict) -> None:
         if not u:
@@ -527,6 +553,7 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
         status.before_model_step(step_idx, narrate)
         final = {"content": "", "tool_calls": [], "usage": {}}
         printed_any = False
+        draft_open = False
         buffered_text: list[str] = []
         defer_text = bool(
             (
@@ -543,7 +570,7 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
                 printed_any = True
                 buffered_text.append(ev["text"])
                 if not defer_text:
-                    render(ev["text"])
+                    _render_text(ev["text"])
             elif ev["type"] == "reasoning":
                 render_reasoning(ev.get("text") or "")
             elif ev["type"] == "final":
@@ -555,18 +582,27 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
         if not tool_calls:
             content = final.get("content", "") or ""
             messages.append({"role": "assistant", "content": content})
+            gate = ""
             fb = _verify_gate_feedback(ctx, status, narrate)
+            if fb is not None:
+                gate = "verify"
             if fb is None:
                 fb = _progress_gate_feedback(ctx, narrate)
+                if fb is not None:
+                    gate = "progress"
             if fb is None:
                 fb = _citation_gate_feedback(ctx, content, status, narrate)
+                if fb is not None:
+                    gate = "citation"
             if fb is not None:
                 messages.append({"role": "user", "content": fb})
+                # 门禁要求的是**整篇重写**，所以刚吐出去的那一稿到此作废。
+                superseded_by = f"gate:{gate}"
                 continue
             content = _finalize_citations(ctx, content)
             messages[-1]["content"] = content
             if defer_text and content:
-                render(content)
+                _render_text(content)
                 render("\n")
             _emit_safe(emit, stream_json.assistant_event(
                 getattr(ctx, "session_id", ""), content, []))
@@ -575,6 +611,8 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
             raise KeyboardInterrupt
         _emit_safe(emit, stream_json.assistant_event(
             getattr(ctx, "session_id", ""), final.get("content") or "", tool_calls))
+        # 这一步的正文是"工具前的开场白"。它不是答案，等下一稿开始时该让位。
+        superseded_by = "tool_call"
         _append_tool_call_msg(messages, final.get("content"), tool_calls)
         _dispatch_tool_calls(ctx, messages, status, tool_calls, step_idx, max_steps, narrate, emit=emit)
     text = _finalize_limit(ctx, messages, status, max_steps, extra_payload={"usage": total_usage})
