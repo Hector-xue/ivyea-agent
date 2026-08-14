@@ -63,11 +63,33 @@ def _hash(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:32]
 
 
+# 进程内的语义总开关。**只给评测用**：评测要在同一份数据上跑"纯词法"和"混合"两遍
+# 才能量出语义到底带来多少收益，而改 settings 会污染用户真实配置、也没法在一次进程里
+# 来回切。生产代码路径永远不碰它。
+_FORCE_LEXICAL = False
+
+
+class lexical_only:
+    """上下文管理器：临时强制纯词法。用 with 而不是全局设标志，
+    保证异常路径也一定会还原——评测里漏还原会让后续所有查询静默降级。"""
+
+    def __enter__(self):
+        global _FORCE_LEXICAL
+        self._prev = _FORCE_LEXICAL
+        _FORCE_LEXICAL = True
+        return self
+
+    def __exit__(self, *exc):
+        global _FORCE_LEXICAL
+        _FORCE_LEXICAL = self._prev
+        return False
+
+
 def backend_key() -> Tuple[str, str, bool]:
     """(backend, model, 是否 dense)。dense=False 时整个语义层静默让路。"""
     st = retrieval_embeddings.status()
     active = str(st.get("active_backend") or "")
-    dense = bool(st.get("semantic_enabled"))
+    dense = bool(st.get("semantic_enabled")) and not _FORCE_LEXICAL
     model = str(st.get("api_model") if active == retrieval_embeddings.API_BACKEND else st.get("model") or "")
     return active, model, dense
 

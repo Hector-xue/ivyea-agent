@@ -2355,6 +2355,33 @@ def _cmd_memory(args: argparse.Namespace) -> int:
             print(f"  已向量化 {min(done, len(texts))}/{len(texts)}")
         print(f"完成。后端 {vs['backend']} · 模型 {vs['model']} · 缓存 {memory_vectors.stats()['cached_vectors']} 条")
         return 0
+    if args.action == "eval":
+        from . import memory_eval
+        ds = getattr(args, "dataset", "") or "default"
+        if getattr(args, "generate", False):
+            from . import config as cfg
+            from .providers import from_settings
+            ak = cfg.get_active_key()
+            if not ak:
+                print("未配 key，无法生成评测集（要调模型从记忆反向造问题）。", file=sys.stderr); return 2
+            print("正在从现有分类记忆生成评测问题…")
+            res = memory_eval.generate(from_settings(cfg.get_model_config(), ak), name=ds)
+            if not res.get("ok"):
+                print(res.get("message", "生成失败"), file=sys.stderr); return 1
+            print(f"新增 {res['added']} 条用例（共 {res['total']} 条）→ {res['path']}")
+            if res.get("failed_entries"):
+                print(f"  {res['failed_entries']} 条记忆生成失败（已跳过）")
+            return 0
+        st = memory_eval.status(ds)
+        if not st["cases"]:
+            print(f"评测集 {ds} 为空。先跑 ivyea memory eval --generate 生成，"
+                  f"或手写 {st['path']}", file=sys.stderr)
+            return 2
+        k = int(getattr(args, "limit", 0) or 5)
+        result = (memory_eval.compare(ds, limit=k) if getattr(args, "compare", False)
+                  else memory_eval.run(ds, limit=k))
+        print(memory_eval.render(result))
+        return 0 if result.get("ok") else 1
     if args.action == "reflect":
         from . import config as cfg
         from .providers import from_settings
@@ -3854,8 +3881,13 @@ def build_parser() -> argparse.ArgumentParser:
     pmem = sub.add_parser("memory", help="记忆：status（默认）/ search <词> / note [asin] / "
                                          "list / show <名字> / reflect（提炼沉淀）/ reindex（重建分词索引）")
     pmem.add_argument("action", nargs="?",
-                      choices=["status", "search", "note", "list", "show", "reflect", "reindex", "embed"],
+                      choices=["status", "search", "note", "list", "show", "reflect", "reindex",
+                               "embed", "eval"],
                       default="status")
+    pmem.add_argument("--dataset", default="default", help="eval：评测集名字")
+    pmem.add_argument("--generate", action="store_true", help="eval：用模型从现有记忆反向生成评测问题")
+    pmem.add_argument("--compare", action="store_true", help="eval：纯词法 vs 混合，量化语义增益")
+    pmem.add_argument("--limit", type=int, default=5, help="eval：取前 k 条算指标（默认 5）")
     pmem.add_argument("query", nargs="?")
     pmem.set_defaults(func=_cmd_memory)
 
