@@ -164,24 +164,34 @@ def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
     # 灌回给模型。用分词结果判空而不是 strip()，因为"，。！"这种也应当算无检索内容。
     if not textseg.tokenize(query or ""):
         return []
+    # 候选池取得比 limit 大：语义重排要有"把词法排第 20 的那条捞上来"的余地，
+    # 池子等于 limit 的话重排就只能在已选中的几条里换顺序，等于没重排。
+    # 没有 dense 后端时 hybrid_rank 原样截前 limit 条，结果与扩池前**逐条相同**（顺序未变）。
+    pool = max(limit * 4, 24)
     conn = _conn()
     rows = []
     try:
         if _TOK_OK:
-            rows = _tok_search(conn, query, limit)
+            rows = _tok_search(conn, query, pool)
         if not rows and _FTS_OK:
             rows = conn.execute("SELECT rowid, text, asin, ts FROM search_fts WHERE search_fts MATCH ? "
-                                "ORDER BY rank LIMIT ?", (query, limit)).fetchall()
+                                "ORDER BY rank LIMIT ?", (query, pool)).fetchall()
         if not rows:
-            rows = _like_search(conn, query, limit)
+            rows = _like_search(conn, query, pool)
     except Exception:
         try:
-            rows = _like_search(conn, query, limit)
+            rows = _like_search(conn, query, pool)
         except Exception:
             rows = []
     conn.close()
     # score 只是内部排序用，不进对外结果（调用方按 text/asin/ts 消费，多一个键会污染 JSON 输出）
-    return [{k: r[k] for k in ("rowid", "text", "asin", "ts")} for r in rows]
+    out = [{k: r[k] for k in ("rowid", "text", "asin", "ts")} for r in rows]
+    # 语义重排：没配 dense 后端时 hybrid_rank 原样返回，行为与纯词法完全一致
+    try:
+        from . import memory_vectors
+        return memory_vectors.hybrid_rank(query, out, lambda r: r["text"], limit=limit)
+    except Exception:   # noqa: BLE001 —— 语义是增益，挂了也必须还给调用方词法结果
+        return out[:limit]
 
 
 def index_rows(limit: int = 5000) -> list[dict[str, Any]]:

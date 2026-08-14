@@ -19,7 +19,13 @@ from . import config
 
 HASH_BACKEND = "local_hash_embedding_v1"
 SENTENCE_BACKEND = "sentence-transformers"
+API_BACKEND = "api"
 DEFAULT_SENTENCE_MODEL = "BAAI/bge-small-zh-v1.5"
+# 通用 OpenAI 兼容 /v1/embeddings 的默认值。刻意不绑定任何供应商：
+# ivyea-agent 是自托管 CLI，主脑可能是 DeepSeek（**实测无 embeddings 接口，404**）、
+# 也可能是硅基流动/OpenAI/Jina/本地 Ollama。用户指哪打哪，才不会因为换了主脑就没语义检索。
+DEFAULT_API_MODEL = "BAAI/bge-m3"
+API_TIMEOUT = 30.0
 
 QUERY_ALIASES = {
     "主图": "main image hero image",
@@ -45,6 +51,18 @@ QUERY_ALIASES = {
 _MODEL_CACHE: dict[str, Any] = {}
 
 
+def api_settings() -> dict[str, str]:
+    """通用 OpenAI 兼容 embeddings 端点配置。key 走环境变量名而不是明文存 settings.json，
+    和主脑 provider 的既有做法保持一致（settings.json 不该躺着密钥）。"""
+    import os
+    config.load_env()   # ~/.ivyea/.env → os.environ（不覆盖已有），和主脑取 key 走同一条路
+    base = str(config.get_setting("retrieval_embedding_api_base", "") or "").rstrip("/")
+    model = str(config.get_setting("retrieval_embedding_api_model", "") or DEFAULT_API_MODEL)
+    key_env = str(config.get_setting("retrieval_embedding_api_key_env", "") or "EMBEDDING_API_KEY")
+    return {"base": base, "model": model, "key_env": key_env,
+            "key": os.environ.get(key_env, "")}
+
+
 def status() -> dict[str, Any]:
     backend = _normal_backend(str(config.get_setting("retrieval_embedding_backend", "hash")))
     model = str(config.get_setting("retrieval_embedding_model", DEFAULT_SENTENCE_MODEL) or DEFAULT_SENTENCE_MODEL)
@@ -53,6 +71,10 @@ def status() -> dict[str, Any]:
     package_available = importlib.util.find_spec("sentence_transformers") is not None
     path_exists = bool(model_path and Path(model_path).expanduser().exists())
     local_candidates = _local_model_candidates()
+
+    api = api_settings()
+    api_requested = backend == API_BACKEND
+    api_ready = api_requested and bool(api["base"]) and bool(api["key"])
 
     semantic_requested = backend == SENTENCE_BACKEND
     semantic_ready = semantic_requested and package_available and (path_exists or allow_download)
@@ -63,12 +85,27 @@ def status() -> dict[str, Any]:
         fallback_reason = "model path is not configured and auto-download is disabled"
         if local_candidates:
             fallback_reason += "; local model candidates are available"
+    elif api_requested and not api["base"]:
+        fallback_reason = "retrieval_embedding_api_base is not configured"
+    elif api_requested and not api["key"]:
+        fallback_reason = f"环境变量 {api['key_env']} 未设置（在 ~/.ivyea/.env 里配）"
+
+    if api_ready:
+        active, kind, dense = API_BACKEND, "dense", True
+    elif semantic_ready:
+        active, kind, dense = SENTENCE_BACKEND, "dense", True
+    else:
+        active, kind, dense = HASH_BACKEND, "sparse", False
 
     return {
         "configured_backend": backend,
-        "active_backend": SENTENCE_BACKEND if semantic_ready else HASH_BACKEND,
-        "semantic_enabled": semantic_ready,
-        "vector_kind": "dense" if semantic_ready else "sparse",
+        "active_backend": active,
+        "semantic_enabled": dense,
+        "vector_kind": kind,
+        "api_base": api["base"],
+        "api_model": api["model"],
+        "api_key_env": api["key_env"],
+        "api_ready": api_ready,
         "model": model,
         "model_path": model_path,
         "model_path_exists": path_exists,
@@ -96,6 +133,9 @@ def configure(
     model: str = "",
     model_path: str | None = None,
     allow_download: bool | None = None,
+    api_base: str = "",
+    api_model: str = "",
+    api_key_env: str = "",
 ) -> dict[str, Any]:
     if backend:
         config.set_setting("retrieval_embedding_backend", _normal_backend(backend))
@@ -105,6 +145,12 @@ def configure(
         config.set_setting("retrieval_embedding_model_path", model_path)
     if allow_download is not None:
         config.set_setting("retrieval_embedding_allow_download", bool(allow_download))
+    if api_base:
+        config.set_setting("retrieval_embedding_api_base", api_base.rstrip("/"))
+    if api_model:
+        config.set_setting("retrieval_embedding_api_model", api_model)
+    if api_key_env:
+        config.set_setting("retrieval_embedding_api_key_env", api_key_env)
     return status()
 
 
@@ -128,8 +174,9 @@ def probe(text: str = "ivyea retrieval embedding probe") -> dict[str, Any]:
             "fallback_reason": st.get("fallback_reason", ""),
             "status": st,
         }
+    active = st["active_backend"]
     try:
-        values = _sentence_vector(text, st)
+        values = _api_vector(text, st) if active == API_BACKEND else _sentence_vector(text, st)
     except Exception as exc:
         return {
             "ok": False,
@@ -142,7 +189,7 @@ def probe(text: str = "ivyea retrieval embedding probe") -> dict[str, Any]:
     return {
         "ok": True,
         "ready": True,
-        "active_backend": SENTENCE_BACKEND,
+        "active_backend": active,
         "vector_kind": "dense",
         "dimensions": len(values),
         "status": st,
@@ -175,13 +222,46 @@ def cosine(left: dict[str, Any], right: dict[str, Any]) -> float:
 
 def _encode(text: str) -> dict[str, Any]:
     st = status()
-    if st["semantic_enabled"]:
+    active = st["active_backend"]
+    if active == API_BACKEND:
+        try:
+            values = _api_vector(text, st)
+            return {"kind": "dense", "backend": API_BACKEND, "model": st["api_model"], "values": values}
+        except Exception as exc:
+            # 网络抖动/额度用尽不该让检索整个失效——降级回 hash，调用方仍拿得到结果
+            return _hash_payload(text, f"{type(exc).__name__}: {exc}")
+    if active == SENTENCE_BACKEND:
         try:
             values = _sentence_vector(text, st)
             return {"kind": "dense", "backend": SENTENCE_BACKEND, "model": st["model"], "values": values}
         except Exception as exc:
             return _hash_payload(text, f"{type(exc).__name__}: {exc}")
     return _hash_payload(text)
+
+
+def _api_vector(text: str, st: dict[str, Any]) -> list[float]:
+    """调用 OpenAI 兼容的 /v1/embeddings。只用标准库，不引 openai SDK。"""
+    import json as _json
+    import os
+    import urllib.request
+
+    base = st.get("api_base") or ""
+    key = os.environ.get(st.get("api_key_env") or "", "")
+    if not base or not key:
+        raise RuntimeError("embedding API 未配置完整（base 或 key 缺失）")
+    url = base if base.endswith("/embeddings") else f"{base}/embeddings"
+    req = urllib.request.Request(
+        url,
+        data=_json.dumps({"model": st.get("api_model"), "input": text}).encode("utf-8"),
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
+        payload = _json.loads(resp.read().decode("utf-8"))
+    try:
+        values = payload["data"][0]["embedding"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"embeddings 响应结构异常：{str(payload)[:200]}") from exc
+    return [round(float(v), 8) for v in values]
 
 
 def _sentence_vector(text: str, st: dict[str, Any]) -> list[float]:
@@ -204,6 +284,8 @@ def _normal_backend(value: str) -> str:
     raw = (value or "hash").strip().lower().replace("_", "-")
     if raw in ("sentence", "sentence-transformer", "sentence-transformers", "semantic"):
         return SENTENCE_BACKEND
+    if raw in ("api", "openai", "openai-compatible", "remote", "http"):
+        return API_BACKEND
     return "hash"
 
 

@@ -2333,6 +2333,28 @@ def _cmd_memory(args: argparse.Namespace) -> int:
         print(f"分词索引已重建：新增 {res.get('added', 0)} / 清理 {res.get('removed', 0)}"
               if res.get("ok") else f"重建失败：{res.get('reason')}")
         return 0
+    if args.action == "embed":
+        from . import memory_vectors
+        vs = memory_vectors.stats()
+        if not vs["semantic"]:
+            print("语义检索未启用（当前 hash 后端，纯词法）。启用方式：")
+            print("  ivyea retrieval embeddings --backend api \\")
+            print("      --api-base https://<供应商>/v1 --api-model <模型> --api-key-env EMBEDDING_API_KEY")
+            print("  然后把 key 写进 ~/.ivyea/.env 的 EMBEDDING_API_KEY")
+            return 0
+        # 预热：把现有分类记忆的向量一次性算好，避免第一次检索时集中现算卡顿
+        entries = memory_store.list_entries()
+        texts = [f"{e.header_text} {e.body[:1500]}" for e in entries]
+        done = 0
+        while done < len(texts):
+            batch = texts[done:done + memory_vectors.MAX_EMBED_PER_CALL]
+            got = memory_vectors.embed_texts(batch, budget=len(batch))
+            if not got:
+                print(f"向量化中断（后端不可用），已完成 {done}/{len(texts)}"); break
+            done += len(batch)
+            print(f"  已向量化 {min(done, len(texts))}/{len(texts)}")
+        print(f"完成。后端 {vs['backend']} · 模型 {vs['model']} · 缓存 {memory_vectors.stats()['cached_vectors']} 条")
+        return 0
     if args.action == "reflect":
         from . import config as cfg
         from .providers import from_settings
@@ -2355,6 +2377,11 @@ def _cmd_memory(args: argparse.Namespace) -> int:
     drift = "" if st["indexed"] == st["tokenized"] else "  ⚠ 索引漂移，跑 ivyea memory reindex"
     print(f"检索行 {st['indexed']} · 分词索引 {st['tokenized']}"
           f"（中文分词检索 {'on' if st['segmented_search'] else 'off'}）{drift}")
+    from . import memory_vectors
+    vs = memory_vectors.stats()
+    sem = (f"on · {vs['backend']} · {vs['model']} · 缓存 {vs['cached_vectors']} 条"
+           if vs["semantic"] else "off（纯词法；ivyea memory embed 看如何启用）")
+    print(f"语义检索：{sem}")
     ms = memory_store.stats()
     cats = " / ".join(f"{k} {v}" for k, v in sorted(ms["by_category"].items())) or "无"
     print(f"分类记忆 {ms['total']} 条（{cats}）· 索引层 {ms['index_chars']} 字 · {ms['dir']}")
@@ -3347,6 +3374,9 @@ def _cmd_retrieval(args: argparse.Namespace) -> int:
             args.model_path is not None,
             bool(args.allow_download),
             bool(args.no_download),
+            bool(getattr(args, "api_base", "")),
+            bool(getattr(args, "api_model", "")),
+            bool(getattr(args, "api_key_env", "")),
         ])
         if should_configure:
             data = {
@@ -3356,6 +3386,9 @@ def _cmd_retrieval(args: argparse.Namespace) -> int:
                     model=args.model or "",
                     model_path=args.model_path,
                     allow_download=True if args.allow_download else (False if args.no_download else None),
+                    api_base=getattr(args, "api_base", "") or "",
+                    api_model=getattr(args, "api_model", "") or "",
+                    api_key_env=getattr(args, "api_key_env", "") or "",
                 ),
             }
         else:
@@ -3821,7 +3854,7 @@ def build_parser() -> argparse.ArgumentParser:
     pmem = sub.add_parser("memory", help="记忆：status（默认）/ search <词> / note [asin] / "
                                          "list / show <名字> / reflect（提炼沉淀）/ reindex（重建分词索引）")
     pmem.add_argument("action", nargs="?",
-                      choices=["status", "search", "note", "list", "show", "reflect", "reindex"],
+                      choices=["status", "search", "note", "list", "show", "reflect", "reindex", "embed"],
                       default="status")
     pmem.add_argument("query", nargs="?")
     pmem.set_defaults(func=_cmd_memory)
@@ -3831,7 +3864,11 @@ def build_parser() -> argparse.ArgumentParser:
     pret.add_argument("query", nargs="?")
     pret.add_argument("--limit", type=int, default=8)
     pret.add_argument("--source", action="append", choices=["knowledge", "memory"], help="限定来源，可重复")
-    pret.add_argument("--backend", choices=["hash", "sentence-transformers", "sentence_transformers"], help="配置检索向量后端")
+    pret.add_argument("--backend", choices=["hash", "sentence-transformers", "sentence_transformers", "api"],
+                      help="检索向量后端：hash(零依赖默认) / sentence-transformers(本地离线，需 ~2G 内存) / api(通用 OpenAI 兼容端点)")
+    pret.add_argument("--api-base", help="api 后端：OpenAI 兼容 embeddings 端点，如 https://api.siliconflow.cn/v1")
+    pret.add_argument("--api-model", help="api 后端：embedding 模型名，如 BAAI/bge-m3")
+    pret.add_argument("--api-key-env", help="api 后端：存放 key 的环境变量名（写在 ~/.ivyea/.env），默认 EMBEDDING_API_KEY")
     pret.add_argument("--model", help="配置 sentence-transformers 模型名，如 BAAI/bge-small-zh-v1.5")
     pret.add_argument("--model-path", help="配置本地模型目录；为空字符串可清除")
     pret.add_argument("--allow-download", action="store_true", help="允许 sentence-transformers 在重建索引时下载模型")

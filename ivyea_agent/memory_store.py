@@ -172,8 +172,15 @@ def get(name: str, category: str = "") -> Optional[Entry]:
 
 # ── 检索 ────────────────────────────────────────────────────────────────────
 def search(query: str, limit: int = 8) -> List[Dict[str, Any]]:
-    """在分类记忆里检索。名字/描述/关键词的权重是正文的 2 倍——
-    记忆的"标题"是人为提炼过的，比正文里的零散措辞更能代表这条记忆讲什么。"""
+    """在分类记忆里检索：词法初筛 → 语义重排（配了 dense 后端才生效）。
+
+    词法这一路，名字/描述/关键词的权重是正文的 2 倍——记忆的"标题"是人为提炼过的，
+    比正文里的零散措辞更能代表这条记忆讲什么。
+
+    语义重排走 RRF，且**只对词法候选集重排**而不是全库算向量：全库现算向量在条目多了
+    以后又慢又贵，而词法召回率在 bigram 下已经足够高，漏召的风险远小于成本收益。
+    候选集取 limit 的若干倍，给语义留出把"词法排第 20 但语义最相关"那条捞上来的余地。
+    """
     if not textseg.tokenize(query or ""):
         return []
     scored: List[Tuple[float, Entry]] = []
@@ -182,7 +189,13 @@ def search(query: str, limit: int = 8) -> List[Dict[str, Any]]:
         if s > 0:
             scored.append((s, e))
     scored.sort(key=lambda t: t[0], reverse=True)
-    return [{**e.to_dict(), "score": round(s, 3)} for s, e in scored[:limit]]
+
+    pool = [e for _, e in scored[:max(limit * 4, 24)]]
+    lex_score = {id(e): s for s, e in scored}
+    from . import memory_vectors
+    ranked = memory_vectors.hybrid_rank(
+        query, pool, lambda e: f"{e.header_text} {e.body[:1500]}", limit=limit)
+    return [{**e.to_dict(), "score": round(lex_score.get(id(e), 0.0), 3)} for e in ranked]
 
 
 def find_similar(text: str, exclude: str = "") -> Optional[Tuple[float, Entry]]:
