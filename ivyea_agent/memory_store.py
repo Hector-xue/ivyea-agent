@@ -183,19 +183,31 @@ def search(query: str, limit: int = 8) -> List[Dict[str, Any]]:
     """
     if not textseg.tokenize(query or ""):
         return []
-    scored: List[Tuple[float, Entry]] = []
-    for e in list_entries():
+    entries = list_entries()
+    if not entries:
+        return []
+
+    # 词法召回：只有真正有重合的才进榜
+    lex_scored: List[Tuple[float, int]] = []
+    for idx, e in enumerate(entries):
         s = 2.0 * textseg.overlap_score(query, e.header_text) + textseg.overlap_score(query, e.body)
         if s > 0:
-            scored.append((s, e))
-    scored.sort(key=lambda t: t[0], reverse=True)
+            lex_scored.append((s, idx))
+    lex_scored.sort(key=lambda t: (-t[0], t[1]))
+    lex_ranked = [idx for _, idx in lex_scored]
+    lex_score = {idx: s for s, idx in lex_scored}
 
-    pool = [e for _, e in scored[:max(limit * 4, 24)]]
-    lex_score = {id(e): s for s, e in scored}
+    # 向量召回走**全部**条目而不是词法候选集：词法零命中的口语化提问正是语义要救的场景。
+    # 分类记忆是几百条量级、向量有缓存，全量算余弦就是几毫秒，不值得为此牺牲召回。
     from . import memory_vectors
     ranked = memory_vectors.hybrid_rank(
-        query, pool, lambda e: f"{e.header_text} {e.body[:1500]}", limit=limit)
-    return [{**e.to_dict(), "score": round(lex_score.get(id(e), 0.0), 3)} for e in ranked]
+        query, entries, lambda e: f"{e.header_text} {e.body[:1500]}",
+        limit=limit, lex_ranked=lex_ranked, budget=max(len(entries), memory_vectors.MAX_EMBED_PER_CALL))
+    out = []
+    for e in ranked:
+        idx = entries.index(e)
+        out.append({**e.to_dict(), "score": round(lex_score.get(idx, 0.0), 3)})
+    return out
 
 
 def find_similar(text: str, exclude: str = "") -> Optional[Tuple[float, Entry]]:

@@ -104,6 +104,53 @@ def test_perfectly_inverted_rankings_tie_and_keep_lexical_order(dense):
     assert [o["t"] for o in out] == [i["t"] for i in items]
 
 
+def test_vector_recall_is_independent_of_lexical(dense):
+    """**核心回归**：词法一条都没召回时，语义仍必须能召回。
+
+    早先的实现把语义做成"对词法候选集重排"，于是词法零命中时候选集为空、语义
+    根本没有机会——而那恰恰是语义检索唯一存在的理由。真实模型实测暴露了这个缺陷
+    （口语化查询 0/3 命中）。这条用例把双路召回钉死。
+    """
+    items = [{"t": "广告出价"}, {"t": "库存周转"}]
+    out = dense.hybrid_rank("库存", items, lambda x: x["t"], limit=2, lex_ranked=[])
+    assert out and out[0]["t"] == "库存周转"
+
+
+def test_lexical_only_items_still_returned(dense):
+    """反过来也要成立：向量没召回的，词法结果不能丢。"""
+    items = [{"t": "完全无关的内容"}, {"t": "库存周转"}]
+    out = dense.hybrid_rank("无关", items, lambda x: x["t"], limit=2, lex_ranked=[0])
+    assert any(o["t"] == "完全无关的内容" for o in out)
+
+
+def test_low_similarity_filtered_by_floor(dense, monkeypatch):
+    """低于地板的相似度不进向量榜——挡明显无关的，避免底噪挤占 RRF 名次。"""
+    from ivyea_agent import config
+    config.set_setting("memory_min_similarity", 0.99)
+    items = [{"t": "库存 广告"}]          # 与查询 "库存" 相似但不等于 1.0
+    assert dense.vector_recall("库存", items, lambda x: x["t"]) == []
+
+
+def test_vector_candidates_capped(dense):
+    """向量路的候选数要有上限，否则底噪命中会淹没词法的正确结果。"""
+    items = [{"t": f"库存 {i}"} for i in range(50)]
+    got = dense.vector_recall("库存", items, lambda x: x["t"], budget=50, top_n=10)
+    assert len(got) == 10
+
+
+def test_fuse_is_pure_rank_based(dense):
+    """fuse 只吃排名不吃分数——两条路都排第一的项必须胜出。"""
+    fused = dense.fuse([2, 0, 1], [2, 1, 0], limit=3)
+    assert fused[0] == 2
+
+
+def test_fuse_deterministic_for_vector_only_items(dense):
+    """词法没召回的项也要有稳定的破平序号，否则结果不可复现。"""
+    a = dense.fuse([0], [3, 2], limit=3)
+    b = dense.fuse([0], [3, 2], limit=3)
+    assert a == b
+
+
 def test_rrf_k_is_tunable(dense):
     """k 要可调——阶段 2 的评测框架要能扫它，否则调参只能靠感觉。"""
     from ivyea_agent import config

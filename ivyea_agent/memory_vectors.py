@@ -167,53 +167,102 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
-def hybrid_rank(query: str, items: List[Any], text_of: Callable[[Any], str],
-                *, limit: int = 8) -> List[Any]:
-    """把词法有序列表 `items` 与向量相似度用 RRF 融合，返回重排后的前 limit 条。
+# 明显垃圾的地板，**不是**精度旋钮。
+#
+# 实测（bge-small-zh-v1.5，口语化查询 vs 运营记忆）：**正确匹配的相似度只有 0.41~0.55**，
+# 错误匹配也在 0.29~0.55。绝对阈值在这个压缩区间里根本分不开对错——最早按直觉设的 0.55
+# 把所有结果静默杀光了。所以这里只留一个低地板挡明显无关的，真正的筛选交给
+# "取前 N 名 + RRF 按排名融合"：排名对量纲和模型差异免疫，绝对分数不是。
+MIN_SIMILARITY = 0.30
 
-    `items` 必须**已经按词法相关度排好序**——它的下标就是词法排名。
-    没有 dense 后端时原样返回前 limit 条，行为与纯词法完全一致。
+# 向量路最多贡献多少个候选。不设上限的话，一堆 0.3x 的底噪命中会挤满 RRF 名次，
+# 把词法的正确结果压下去——语义应该是补召回，不是抢名次。
+VEC_CANDIDATE_FACTOR = 3
+VEC_CANDIDATE_MIN = 10
+
+
+def _min_similarity() -> float:
+    try:
+        return float(config.get_setting("memory_min_similarity", MIN_SIMILARITY))
+    except (TypeError, ValueError):
+        return MIN_SIMILARITY
+
+
+def vector_recall(query: str, items: List[Any], text_of: Callable[[Any], str],
+                  *, budget: int = MAX_EMBED_PER_CALL, top_n: int = 0) -> List[int]:
+    """**独立的**向量召回：对全部候选算余弦，返回按相似度降序的下标列表。
+
+    注意这是一条独立召回路径，不是对词法结果的重排。早先的实现把语义做成"重排词法
+    候选集"，结果词法一条都没召回时候选集是空的、语义根本没有机会——而那恰恰是语义
+    检索唯一存在的理由（实测：口语化查询"东西要卖光了怎么办" vs 记忆"周转天数低于30天
+    就下单"，词法零命中，重排式语义也跟着零命中）。
     """
     if not items:
         return []
     _, _, dense = backend_key()
     if not dense:
-        return items[:limit]
+        return []
     qvec = embed_query(query)
     if not qvec:
-        return items[:limit]
-
+        return []
     texts = [text_of(it) for it in items]
-    vectors = embed_texts(texts)
+    vectors = embed_texts(texts, budget=budget)
     if not vectors:
-        return items[:limit]
-
+        return []
+    floor = _min_similarity()
     sims: List[Tuple[float, int]] = []
     for idx, text in enumerate(texts):
         vec = vectors.get(_hash(text))
         # 维度不一致 = 换过模型而缓存还是旧的：当作无向量处理，别算出一个假分数
-        sims.append((_cosine(qvec, vec) if vec and len(vec) == len(qvec) else 0.0, idx))
+        score = _cosine(qvec, vec) if vec and len(vec) == len(qvec) else 0.0
+        if score >= floor:
+            sims.append((score, idx))
+    # 相似度先取整到 6 位再排序：数学上相等的余弦值在浮点里会因运算次序不同而末位有差异，
+    # 不取整的话名次由浮点噪音决定，同一个查询时而这样排时而那样排，既没法复现也没法评测。
+    sims.sort(key=lambda t: (-round(t[0], 6), t[1]))
+    return [idx for _, idx in sims[:top_n]] if top_n > 0 else [idx for _, idx in sims]
 
-    # 向量排名：只有真正命中语义（相似度 > 0）的才进榜，
-    # 否则一堆 0 分文档会挤占 RRF 名次，把词法的正确结果压下去。
-    #
-    # 相似度先取整到 6 位再排序：数学上相等的余弦值（例如都等于 1/√3）在浮点里会因为
-    # 运算次序不同而在末位有差异，不取整的话名次就由浮点噪音决定，同一个查询看起来
-    # 时而这样排时而那样排，既没法复现也没法评测。取整后真同分就靠 idx 稳定破平，
-    # 退化为保持词法原序。
-    vec_order = [idx for score, idx in sorted(sims, key=lambda t: (-round(t[0], 6), t[1]))
-                 if score > 0]
-    vec_rank = {idx: rank for rank, idx in enumerate(vec_order)}
 
+def fuse(lex_ranked: Sequence[int], vec_ranked: Sequence[int], *, limit: int) -> List[int]:
+    """RRF 融合两条召回路径的排名，返回融合后的下标列表。
+
+    只用**排名**不用分数：BM25 分是负数且量纲随语料变，余弦是 0~1，两者硬加权就得
+    反复调那个权重。RRF 对量纲免疫、免调参。
+    """
     k = _rrf_k()
-    fused: List[Tuple[float, int]] = []
-    for lex_rank, idx in enumerate(range(len(items))):
-        score = 1.0 / (k + lex_rank + 1)
-        if idx in vec_rank:
-            score += 1.0 / (k + vec_rank[idx] + 1)
-        fused.append((score, idx))
-    fused.sort(key=lambda t: (-t[0], t[1]))   # 同分时保词法原序，结果稳定可复现
-    return [items[idx] for _, idx in fused[:limit]]
+    scores: Dict[int, float] = {}
+    order: Dict[int, int] = {}
+    for rank, idx in enumerate(lex_ranked):
+        scores[idx] = scores.get(idx, 0.0) + 1.0 / (k + rank + 1)
+        order.setdefault(idx, rank)
+    for rank, idx in enumerate(vec_ranked):
+        scores[idx] = scores.get(idx, 0.0) + 1.0 / (k + rank + 1)
+        # 词法没召回的项，用一个排在所有词法结果之后的序号参与破平，保证结果稳定
+        order.setdefault(idx, len(lex_ranked) + rank)
+    fused = sorted(scores.items(), key=lambda kv: (-kv[1], order.get(kv[0], 0)))
+    return [idx for idx, _ in fused[:limit]]
+
+
+def hybrid_rank(query: str, items: List[Any], text_of: Callable[[Any], str],
+                *, limit: int = 8, lex_ranked: Optional[Sequence[int]] = None,
+                budget: int = MAX_EMBED_PER_CALL) -> List[Any]:
+    """双路召回 + RRF 融合。
+
+    `lex_ranked` 是词法召回的下标排名；省略时视为"items 已按词法序排好且全部命中"
+    （情景记忆那条路就是这样，SQL 已经排好序了）。
+    没有 dense 后端时原样返回词法顺序的前 limit 条，与纯词法**逐条相同**。
+    """
+    if not items:
+        return []
+    lex = list(lex_ranked) if lex_ranked is not None else list(range(len(items)))
+    _, _, dense = backend_key()
+    if not dense:
+        return [items[i] for i in lex[:limit]]
+    vec = vector_recall(query, items, text_of, budget=budget,
+                        top_n=max(limit * VEC_CANDIDATE_FACTOR, VEC_CANDIDATE_MIN))
+    if not vec:
+        return [items[i] for i in lex[:limit]]
+    return [items[i] for i in fuse(lex, vec, limit=limit)]
 
 
 def stats() -> Dict[str, Any]:
