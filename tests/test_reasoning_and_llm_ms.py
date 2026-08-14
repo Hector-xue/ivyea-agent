@@ -21,15 +21,44 @@ class _ReasoningProvider:
         yield {"type": "final", "content": "按 IPI 排补货。", "tool_calls": [], "usage": {}}
 
 
-class _SlowModelThenToolProvider:
-    """第一步慢慢想完去调工具，第二步慢慢想完给答案。每步模型窗口 ~40ms。"""
+class _FakeClock:
+    """可控的时钟。
 
-    def __init__(self):
+    这条用例最初用真 sleep 卡阈值（模型端 sleep(0.04)×2、工具端 sleep(0.3)，断言
+    llm_ms < 250），本机十次都是 80ms，**但在 GitHub 的 macOS runner 上抖到了 347ms**，
+    main 上挂了个红叉。那个断言实际上量的是 runner 的调度抖动，不是"工具时间有没有
+    被算进去"——而后者才是这里要钉的东西。
+
+    换成假时钟：谁推进多少由用例说了算，llm_ms 变成一个精确值，跑在多慢的机器上都一样。
+    """
+
+    def __init__(self, real):
+        self._real = real
+        # 从 0 起算：大基数下浮点会吃掉精度（1000.04 - 1000.0 = 0.03999…），
+        # 而生产代码是 int((t1-t0)*1000) 截断，于是 40ms 会变成 39ms。
+        self.now = 0.0
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def __getattr__(self, name):
+        # time.time / datetime 等照旧走真实实现 —— 只接管 monotonic 这一处。
+        return getattr(self._real, name)
+
+
+class _ModelThenToolProvider:
+    """第一步想一会儿去调工具，第二步想一会儿给答案。每步模型窗口推进 50ms。"""
+
+    def __init__(self, clock: _FakeClock):
+        self.clock = clock
         self.calls = 0
 
     def stream_chat(self, messages, tools=None):
         self.calls += 1
-        time.sleep(0.04)
+        self.clock.advance(0.05)
         if self.calls == 1:
             yield {"type": "final", "content": "", "usage": {},
                    "tool_calls": [{"id": "c1", "name": "recall", "arguments": {"query": "库存"}}]}
@@ -43,21 +72,23 @@ def test_llm_ms_counts_the_model_window_only(monkeypatch):
     from ivyea_agent import agent_loop
     from ivyea_agent.agent_tools import ToolContext
 
-    def _slow_tools(*args, **kwargs):
-        time.sleep(0.3)                      # 工具执行：比两次模型窗口加起来还久
+    clock = _FakeClock(time)
+    # 只替换 agent_loop 命名空间里的 time，不动全局 time 模块 —— 否则同进程里
+    # 别的东西（pytest 自己、后续用例）也会跟着看到一个假时钟。
+    monkeypatch.setattr(agent_loop, "time", clock)
+    # 工具执行推进 500ms：比两次模型窗口加起来还久。它一旦被算进 llm_ms，下面那条
+    # 精确断言立刻就红。
+    monkeypatch.setattr(agent_loop, "_dispatch_tool_calls",
+                        lambda *a, **k: clock.advance(0.5))
 
-    monkeypatch.setattr(agent_loop, "_dispatch_tool_calls", _slow_tools)
-
-    started = time.monotonic()
     out = agent_loop.run_turn_stream(
-        _SlowModelThenToolProvider(), ToolContext(), [{"role": "user", "content": "hi"}],
+        _ModelThenToolProvider(clock), ToolContext(), [{"role": "user", "content": "hi"}],
         max_steps=3, render=lambda _: None, narrate=lambda _: None)
-    wall_ms = (time.monotonic() - started) * 1000
 
-    llm_ms = out["usage"]["llm_ms"]
-    assert llm_ms >= 60                      # 两步模型窗口 ~80ms，留足抖动余量
-    assert llm_ms < 250                      # 300ms 的工具时间没被算进来
-    assert wall_ms > 300                     # 而这一轮真实耗时确实超过了工具那 300ms
+    # 两步模型窗口各 50ms，一步不多一步不少；工具那 500ms 一点没混进来。
+    assert out["usage"]["llm_ms"] == 100
+    # 而这一轮"挂钟时间"是 600ms —— 差额 500ms 就是工具花掉的，这正是这个指标的用途。
+    assert round(clock.now, 6) == 0.6
 
 
 def test_llm_ms_is_always_present():
