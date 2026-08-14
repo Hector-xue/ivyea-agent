@@ -46,6 +46,15 @@ _PENDING_APPROVALS: dict[str, "queue.Queue[str]"] = {}
 _APPROVALS_LOCK = threading.Lock()
 DEFAULT_APPROVAL_TIMEOUT = 600.0   # 10 分钟没人理 = 拒绝
 
+# ── 历史会话详情 ────────────────────────────────────────────────────────────
+# 一页几轮。按**轮**而不是按条：一次提问能产生几十条消息（本机实测 2 次提问 → 62 条），
+# 按条切必然把用户自己发的那句话挤出窗口。
+_DETAIL_TURNS_DEFAULT = 8
+_DETAIL_TURNS_MAX = 100
+# 详情里 tool 结果的单条上限。它从来没被界面渲染过（前端只留 user/assistant），
+# 但本机最大那个会话里它占了 278KB —— 全量拖回去只是让每次打开会话更慢。
+_DETAIL_TOOL_CONTENT_MAX = 1000
+
 
 def resolve_permission(request_id: str, choice: str) -> bool:
     """回送一个审批决策，解开阻塞中的那一步。未知/已过期的 request_id 返回 False。"""
@@ -1237,6 +1246,12 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
     def narrate(text: str) -> None:
         send("event", {"type": "event", "text": security.redact_text(str(text))})
 
+    # 本轮的执行步骤，按 call_id 收口成"每个调用只留最终态"（running → ok/error 合并，
+    # 与前端 mergeStep 同一语义）。轮次收尾时落盘 —— 此前它们只流给前端就扔了，
+    # 于是刷新之后"它刚才干了什么"一片空白。
+    turn_steps: dict[str, dict] = {}
+    turn_skills: list[dict] = []
+
     def emit(ev: dict) -> None:
         # run_turn_stream 的结构化事件通道原本只喂 CLI 的 stream-json。这里只放行
         # 步骤类事件：assistant/tool_result 的内容前端已经能从 token/final 拿到，
@@ -1244,6 +1259,10 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         kind = str(ev.get("type") or "")
         if kind in ("step", "skill_match", "file_change"):
             send(kind, ev)
+        if kind == "step" and ev.get("id"):
+            turn_steps[str(ev["id"])] = dict(ev)
+        elif kind == "skill_match" and ev.get("skills"):
+            turn_skills.append(dict(ev))
 
     try:
         provider = provider or build_chain(model_cfg, api_key, narrate=narrate)
@@ -1283,11 +1302,18 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         return data
 
     if payload.get("persist", True):
+        steps = list(turn_steps.values())
+        # 技能命中锚在本轮第一个 call_id 上 —— 详情按轮分页时靠它认出"这批技能属于哪一轮"。
+        # 一轮里一个工具都没调时它没有锚点，也就没有执行过程可显示，技能行随之省略。
+        anchor = steps[0].get("id") if steps else ""
+        skill_rows = ([{"anchor": anchor, "skills": turn_skills[-1].get("skills") or []}]
+                      if steps and turn_skills else [])
         sessions.append_turn(
             ctx.session_id,
             str(messages[0].get("content") or "") if messages else "",
             messages[turn_base:],
-            model=model_cfg.get("model", ""), usage={}, created=created_at)
+            model=model_cfg.get("model", ""), usage={}, created=created_at,
+            steps=steps, skill_matches=skill_rows)
     data = {
         "ok": True,
         "session_id": ctx.session_id,
@@ -1306,11 +1332,12 @@ def chat_session_list(limit: int = 20) -> dict[str, Any]:
     return {"ok": True, "sessions": [_public_session(row) for row in sessions.listing(limit=limit)]}
 
 
-def chat_session_detail(session_id: str) -> dict[str, Any]:
+def chat_session_detail(session_id: str, *, turns: int = _DETAIL_TURNS_DEFAULT,
+                        before: int | None = None) -> dict[str, Any]:
     data = sessions.load(session_id)
     if not data:
         raise FileNotFoundError(f"会话不存在：{session_id}")
-    return {"ok": True, "session": _public_session_detail(data)}
+    return {"ok": True, "session": _public_session_detail(data, turns=turns, before=before)}
 
 
 def chat_session_delete(session_id: str) -> dict[str, Any]:
@@ -1453,8 +1480,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/v1/chat/sessions/"):
             session_id = parsed.path.rsplit("/", 1)[-1]
+            # turns/before：按轮分页。不带参数 = 最后几轮，老调用方照常能用，
+            # 而且比改动前（末 30 条消息）拿到的提问只多不少。
+            before_raw = _first(qs, "before")
             try:
-                self._json(200, chat_session_detail(session_id))
+                self._json(200, chat_session_detail(
+                    session_id,
+                    turns=_int(_first(qs, "turns"), _DETAIL_TURNS_DEFAULT),
+                    before=(_int(before_raw, 0) if before_raw not in (None, "") else None)))
             except FileNotFoundError as exc:
                 self._json(404, {"ok": False, "error": str(exc)})
             return
@@ -2196,14 +2229,62 @@ def _public_session(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _public_session_detail(data: dict[str, Any]) -> dict[str, Any]:
+def _detail_message(msg: dict[str, Any]) -> dict[str, Any]:
+    """详情里的一条消息。比 live 回包多留两样东西：`tool_calls` 的 id/name 与
+    `tool_call_id` —— 它们是把落盘的执行步骤挂回对应轮次的锚点（靠 call_id 对齐，
+    不靠下标，所以压缩过、导入过的会话都不会错位）。"""
+    role = str(msg.get("role") or "")
+    content = msg.get("content")
+    if isinstance(content, list):       # 多模态：只回显文本，不吐 base64
+        texts = [str(p.get("text") or "") for p in content
+                 if isinstance(p, dict) and p.get("type") == "text"]
+        imgs = sum(1 for p in content if isinstance(p, dict) and p.get("type") == "image_url")
+        content = "\n".join(t for t in texts if t) + (f"\n[附图 {imgs} 张]" if imgs else "")
+    text = security.redact_text(str(content if content is not None else ""))
+    if role == "tool" and len(text) > _DETAIL_TOOL_CONTENT_MAX:
+        text = text[:_DETAIL_TOOL_CONTENT_MAX] + "…（已截断）"
+    row: dict[str, Any] = {"role": role, "content": text}
+    calls = msg.get("tool_calls") or []
+    if role == "assistant" and calls:
+        row["tool_calls"] = [
+            {"id": str(c.get("id") or ""),
+             "name": str((c.get("function") or {}).get("name") or c.get("name") or "")}
+            for c in calls if isinstance(c, dict)
+        ]
+    if role == "tool" and msg.get("tool_call_id"):
+        row["tool_call_id"] = str(msg.get("tool_call_id"))
+    return row
+
+
+def _public_session_detail(data: dict[str, Any], *, turns: int = _DETAIL_TURNS_DEFAULT,
+                           before: int | None = None) -> dict[str, Any]:
+    kept = transcript.strip_injected(data.get("messages") or [])
+    slices = transcript.turn_slices(kept)
+    total = len(slices)
+    end_turn = total if before is None else max(0, min(int(before), total))
+    size = max(1, min(int(turns or _DETAIL_TURNS_DEFAULT), _DETAIL_TURNS_MAX))
+    start_turn = max(0, end_turn - size)
+    picked = slices[start_turn:end_turn]
+    rows = [_detail_message(m) for a, b in picked for m in kept[a:b]
+            if m.get("role") in ("user", "assistant", "tool")]
+
+    # 只回本页涉及的步骤。锚点是 call_id：本页的 assistant 消息里出现过的那些。
+    call_ids = {c["id"] for r in rows for c in r.get("tool_calls") or [] if c.get("id")}
+    steps = [s for s in (data.get("steps") or []) if str(s.get("id") or "") in call_ids]
+    skills = [s for s in (data.get("skill_matches") or [])
+              if str(s.get("anchor") or "") in call_ids]
+
     return {
         "id": data.get("id", ""),
         "created": data.get("created"),
         "updated": data.get("updated"),
         "model": data.get("model", ""),
         "usage": data.get("usage") or {},
-        "messages": _public_messages(data.get("messages") or []),
+        "messages": rows,
+        "steps": steps,
+        "skill_matches": skills,
+        "turns": {"total": total, "from": start_turn, "to": end_turn,
+                  "has_more": start_turn > 0},
     }
 
 

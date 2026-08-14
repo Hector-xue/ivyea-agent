@@ -80,6 +80,12 @@ def _lock_for(sid: str) -> threading.RLock:
         return lock
 
 
+# 一条会话最多留多少步执行记录。步骤是给人复盘用的，不参与模型上下文，所以可以封顶；
+# 每条经 stream_json._slim_args 裁过，2000 条约几百 KB 量级。
+_STEPS_MAX = 2000
+_SKILL_MATCH_MAX = 200
+
+
 def save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[dict] = None,
          created: Optional[float] = None) -> None:
     with _lock_for(sid):
@@ -87,10 +93,23 @@ def save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[dic
 
 
 def _save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[dict] = None,
-          created: Optional[float] = None) -> None:
+          created: Optional[float] = None, steps: Optional[list[dict]] = None,
+          skill_matches: Optional[list[dict]] = None) -> None:
     p = path_for(sid)
+    # steps/skill_matches 没传时**沿用盘上那份**，不能当成"清空"：`save()` 是整份覆盖
+    # 语义（CLI 每轮就这么写），它不知道也不关心步骤，但不该顺手把它们抹掉。
+    if steps is None or skill_matches is None:
+        prev = load(sid) or {}
+        if steps is None:
+            steps = list(prev.get("steps") or [])
+        if skill_matches is None:
+            skill_matches = list(prev.get("skill_matches") or [])
     data = {"id": sid, "created": created or time.time(), "updated": time.time(),
-            "model": model, "messages": messages, "usage": usage or {}}
+            "model": model, "messages": messages, "usage": usage or {},
+            # 执行过程与消息平行存放，**绝不塞进 messages 里的消息 dict**：
+            # 那些 dict 会原样回灌给模型 API，多一个自定义键就有被 provider 拒的风险。
+            "steps": list(steps)[-_STEPS_MAX:],
+            "skill_matches": list(skill_matches)[-_SKILL_MATCH_MAX:]}
     # 临时文件名带进程号和随机后缀。固定成 `<id>.json.tmp` 的话，两个**进程**同时
     # 写同一条会话（比如工作台的 serve 和一个 `ivyea chat`）会写进同一个临时文件，
     # 互相踩出半截 JSON。进程内的会话锁管不到跨进程。
@@ -111,7 +130,9 @@ def _save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[di
 
 
 def append_turn(sid: str, system: str, new_messages: list[dict], *, model: str = "",
-                usage: Optional[dict] = None, created: Optional[float] = None) -> None:
+                usage: Optional[dict] = None, created: Optional[float] = None,
+                steps: Optional[list[dict]] = None,
+                skill_matches: Optional[list[dict]] = None) -> None:
     """把**这一轮新增的**消息并进磁盘上那份，而不是拿内存里的整份覆盖。
 
     为什么不能整份覆盖：一轮的流程是"开始时读全部历史 → 跑 → 结束时写回全部"。
@@ -131,8 +152,12 @@ def append_turn(sid: str, system: str, new_messages: list[dict], *, model: str =
         else:
             msgs.insert(0, {"role": "system", "content": system})
         msgs.extend(new_messages)
+        # 步骤同样只追加增量 —— 理由和消息一模一样（两个标签页并发收尾时，
+        # 整份覆盖会让先写的那一轮连人带步骤一起消失）。
         _save(sid, msgs, model=model, usage=usage,
-              created=cur.get("created") or created)
+              created=cur.get("created") or created,
+              steps=list(cur.get("steps") or []) + list(steps or []),
+              skill_matches=list(cur.get("skill_matches") or []) + list(skill_matches or []))
 
 
 def load(sid: str) -> Optional[dict[str, Any]]:

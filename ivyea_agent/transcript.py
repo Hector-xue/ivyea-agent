@@ -90,6 +90,26 @@ def strip_injected(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def turn_slices(messages: list[dict[str, Any]]) -> list[tuple[int, int]]:
+    """把（已经 strip_injected 过的）消息按轮切成 [start, end) 区间。
+
+    一轮 = 一条真实的用户提问，加上它引出的全部 assistant / tool 消息，直到下一条提问。
+    历史详情按轮分页要靠它 —— 按**消息条数**分页是这次 bug 的成因：一次提问能产生几十条
+    消息，末 N 条里全是工具调用，用户自己发的那句话反而被挤出去了。
+
+    第一条用户消息之前的内容（system、导入进来的开场）归到第 0 轮里，不单独成轮 ——
+    它不是一次提问。
+    """
+    starts = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+    if not starts:
+        return [(0, len(messages))] if messages else []
+    bounds = []
+    for idx, start in enumerate(starts):
+        end = starts[idx + 1] if idx + 1 < len(starts) else len(messages)
+        bounds.append((0 if idx == 0 else start, end))
+    return bounds
+
+
 def visible_turns(messages: list[dict[str, Any]]) -> int:
     """真实的用户轮数。直接数 role=user 会把门禁消息也算成一轮。"""
     return sum(1 for m in messages
