@@ -1262,6 +1262,15 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
             # 只累加 token、不认 final 的调用方（IvyeaOps 的报告合成）传 true：
             # 引证门会让模型带着 [K#] 把整篇重写一遍，不 defer 就会收到两份报告。
             defer_citation_text=payload.get("defer_citation_text") is True,
+            # 思考流：**必须调用方显式要**，默认一个字都不发。
+            #
+            # 不是保守，是兼容性硬约束：客户端的事件分发最后一条是"未知事件 → 当成老
+            # agent 的自由文本叙述渲染"。默认开的话，装着旧版前端的用户一升级 agent，
+            # 满屏就全是模型的思考碎片，而且他没有任何开关能关掉。
+            # 与 defer_citation_text 同一路数：新行为 opt-in，老调用方一字不变。
+            render_reasoning=(
+                (lambda t: send("reasoning", {"text": security.redact_text(str(t))}))
+                if payload.get("stream_reasoning") is True else None),
             # 一轮里正文可能被吐好几遍（工具前的开场白、门禁打回后的整篇重写）。
             # 终端叠着看没问题，网页把 token 拼进同一个气泡就成了"同一张表连出
             # 三遍"。这条事件告诉前端：前面那一稿作废，从下一个 token 重新开始。
