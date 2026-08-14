@@ -28,7 +28,8 @@ def ivyea_home(monkeypatch):
     policy_file = config.IVYEA_DIR / "policy.json"
     if policy_file.exists():
         policy_file.unlink()
-    for mod in ("ivyea_agent.memory", "ivyea_agent.lingxing_openapi",
+    for mod in ("ivyea_agent.memory", "ivyea_agent.memory_core", "ivyea_agent.memory_store",
+                "ivyea_agent.lingxing_openapi",
                 "ivyea_agent.lingxing_cache", "ivyea_agent.pricing",
                 "ivyea_agent.sessions", "ivyea_agent.audit", "ivyea_agent.shadow",
                 "ivyea_agent.action_queue", "ivyea_agent.doctor", "ivyea_agent.profiles",

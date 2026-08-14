@@ -1231,7 +1231,8 @@ SLASH_COMMANDS = [
     ("/patch", "结构化补丁：/patch make|validate|apply|tests"),
     ("/gitops", "Git 工作流：/gitops status|diff|stage|commit|tag"),
     ("/diff", "看工作区改动的彩色 diff（/diff staged 看暂存区）"),
-    ("/memory", "记忆：状态/最近巡检；/memory <词> 检索"),
+    ("/memory", "记忆：状态/分类记忆/核心记忆；/memory <词> 检索"),
+    ("/reflect", "把最近的零散经历提炼成分类记忆（会话结束也会自动跑）"),
     ("/profile", "查看/配置运营画像（目标 ACoS/保护词/核心词）"),
     ("/plan", "进入/退出计划模式（只读，不写入）"),
     ("/approve", "批准并退出计划模式，继续执行"),
@@ -1253,7 +1254,7 @@ _SLASH_GROUPS = [
     ("模型 / 配置", ["/model", "/config", "/status", "/mcp"]),
     ("代码 / 工程", ["/diff", "/workspace", "/patch", "/gitops", "/tools"]),
     ("会话控制", ["/plan", "/approve", "/auto-edit", "/raw", "/stream", "/compact", "/cost", "/clear"]),
-    ("知识 / 记忆", ["/knowledge", "/skill", "/memory", "/init"]),
+    ("知识 / 记忆", ["/knowledge", "/skill", "/memory", "/reflect", "/init"]),
     ("系统", ["/help", "/exit"]),
 ]
 _SLASH_ALIASES = {"/h": "/help", "/?": "/help", "/q": "/exit", "/quit": "/exit"}
@@ -1763,20 +1764,44 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         return True
 
     def _sh_memory(line):
-        from . import memory
+        from . import memory, memory_core, memory_reflect, memory_store
         q = line[7:].strip() if line.startswith("/memory ") else ""
         if q:
-            hits = memory.search(q, limit=10)
-            print("\n".join(f"  · {h['text']}" for h in hits) or "（无匹配记忆）")
+            # 分类记忆优先展示：它是提炼过的，比原始情景片段更有用
+            for h in memory_store.search(q, limit=5):
+                print(f"  {_C['b']}[{h['category']}/{h['name']}]{_C['x']} {h['description']}")
+            hits = memory.search(q, limit=8)
+            print("\n".join(f"  · {h['text'][:100]}" for h in hits) or "（无匹配记忆）")
         else:
             st = memory.stats()
+            ms = memory_store.stats()
             print(f"记忆：决策 {st['decisions']}（批准{st['approved']}/否决{st['rejected']}）· "
-                  f"巡检 {st['runs']} 次 · FTS5={'on' if st['fts'] else 'off(LIKE)'}")
-            for r in memory.recent_runs(limit=5):
-                import time as _t
-                print(f"  · {_t.strftime('%m-%d %H:%M', _t.localtime(r['ts']))} {r['asin']} "
-                      f"否{r['negatives']}/放{r['scale']}/降{r['reduce']}")
-            print(f"  {_C['d']}/memory <关键词> 检索；对话里也可让我 记住/回忆{_C['x']}")
+                  f"巡检 {st['runs']} 次 · 检索行 {st['indexed']}"
+                  f"（中文分词 {'on' if st['segmented_search'] else 'off'}）")
+            cats = " / ".join(f"{k} {v}" for k, v in sorted(ms["by_category"].items())) or "无"
+            print(f"  分类记忆 {ms['total']} 条（{cats}）")
+            core = memory_core.status()
+            print("  核心记忆：" + " · ".join(f"{k} {v['chars']}/{v['limit']} 字"
+                                              for k, v in core.items()))
+            rs = memory_reflect.status()
+            print(f"  待巩固经历 {rs['pending_episodes']}/{rs['threshold']} 条 · 上次反思 {rs['last_reflect']}")
+            print(f"  {_C['d']}/memory <关键词> 检索；/reflect 立即把经历提炼成记忆{_C['x']}")
+        return True
+
+    def _sh_reflect(line):
+        """手动触发反思。会话结束本来会自动跑，但用户想立刻看到沉淀结果时用这个。"""
+        from . import memory_reflect
+        ak = cfg.get_active_key()
+        if not ak:
+            print(ui.message("warn", "未配 key，无法反思。")); return True
+        provider = from_settings(cfg.get_model_config(), ak)
+        print(ui.message("muted", "正在把最近的经历提炼成记忆…"))
+        res = memory_reflect.reflect(provider, force=True)
+        print(ui.message("success" if res.get("ok") else "warn", res["message"]))
+        for ln in res.get("applied", []):
+            print(f"    ✓ {ln}")
+        for ln in res.get("skipped", []):
+            print(f"    {_C['d']}· 跳过：{ln}{_C['x']}")
         return True
 
     def _sh_status(line):
@@ -1899,7 +1924,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         "/clear": _sh_clear, "/plan": _sh_plan, "/approve": _sh_approve, "/cost": _sh_cost,
         "/raw": _sh_raw, "/stream": _sh_stream, "/auto-edit": _sh_auto_edit, "/compact": _sh_compact,
         "/diff": _sh_diff, "/init": _sh_init, "/mcp": _sh_mcp, "/knowledge": _sh_knowledge,
-        "/skill": _sh_skill, "/tools": _sh_tools, "/memory": _sh_memory, "/status": _sh_status,
+        "/skill": _sh_skill, "/tools": _sh_tools, "/memory": _sh_memory, "/reflect": _sh_reflect,
+        "/status": _sh_status,
         "/config": _sh_config, "/model": _sh_model, "/rewind": _sh_rewind, "/update": _sh_update,
         "/think": _sh_think, "/critique": _sh_critique,
         "/workspace": _sh_embedded, "/patch": _sh_embedded, "/gitops": _sh_embedded,
@@ -2204,8 +2230,35 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 print("\n" + ui.message("error", f"模型错误: {e}"))
                 messages.pop()  # 撤回这条 user，避免污染上下文
     finally:
+        _auto_reflect(cfg, narrate=not _oneshot)
         _hooks.fire("session_end", {"session_id": sid or "", "turns": meter.turns,
                                     "cost": round(meter.cost, 6)})
+
+
+def _auto_reflect(cfg, *, narrate: bool = True) -> None:
+    """会话结束时把本次攒下的经历巩固进分类记忆。
+
+    放在 finally 里但**绝不允许影响退出**：反思是锦上添花，任何异常都吞掉。
+    显著性门槛（默认 12 条新经历）在 should_reflect() 里，所以短会话根本不会触发，
+    不会让"聊两句就退出"平白多等一次模型调用。
+    """
+    try:
+        from . import memory_reflect
+        if not memory_reflect.should_reflect():
+            return
+        ak = cfg.get_active_key()
+        if not ak:
+            return
+        from .providers import from_settings
+        if narrate:
+            print(ui.message("muted", "正在把本次对话沉淀进记忆…"))
+        res = memory_reflect.reflect(from_settings(cfg.get_model_config(), ak))
+        if narrate and res.get("applied"):
+            print(ui.message("success", res["message"]))
+            for line in res["applied"]:
+                print(f"    ✓ {line}")
+    except Exception:   # noqa: BLE001 —— 退出路径上绝不因为记忆整理而报错
+        pass
 
 
 def _cmd_model(args: argparse.Namespace) -> int:
@@ -2259,11 +2312,59 @@ def _cmd_memory(args: argparse.Namespace) -> int:
         return 0
     if args.action == "note":
         print(memory.read_note(args.query or "") or "（暂无记忆笔记）"); return 0
+    from . import memory_core, memory_reflect, memory_store
+    if args.action == "list":
+        entries = memory_store.list_entries()
+        if not entries:
+            print("（还没有分类记忆）"); return 0
+        for e in entries:
+            print(f"  {e.updated or '-':<11} [{e.category}/{e.name}] {e.description}")
+        return 0
+    if args.action == "show":
+        if not args.query:
+            print("用法: ivyea memory show <记忆名>", file=sys.stderr); return 2
+        e = memory_store.get(args.query)
+        if not e:
+            print(f"没有找到记忆 {args.query!r}。用 ivyea memory list 看有哪些。", file=sys.stderr); return 2
+        print(f"# [{e.category}/{e.name}]\n{e.description}\n\n{e.body}")
+        return 0
+    if args.action == "reindex":
+        res = memory.rebuild_token_index(force=True)
+        print(f"分词索引已重建：新增 {res.get('added', 0)} / 清理 {res.get('removed', 0)}"
+              if res.get("ok") else f"重建失败：{res.get('reason')}")
+        return 0
+    if args.action == "reflect":
+        from . import config as cfg
+        from .providers import from_settings
+        ak = cfg.get_active_key()
+        if not ak:
+            print("未配 key，无法反思（反思要调一次模型把零散经历提炼成记忆）。", file=sys.stderr); return 2
+        provider = from_settings(cfg.get_model_config(), ak)
+        res = memory_reflect.reflect(provider, force=True)
+        print(res["message"])
+        for line in res.get("applied", []):
+            print(f"  ✓ {line}")
+        for line in res.get("skipped", []):
+            print(f"  · 跳过：{line}")
+        return 0 if res.get("ok") else 1
     # 默认 status
     st = memory.stats()
     print(f"记忆库: {st['db']}")
     print(f"决策 {st['decisions']}（批准 {st['approved']} / 否决 {st['rejected']}）· "
           f"巡检 {st['runs']} 次 · 全文检索 FTS5={'on' if st['fts'] else 'off(LIKE 兜底)'}")
+    drift = "" if st["indexed"] == st["tokenized"] else "  ⚠ 索引漂移，跑 ivyea memory reindex"
+    print(f"检索行 {st['indexed']} · 分词索引 {st['tokenized']}"
+          f"（中文分词检索 {'on' if st['segmented_search'] else 'off'}）{drift}")
+    ms = memory_store.stats()
+    cats = " / ".join(f"{k} {v}" for k, v in sorted(ms["by_category"].items())) or "无"
+    print(f"分类记忆 {ms['total']} 条（{cats}）· 索引层 {ms['index_chars']} 字 · {ms['dir']}")
+    core = memory_core.status()
+    print("核心记忆（每轮常驻上下文）：" + " · ".join(
+        f"{k} {v['chars']}/{v['limit']} 字" for k, v in core.items()))
+    rs = memory_reflect.status()
+    print(f"反思：{'自动开' if rs['auto'] else '自动关'} · 上次 {rs['last_reflect']} · "
+          f"待巩固经历 {rs['pending_episodes']}/{rs['threshold']} 条"
+          f"{'（已够，可跑 ivyea memory reflect）' if rs['ready'] else ''}")
     print("最近巡检：")
     for r in memory.recent_runs(limit=8):
         print(f"  · {_t.strftime('%Y-%m-%d %H:%M', _t.localtime(r['ts']))} {r['asin'] or '-'} "
@@ -3717,8 +3818,11 @@ def build_parser() -> argparse.ArgumentParser:
     pmo.add_argument("--import-qwen-cli", action="store_true", help="从 ~/.qwen/oauth_creds.json 导入 qwen-oauth 凭证")
     pmo.set_defaults(func=_cmd_model)
 
-    pmem = sub.add_parser("memory", help="记忆：status（默认）/ search <词> / note [asin]")
-    pmem.add_argument("action", nargs="?", choices=["status", "search", "note"], default="status")
+    pmem = sub.add_parser("memory", help="记忆：status（默认）/ search <词> / note [asin] / "
+                                         "list / show <名字> / reflect（提炼沉淀）/ reindex（重建分词索引）")
+    pmem.add_argument("action", nargs="?",
+                      choices=["status", "search", "note", "list", "show", "reflect", "reindex"],
+                      default="status")
     pmem.add_argument("query", nargs="?")
     pmem.set_defaults(func=_cmd_memory)
 
