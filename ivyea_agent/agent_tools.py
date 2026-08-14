@@ -212,7 +212,15 @@ TOOL_SCHEMAS = [
             "category": {"type": "string", "enum": list(memory_store.CATEGORIES)},
             "description": {"type": "string", "description": "一句话描述，会进索引层供日后判断相关性"},
             "keywords": {"type": "string", "description": "逗号分隔的关键词，帮助日后检索"},
-            "links": {"type": "string", "description": "关联的其它记忆名，写成 [[名字]] 形式"}},
+            "links": {"type": "string", "description": "关联的其它记忆名，写成 [[名字]] 形式"},
+            "scope": {"type": "string",
+                      "description": "作用域：这条只对某个店铺/ASIN 成立时填，如 store:US主店 或 asin:B08XXX。"
+                                     "全局适用就留空。填错会让别的店铺读到不该用的规则。"},
+            "valid_from": {"type": "string", "description": "事实生效日期 YYYY-MM-DD，如「双十一起改成…」"},
+            "valid_until": {"type": "string",
+                            "description": "事实失效日期 YYYY-MM-DD。**已知是临时的就一定要填**"
+                                           "（如旺季阈值、促销期规则），到期自动不再进检索，"
+                                           "省得日后拿过期规则误导决策"}},
             "required": ["operation"]}}},
     {"type": "function", "function": {
         "name": "memory_search",
@@ -438,6 +446,9 @@ def _t_memory_write(args: dict, ctx: ToolContext) -> str:
         description=args.get("description") or "",
         keywords=args.get("keywords") or "",
         links=args.get("links") or "",
+        scope=args.get("scope") or "",
+        valid_from=args.get("valid_from") or "",
+        valid_until=args.get("valid_until") or "",
     )
     return res.get("message", "")
 
@@ -446,13 +457,19 @@ def _t_memory_search(args: dict, ctx: ToolContext) -> str:
     hits = memory_store.search(args.get("query", ""), limit=int(args.get("limit") or 8))
     if not hits:
         return "（分类记忆里没有相关条目）"
+    # 联想：把命中记忆显式链接到的那几条一并带出来（限 1 跳、限条数）。
+    # 这些是作者写下的"这两件事相关"，往往正是回答问题真正需要的那一半。
+    linked = memory_store.expand_linked([memory_store.get(h["name"], h["category"]) for h in hits])
+    extra = [e.to_dict() for e in linked[len(hits):]]
     out = []
-    for h in hits:
+    for h in hits + extra:
         # 正文截断：检索结果是给模型判断"要不要细看"的，要全文用 memory_read
         body = h["body"].strip()
         if len(body) > 800:
             body = body[:800] + f"\n…（正文共 {len(h['body'])} 字，用 memory_read 取全文）"
-        out.append(f"### [{h['category']}/{h['name']}]（相关度 {h['score']}）\n"
+        tag = f"（相关度 {h['score']}）" if h.get("score") else "（关联带出）"
+        note = " ⚠推断" if h.get("confidence", 1.0) < memory_store.UNCERTAIN_BELOW else ""
+        out.append(f"### [{h['category']}/{h['name']}]{tag}{note}\n"
                    f"{h['description']}\n{body}")
     return "\n\n".join(out)
 

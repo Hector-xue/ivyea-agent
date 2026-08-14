@@ -2326,7 +2326,94 @@ def _cmd_memory(args: argparse.Namespace) -> int:
         e = memory_store.get(args.query)
         if not e:
             print(f"没有找到记忆 {args.query!r}。用 ivyea memory list 看有哪些。", file=sys.stderr); return 2
-        print(f"# [{e.category}/{e.name}]\n{e.description}\n\n{e.body}")
+        meta = [f"记录 {e.created}→{e.updated}"]
+        if e.scope:
+            meta.append(f"作用域 {e.scope}")
+        if e.valid_from or e.valid_until:
+            meta.append(f"有效期 {e.valid_from or '不限'} ~ {e.valid_until or '不限'}")
+        if not e.is_valid_on():
+            meta.append("⚠ 已失效")
+        print(f"# [{e.category}/{e.name}]\n{e.description}\n{' · '.join(meta)}\n\n{e.body}")
+        hist = memory_store.history(e.name, e.category)
+        if hist:
+            print(f"\n历史版本 {len(hist)} 个（ivyea memory history {e.name} 查看）")
+        return 0
+    if args.action == "pending":
+        rows = memory_store.list_pending()
+        if not rows:
+            print("（待定区是空的——反思还没提出新的推断）"); return 0
+        from . import memory_reflect
+        print(f"待定记忆 {len(rows)} 条。这些是我**推断**出来的，还没生效：\n")
+        for e in rows:
+            seen = next((k.split("=")[1] for k in e.keywords.split(",")
+                         if k.startswith("sightings=")), "1")
+            print(f"  [{e.category}/{e.name}]  第 {seen}/{memory_reflect.PROMOTE_AFTER_SIGHTINGS} 次观察 "
+                  f"· confidence {e.confidence:.2f}")
+            print(f"    {e.description}")
+            print(f"    {e.body.strip()[:160]}")
+            print(f"    依据：{e.evidence or '（无）'}\n")
+        print("确认：ivyea memory confirm <名字>   丢弃：ivyea memory reject <名字>")
+        return 0
+    if args.action in ("confirm", "reject"):
+        if not args.query:
+            print(f"用法: ivyea memory {args.action} <记忆名>", file=sys.stderr); return 2
+        res = (memory_store.promote_pending(args.query, confirmed_by_user=True)
+               if args.action == "confirm" else memory_store.reject_pending(args.query))
+        print(res.get("message", ""), file=sys.stderr if not res.get("ok") else sys.stdout)
+        return 0 if res.get("ok") else 2
+    if args.action == "decay":
+        from . import memory_decay
+        entries = memory_store.list_entries()
+        if not entries:
+            print("（还没有分类记忆）"); return 0
+        rep = memory_decay.report(entries)
+        print(f"记忆活跃度 · 共 {rep['total']} 条 · 常驻上下文 {rep['active']} · "
+              f"已降级 {rep['archived']}（仍可检索）")
+        print(f"半衰期 {rep['halflife_days']:.0f} 天 · 归档线 {rep['archive_below']}")
+        print("")
+        print(f"{'分数':>6}  {'命中':>4}  {'状态':<10} 记忆")
+        for r in rep["rows"]:
+            print(f"{r['score']:>6.3f}  {r['hits']:>4}  {r['reason']:<10} [{r['category']}/{r['name']}]")
+        return 0
+    if args.action == "pin" or args.action == "unpin":
+        from . import memory_decay
+        if not args.query:
+            print(f"用法: ivyea memory {args.action} <记忆名>", file=sys.stderr); return 2
+        e = memory_store.get(args.query)
+        if not e:
+            print(f"没有找到记忆 {args.query!r}。", file=sys.stderr); return 2
+        memory_decay.set_pinned(e.category, e.name, args.action == "pin")
+        print(f"[{e.category}/{e.name}] 已{'钉住，永不降级' if args.action == 'pin' else '取消钉住'}。")
+        return 0
+    if args.action == "why":
+        if not args.query:
+            print("用法: ivyea memory why <记忆名>", file=sys.stderr); return 2
+        e = memory_store.get(args.query)
+        if not e:
+            print(f"没有找到记忆 {args.query!r}。", file=sys.stderr); return 2
+        origin = {"user": "你亲口说的", "manual": "手写在文件里的",
+                  "reflection": "我从对话里推断的"}.get(e.source, e.source)
+        print(f"[{e.category}/{e.name}]")
+        print(f"  来源：{origin}（confidence {e.confidence:.2f}）")
+        print(f"  依据：{e.evidence or '（无记录——早于溯源功能，或由你直接写入）'}")
+        print(f"  记录：{e.created} 首次记住，{e.updated} 最近更新")
+        if e.uncertain:
+            print("  ⚠ 这是推断，不是你说过的原话。不对就告诉我，我改掉。")
+        hist = memory_store.history(e.name, e.category)
+        if hist:
+            print(f"  改过 {len(hist)} 次（ivyea memory history {e.name}）")
+        return 0
+    if args.action == "history":
+        if not args.query:
+            print("用法: ivyea memory history <记忆名>", file=sys.stderr); return 2
+        cur = memory_store.get(args.query)
+        hist = memory_store.history(args.query, cur.category if cur else "")
+        if cur:
+            print(f"■ 当前（{cur.valid_from or cur.created} 起）\n  {cur.body.strip()[:300]}\n")
+        if not hist:
+            print("（没有历史版本——这条记忆的正文还没被改过）"); return 0
+        for h in hist:
+            print(f"□ {h.valid_from or h.created} ~ {h.valid_until}\n  {h.body.strip()[:300]}\n")
         return 0
     if args.action == "reindex":
         res = memory.rebuild_token_index(force=True)
@@ -3881,8 +3968,9 @@ def build_parser() -> argparse.ArgumentParser:
     pmem = sub.add_parser("memory", help="记忆：status（默认）/ search <词> / note [asin] / "
                                          "list / show <名字> / reflect（提炼沉淀）/ reindex（重建分词索引）")
     pmem.add_argument("action", nargs="?",
-                      choices=["status", "search", "note", "list", "show", "reflect", "reindex",
-                               "embed", "eval"],
+                      choices=["status", "search", "note", "list", "show", "history", "why",
+                               "pending", "confirm", "reject", "decay", "pin", "unpin",
+                               "reflect", "reindex", "embed", "eval"],
                       default="status")
     pmem.add_argument("--dataset", default="default", help="eval：评测集名字")
     pmem.add_argument("--generate", action="store_true", help="eval：用模型从现有记忆反向生成评测问题")

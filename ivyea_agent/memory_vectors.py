@@ -49,6 +49,8 @@ def _conn() -> sqlite3.Connection:
     config.ensure_dirs()
     conn = sqlite3.connect(str(db_path()))
     conn.row_factory = sqlite3.Row
+    from . import memory_lock
+    memory_lock.tune(conn)
     conn.execute("""CREATE TABLE IF NOT EXISTS mem_vec (
         text_hash TEXT NOT NULL,
         backend   TEXT NOT NULL,

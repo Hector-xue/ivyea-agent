@@ -54,6 +54,8 @@ def _conn() -> sqlite3.Connection:
     config.ensure_dirs()
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
+    from . import memory_lock
+    memory_lock.tune(conn)   # WAL + busy_timeout：多端同时用时不再 'database is locked'
     conn.execute("""CREATE TABLE IF NOT EXISTS decisions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         asin TEXT, term TEXT, kind TEXT, decision TEXT, ts REAL, note TEXT)""")

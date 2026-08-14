@@ -61,8 +61,9 @@ def test_force_bypasses_significance_gate(ivyea_home):
     _seed_episodes(3)
     p = FakeProvider({"operations": [_op()]})
     res = memory_reflect.reflect(p, force=True)
-    assert res["ok"] and res["applied"]
-    assert memory_store.get("宽泛词打法") is not None
+    # 阶段 7 起新洞察先进待定区（先留观再入库），所以看 pending 而不是 applied
+    assert res["ok"] and res["pending"]
+    assert memory_store.get_pending("宽泛词打法") is not None
 
 
 def test_evidence_gate_drops_single_support_insight(ivyea_home):
@@ -93,8 +94,8 @@ def test_reflection_runs_and_persists(ivyea_home):
     _seed_episodes(20)
     p = FakeProvider({"operations": [_op()]})
     res = memory_reflect.reflect(p)
-    assert res["ok"] and len(res["applied"]) == 1
-    e = memory_store.get("宽泛词打法")
+    assert res["ok"] and len(res["pending"]) == 1
+    e = memory_store.get_pending("宽泛词打法")
     assert e.category == "domain" and "默认否" in e.body
 
 
@@ -138,8 +139,8 @@ def test_json_in_code_fence_is_parsed(ivyea_home):
     body = json.dumps({"operations": [_op()]}, ensure_ascii=False)
     p = FakeProvider(None, raw=f"好的，我提炼了以下内容：\n```json\n{body}\n```\n以上。")
     res = memory_reflect.reflect(p)
-    assert res["applied"]
-    assert memory_store.get("宽泛词打法") is not None
+    assert res["pending"]
+    assert memory_store.get_pending("宽泛词打法") is not None
 
 
 def test_garbage_output_fails_soft(ivyea_home):

@@ -96,7 +96,10 @@ def run(name: str = "default", *, limit: int = 5, semantic: Optional[bool] = Non
         return {"ok": False, "message": f"评测集 {name} 为空。先用 ivyea memory eval --generate 生成。"}
 
     def _run_all() -> List[Optional[int]]:
-        return [_rank_of(memory_store.search(c["query"], limit=limit), c["expect"]) for c in cases]
+        # record=False：评测跑几轮就会把全库刷成"热门"，遗忘打分的输入
+        # 被评测自身的副作用污染。测量不该改变被测对象。
+        return [_rank_of(memory_store.search(c["query"], limit=limit, record=False),
+                         c["expect"]) for c in cases]
 
     if semantic is False:
         with memory_vectors.lexical_only():
