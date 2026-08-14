@@ -516,7 +516,11 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
     render = render or (lambda s: print(s, end="", flush=True))
     render_reasoning = render_reasoning or (lambda s: None)
     cancel_check = cancel_check or (lambda: False)
-    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "prompt_cache_hit_tokens": 0}
+    # llm_ms：**只**覆盖模型流式窗口（下面那圈 provider.stream_chat）。工具执行在窗口之外，
+    # 所以这个数回答的是"这一轮里有多少时间真的花在模型上"——一轮 20 分钟里模型只占 40 秒
+    # 和占 18 分钟，要做的优化完全不是一回事，而此前调用方只拿得到一个总时长。
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "prompt_cache_hit_tokens": 0,
+                   "llm_ms": 0}
 
     # 正文的"稿"边界。发通知的时刻是**新一稿的第一个字**——在那之前谁也不知道
     # 模型还会不会再写一遍，提前发就会把还在用的那一稿误清。
@@ -563,6 +567,7 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
             )
             or (defer_citation_text and bool(getattr(ctx, "knowledge_citations", [])))
         )
+        llm_started = time.monotonic()
         for ev in provider.stream_chat(messages, tools=tool_schemas):
             if cancel_check():
                 raise KeyboardInterrupt
@@ -575,6 +580,9 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
                 render_reasoning(ev.get("text") or "")
             elif ev["type"] == "final":
                 final = ev
+        # 渲染回调（终端打印 / serve 推 SSE）落在这个窗口里，因为它们本来就是边收边发的
+        # 一部分，拆不开也不该拆——窗口量的是"模型这一步从开口到闭嘴用了多久"。
+        total_usage["llm_ms"] += int((time.monotonic() - llm_started) * 1000)
         if printed_any and not defer_text:
             render("\n")
         _accum(final.get("usage") or {})
