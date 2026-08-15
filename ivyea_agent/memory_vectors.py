@@ -92,7 +92,14 @@ def backend_key() -> Tuple[str, str, bool]:
     st = retrieval_embeddings.status()
     active = str(st.get("active_backend") or "")
     dense = bool(st.get("semantic_enabled")) and not _FORCE_LEXICAL
-    model = str(st.get("api_model") if active == retrieval_embeddings.API_BACKEND else st.get("model") or "")
+    if active == retrieval_embeddings.API_BACKEND:
+        model = str(st.get("api_model") or "")
+    elif active == retrieval_embeddings.STATIC_BACKEND:
+        # 内置查表要用**指纹**而不是来源模型名：重建一张同维度但配方不同的表之后，
+        # 名字一模一样，缓存里的旧向量会被当成有效继续用——数值全错且不报错。
+        model = str((st.get("static_table") or {}).get("identity") or "static")
+    else:
+        model = str(st.get("model") or "")
     return active, model, dense
 
 

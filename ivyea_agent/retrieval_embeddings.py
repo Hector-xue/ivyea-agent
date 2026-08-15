@@ -18,13 +18,24 @@ from . import config
 
 
 HASH_BACKEND = "local_hash_embedding_v1"
+# 配置值 "sparse" = 显式关掉语义。**不能存成 "hash"**：那个字符串被当作"老的默认值"
+# 迁移到 static 了，存 hash 等于关不掉。
+SPARSE_BACKEND = "sparse"
+STATIC_BACKEND = "static"
 SENTENCE_BACKEND = "sentence-transformers"
 API_BACKEND = "api"
+# 默认后端。**刻意是 static 而不是 hash**：hash 只是词频稀疏向量，根本不是语义，
+# 而语义检索以前要么配 API（多一个 key + 记忆正文出网）、要么装 2G 依赖——
+# 门槛的结果是绝大多数用户装完压根没有语义。static 是随包发布的查表，
+# 零配置零联网，装完即用；想要更好的仍可切 api / sentence-transformers。
+DEFAULT_BACKEND = STATIC_BACKEND
 DEFAULT_SENTENCE_MODEL = "BAAI/bge-small-zh-v1.5"
 # 通用 OpenAI 兼容 /v1/embeddings 的默认值。刻意不绑定任何供应商：
 # ivyea-agent 是自托管 CLI，主脑可能是 DeepSeek（**实测无 embeddings 接口，404**）、
 # 也可能是硅基流动/OpenAI/Jina/本地 Ollama。用户指哪打哪，才不会因为换了主脑就没语义检索。
 DEFAULT_API_MODEL = "BAAI/bge-m3"
+# 静态表的来源模型，只用于对外显示"这批向量是谁生成的"
+STATIC_MODEL = "bge-small-zh-v1.5-static"
 API_TIMEOUT = 30.0
 
 QUERY_ALIASES = {
@@ -64,7 +75,7 @@ def api_settings() -> dict[str, str]:
 
 
 def status() -> dict[str, Any]:
-    backend = _normal_backend(str(config.get_setting("retrieval_embedding_backend", "hash")))
+    backend = _normal_backend(str(config.get_setting("retrieval_embedding_backend", DEFAULT_BACKEND)))
     model = str(config.get_setting("retrieval_embedding_model", DEFAULT_SENTENCE_MODEL) or DEFAULT_SENTENCE_MODEL)
     model_path = str(config.get_setting("retrieval_embedding_model_path", "") or "")
     allow_download = bool(config.get_setting("retrieval_embedding_allow_download", False))
@@ -72,9 +83,19 @@ def status() -> dict[str, Any]:
     path_exists = bool(model_path and Path(model_path).expanduser().exists())
     local_candidates = _local_model_candidates()
 
+    from . import static_embedding
+
     api = api_settings()
     api_requested = backend == API_BACKEND
     api_ready = api_requested and bool(api["base"]) and bool(api["key"])
+
+    static_requested = backend == STATIC_BACKEND
+    # 自带查表是否**可用**，与用户配没配它无关：它是所有 dense 后端的兜底。
+    # 用户配了 API 但 key 没填、配了本地模型但没装依赖——这些情况该退到自带语义，
+    # 而不是一路退回"没有语义"。配错一个字就把整个语义层关掉，太苛刻了。
+    static_available = static_embedding.available()
+    static_ready = static_requested and static_available
+    sparse_requested = backend == SPARSE_BACKEND
 
     semantic_requested = backend == SENTENCE_BACKEND
     semantic_ready = semantic_requested and package_available and (path_exists or allow_download)
@@ -89,11 +110,17 @@ def status() -> dict[str, Any]:
         fallback_reason = "retrieval_embedding_api_base is not configured"
     elif api_requested and not api["key"]:
         fallback_reason = f"环境变量 {api['key_env']} 未设置（在 ~/.ivyea/.env 里配）"
+    elif static_requested and not static_ready:
+        fallback_reason = static_embedding.unavailable_reason() or "内置静态向量表不可用"
 
-    if api_ready:
+    if sparse_requested:
+        active, kind, dense = HASH_BACKEND, "sparse", False
+    elif api_ready:
         active, kind, dense = API_BACKEND, "dense", True
     elif semantic_ready:
         active, kind, dense = SENTENCE_BACKEND, "dense", True
+    elif static_available:
+        active, kind, dense = STATIC_BACKEND, "dense", True
     else:
         active, kind, dense = HASH_BACKEND, "sparse", False
 
@@ -106,6 +133,8 @@ def status() -> dict[str, Any]:
         "api_model": api["model"],
         "api_key_env": api["key_env"],
         "api_ready": api_ready,
+        "static_ready": static_ready,
+        "static_table": static_embedding.info(),
         "model": model,
         "model_path": model_path,
         "model_path_exists": path_exists,
@@ -176,7 +205,12 @@ def probe(text: str = "ivyea retrieval embedding probe") -> dict[str, Any]:
         }
     active = st["active_backend"]
     try:
-        values = _api_vector(text, st) if active == API_BACKEND else _sentence_vector(text, st)
+        if active == API_BACKEND:
+            values = _api_vector(text, st)
+        elif active == STATIC_BACKEND:
+            values = _static_vector(text)
+        else:
+            values = _sentence_vector(text, st)
     except Exception as exc:
         return {
             "ok": False,
@@ -236,7 +270,22 @@ def _encode(text: str) -> dict[str, Any]:
             return {"kind": "dense", "backend": SENTENCE_BACKEND, "model": st["model"], "values": values}
         except Exception as exc:
             return _hash_payload(text, f"{type(exc).__name__}: {exc}")
+    if active == STATIC_BACKEND:
+        try:
+            values = _static_vector(text)
+            if values:
+                return {"kind": "dense", "backend": STATIC_BACKEND,
+                        "model": STATIC_MODEL, "values": values}
+        except Exception as exc:
+            return _hash_payload(text, f"{type(exc).__name__}: {exc}")
+        # 纯标点/空串这类切不出 token 的输入：没有语义可言，退回稀疏就好
+        return _hash_payload(text)
     return _hash_payload(text)
+
+
+def _static_vector(text: str) -> list[float]:
+    from . import static_embedding
+    return static_embedding.encode(text) or []
 
 
 def _api_vector(text: str, st: dict[str, Any]) -> list[float]:
@@ -281,12 +330,20 @@ def _sentence_vector(text: str, st: dict[str, Any]) -> list[float]:
 
 
 def _normal_backend(value: str) -> str:
-    raw = (value or "hash").strip().lower().replace("_", "-")
+    raw = (value or DEFAULT_BACKEND).strip().lower().replace("_", "-")
     if raw in ("sentence", "sentence-transformer", "sentence-transformers", "semantic"):
         return SENTENCE_BACKEND
     if raw in ("api", "openai", "openai-compatible", "remote", "http"):
         return API_BACKEND
-    return "hash"
+    if raw in ("static", "builtin", "bundled", "local"):
+        return STATIC_BACKEND
+    if raw in ("sparse", "none", "off", "lexical"):
+        # 显式关掉语义的逃生口（调试、或者真的不想要向量）
+        return SPARSE_BACKEND
+    # "hash" 是**旧的默认值**，不是谁主动选的——它压根不是语义，只是当年"零依赖"
+    # 的占位。升级到自带静态表之后，老部署 settings.json 里躺着的这个 hash 应当
+    # 跟着走到 static（同样零依赖零联网，但真的有语义）。要保留稀疏请写 "sparse"。
+    return DEFAULT_BACKEND
 
 
 def _local_model_root() -> Path:

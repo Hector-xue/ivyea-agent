@@ -1,0 +1,10 @@
+{
+  "source_model": "BAAI/bge-small-zh-v1.5",
+  "vocab_size": 21128,
+  "dim": 256,
+  "sif_a": 0.001,
+  "npc": 1,
+  "quantization": "int8 per-dim",
+  "quantization_mae": 0.004473,
+  "fingerprint": "4b5896ce990310cf"
+}

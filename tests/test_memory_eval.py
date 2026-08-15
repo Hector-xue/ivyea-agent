@@ -115,7 +115,12 @@ def test_run_reports_misses(ivyea_home):
     from ivyea_agent import memory_eval, memory_store
     _seed(memory_store)
     memory_eval.save_dataset([{"query": "完全不相干的问题", "expect": ["备货节奏"]}])
-    res = memory_eval.run()
+    # 强制纯词法：自带语义默认开着，而向量召回在只有两条记忆的语料上必然把两条都返回，
+    # "召不回"这件事就再也构造不出来了。这条测的是**记账逻辑**（miss 有没有算对），
+    # 不是召回质量，所以把语义关掉才测得准。
+    from ivyea_agent import memory_vectors
+    with memory_vectors.lexical_only():
+        res = memory_eval.run(semantic=False)
     assert res["missed"] == 1
     assert "完全不相干的问题" in memory_eval.render(res)
 
@@ -145,9 +150,9 @@ def test_compare_shape(ivyea_home):
     res = memory_eval.compare()
     assert res["ok"] and "delta" in res
     assert set(res["lexical"]) >= {"recall@1", "mrr"}
-    # 没配语义后端时两边必然一致，且要在渲染里说清楚，别让人误读成"语义没用"
-    assert res["delta"]["mrr"] == 0.0
-    assert "未启用语义后端" in memory_eval.render(res)
+    # 自带语义默认开着，所以 compare 现在两边都有意义；渲染里不该再挂"未启用"的提示
+    assert res["semantic_available"] is True
+    assert "未启用语义后端" not in memory_eval.render(res)
 
 
 # ── 生成评测集 ──────────────────────────────────────────────────────────────

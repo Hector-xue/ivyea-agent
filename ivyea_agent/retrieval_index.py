@@ -253,6 +253,7 @@ def search(query: str, limit: int = 8, sources: list[str] | tuple[str, ...] | No
     qvec = retrieval_embeddings.encode_query(q)
     if not qvec:
         return []
+    vector_backend = str(qvec.get("backend") or BACKEND)
     wanted = _normal_sources(sources)
     conn = _conn()
     placeholders = ",".join("?" * len(wanted))
@@ -274,7 +275,9 @@ def search(query: str, limit: int = 8, sources: list[str] | tuple[str, ...] | No
             "title": row["title"],
             "snippet": _snippet(text, terms),
             "score": int(12 + sim * 80),
-            "match": BACKEND,
+            # 报**实际使用的向量后端**，不是索引实现的名字（index_backend 才是那个）。
+            # 硬编码 BACKEND 的话，dense 后端下这条会谎称命中来自 hash 稀疏向量。
+            "match": vector_backend,
             "vector_score": round(sim, 4),
             "scope": row["scope"],
             "source_type": row["source_type"],

@@ -61,9 +61,11 @@ def test_memory_search_identical_without_semantic(ivyea_home):
     from ivyea_agent import memory
     for i in range(30):
         memory.remember(f"第{i}条关于广告出价的记忆")
-    hits = memory.search("广告出价", limit=5)
+    from ivyea_agent import memory_vectors
+    with memory_vectors.lexical_only():
+        assert not memory_vectors_enabled()
+        hits = memory.search("广告出价", limit=5)
     assert len(hits) == 5
-    assert not memory_vectors_enabled()
 
 
 def memory_vectors_enabled() -> bool:
@@ -312,7 +314,11 @@ def test_api_backend_missing_key_reports_clearly(ivyea_home, monkeypatch):
     retrieval_embeddings.configure(backend="api", api_base="http://127.0.0.1:1",
                                    api_key_env="NOPE_KEY")
     st = retrieval_embeddings.status()
-    assert not st["semantic_enabled"]
+    # key 没配 → 不该走 api，但也不该把语义整个关掉：退到随包的自带查表
+    assert st["active_backend"] != retrieval_embeddings.API_BACKEND
+    assert st["semantic_enabled"] is True
+    assert st["active_backend"] == retrieval_embeddings.STATIC_BACKEND
+    # 原因必须说清楚，否则用户只会觉得"配了没反应"
     assert "NOPE_KEY" in st["fallback_reason"]
 
 
@@ -321,13 +327,32 @@ def test_api_backend_missing_base_reports_clearly(ivyea_home, monkeypatch):
     monkeypatch.setenv("TEST_EMBED_KEY", "sk-test-123")
     retrieval_embeddings.configure(backend="api", api_base="", api_key_env="TEST_EMBED_KEY")
     st = retrieval_embeddings.status()
-    assert not st["semantic_enabled"]
+    assert st["active_backend"] != retrieval_embeddings.API_BACKEND
+    assert st["semantic_enabled"] is True
+    assert st["active_backend"] == retrieval_embeddings.STATIC_BACKEND
     assert "api_base" in st["fallback_reason"]
 
 
-def test_hash_backend_still_default(ivyea_home):
-    """默认必须仍是零依赖的 hash——不能因为加了语义就要求所有人配 embedding。"""
+def test_default_backend_is_bundled_and_semantic(ivyea_home):
+    """默认必须**零依赖零配置**——但现在这件事由随包的静态查表满足，而不是退回没有语义。
+
+    旧契约是"默认 hash"，那等于所有人装完都没有语义检索，除非自己去配 API 或装
+    2G 的本地模型。static 同样不联网、不要 key、不加依赖，但真的能按语义召回。
+    """
     from ivyea_agent import retrieval_embeddings
+    st = retrieval_embeddings.status()
+    assert st["configured_backend"] == retrieval_embeddings.STATIC_BACKEND
+    assert st["active_backend"] == retrieval_embeddings.STATIC_BACKEND
+    assert st["semantic_enabled"] is True
+    # 零依赖仍是硬约束：不许因此要求用户装 sentence-transformers 或配 key
+    assert st["external_dependency"] is False
+    assert not st["api_ready"]
+
+
+def test_sparse_escape_hatch_still_works(ivyea_home):
+    """显式写 sparse 仍能关掉语义——调试和"我就是不想要向量"要有出路。"""
+    from ivyea_agent import retrieval_embeddings
+    retrieval_embeddings.configure(backend="sparse")
     st = retrieval_embeddings.status()
     assert st["active_backend"] == retrieval_embeddings.HASH_BACKEND
     assert not st["semantic_enabled"]
