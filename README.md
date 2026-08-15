@@ -173,7 +173,7 @@ ivyea chat --execute --from-lingxing --protected "核心词,品牌词"   # 允�
 
 - 直接说「看下 B0XXXX 这周广告」——agent 自动 **巡检 → 提动作 → 逐条弹审批 → 执行 → 可回滚**。
 - 运营类问题自动注入相关 **Amazon Skill 与知识库**；工程类问题注入 **workspace 入口 / 测试 / git 状态**，上下文不混杂。
-- 斜杠命令：`/help /model /think /critique /mcp /tools /workspace /patch /gitops /plan /approve /compact /memory /rewind /clear /exit`。
+- 斜杠命令：`/help /model /think /critique /mcp /tools /workspace /patch /gitops /plan /approve /compact /memory /reflect /rewind /clear /exit`。
 - 终端体验：带框输入区钉底、逐字流式、Markdown 渲染、彩色 diff、Todo/Plan 面板、状态栏显示 模型 / 模式 / 上下文 token / 累计花费；`Ctrl+C` 中断本轮不杀会话；`NO_COLOR=1` 去色、`IVYEA_BOXED_INPUT=0` 退回单行输入。
 
 **思考深度与自我校验**：
@@ -243,11 +243,59 @@ Ivyea Agent 内置一套完整的本地代码工作流：先理解项目，再�
 
 ## 记忆与检索
 
-本地自有的长期记忆：**SQLite FTS5 + 策展 markdown + 自策展**，不依赖向量库，存 `~/.ivyea/memory.db`、`~/.ivyea/MEMORY.md`、`~/.ivyea/account/<ASIN>.md`。
+本地自有的长期记忆，不依赖向量库或外部记忆服务，全部存在 `~/.ivyea/` 下。分三层，各司其职：
 
+| 层 | 存哪 | 特点 |
+| --- | --- | --- |
+| **核心记忆** | `USER.md` / `AGENTS.md` | **每轮常驻上下文**，不需要检索就一直知道。Agent 可自己增删改 |
+| **分类记忆** | `memory/<分类>/<名字>.md` | 一事一文件。索引层（每条一行）全量注入，正文按需取 |
+| **情景记忆** | `memory.db` | 巡检、决策、对话片段，供模糊回忆 |
+
+- **常驻画像**：你说「以后都用中文汇报」「品牌词永远不否」，Agent 会自己写进核心记忆，下一轮起长期生效——不用你手动编辑文件。
+- **两层检索省 token**：上下文里只放记忆目录（每条一行），需要哪条才取正文，而不是把全部记忆塞进去。
+- **合并优先于新建**：写入走 add/update/delete/noop 四操作并自动查重，同一件事不会分裂成好几条。
+- **中文 + 语义双路检索**：bigram 分词 + BM25 打底（「广告花钱太狠」能召回「广告花费太高」，ASIN/SKU 整词保留不串号）；配上 embedding 后端还会并行走一路向量召回，两路用 RRF 融合。实测口语化提问的 recall@1 从 0.80 提到 0.93。
+- **事实有有效期**：「旺季 ACoS 35%」这类会变的事实带 `valid_from`/`valid_until`，过期自动退出检索；旧值归档而非覆盖，随时能查「什么时候改的、之前是多少」。
+- **多店铺隔离**：记忆可绑 `scope`，US 站的打法不会串到 JP 站。
+- **推断和原话分得清**：反思推断出的记忆带置信度并标注「推断」，**永远不会**自动获得你亲口说过的规则那种权重；新洞察先进待定区，你确认或反复观察到才生效。
+- **会遗忘**：按「最近用没用过 / 用得多不多 / 可不可信」打分，冷门记忆退出常驻上下文但**仍可检索**——绝不静默删除。红线规则可 `pin` 住永不降级。
+- **会联想**：召回一条记忆时把它 `[[链接]]` 到的相关记忆一并带出来。
+- **可解释**：`ivyea memory why <名字>` 回答「你凭什么这么认为」。
+- **可量化**：内置评测框架，改检索前后跑一遍就知道有没有变好，不靠感觉。
+- **多端并发安全**：CLI / serve / IvyeaOps 同时写不会产生重复条目（跨进程文件锁 + SQLite WAL）。
 - **尊重历史否决**：你否过的否词 / 调价，下次巡检自动拦截、不再反复建议。
-- **稳定期**：刚调过 bid 的词，冷却期内不重复调。
-- **跨会话回忆**：`ivyea memory search <词>`，或对话里直接说「记住… / 回忆…」。
+
+```bash
+ivyea memory                  # 记忆全景：三层状态、语义层、遗忘、待定区
+ivyea memory list             # 列出全部分类记忆
+ivyea memory show <名字>      # 看某条记忆全文（含有效期、作用域）
+ivyea memory history <名字>   # 这条记忆改过几次、之前是什么
+ivyea memory why <名字>       # 你凭什么这么认为（来源 + 置信度 + 依据）
+ivyea memory search <词>      # 跨会话回忆
+ivyea memory pending          # 看待确认的推断
+ivyea memory confirm <名字>   # 确认一条推断（reject 丢弃）
+ivyea memory decay            # 活跃度排行：谁常驻上下文、谁被降级了
+ivyea memory pin <名字>       # 钉住，永不降级（unpin 取消）
+ivyea memory reflect          # 立刻把最近的经历提炼成记忆（对话里也可用 /reflect）
+ivyea memory embed            # 预热向量 / 查看语义层怎么启用
+ivyea memory eval --compare   # 量化检索质量（--generate 自动造评测集）
+ivyea memory reindex          # 重建中文分词索引（升级后或提示漂移时）
+```
+
+对话里直接说「记住…」「回忆…」「更新一下某某记忆」也都可以。
+
+**启用语义检索**（可选，不配也能用，只是少一路召回）：
+
+```bash
+# 方式一：接任意 OpenAI 兼容的 embedding 端点（推荐，不占内存）
+ivyea retrieval embeddings --backend api \
+    --api-base https://<供应商>/v1 --api-model <模型名> --api-key-env EMBEDDING_API_KEY
+# 然后把 key 写进 ~/.ivyea/.env 的 EMBEDDING_API_KEY
+
+# 方式二：本地模型，离线可用，但需要约 2G 内存和 300MB 磁盘
+pip install "ivyea-agent[semantic]"
+ivyea retrieval embeddings --backend sentence-transformers --model-path <模型目录>
+```
 
 ```bash
 ivyea retrieval index                 # 把知识库 + 记忆写入本地持久检索索引
@@ -364,7 +412,9 @@ ivyea serve --host 127.0.0.1 --port 8765     # 默认仅监听 localhost
 ├── auth.json          OAuth / Bearer 凭证（权限 600）
 ├── mcp.json           MCP 服务器与 dataSource 映射（权限 600）
 ├── policy.json        本地安全策略
-├── memory.db / MEMORY.md   长期记忆
+├── USER.md / AGENTS.md     核心记忆（每轮常驻上下文，Agent 可自改）
+├── memory/                 分类记忆（一事一文件，按 user/feedback/project/reference/domain 归档）
+├── memory.db / MEMORY.md   情景记忆与检索索引
 ├── knowledge/ · skills/    用户知识卡与 Skill
 └── tasks/ · workspaces/ · outputs/   长任务 / 项目索引 / 落盘输出
 ```

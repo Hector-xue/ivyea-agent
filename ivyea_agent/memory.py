@@ -14,10 +14,11 @@ import sqlite3
 import time
 from typing import Any, Optional
 
-from . import config
+from . import config, textseg
 
 DB_PATH = config.IVYEA_DIR / "memory.db"
 _FTS_OK: Optional[bool] = None
+_TOK_OK: Optional[bool] = None
 
 
 def _detect_fts(conn: sqlite3.Connection) -> bool:
@@ -32,10 +33,29 @@ def _detect_fts(conn: sqlite3.Connection) -> bool:
     return _FTS_OK
 
 
+def _detect_tok(conn: sqlite3.Connection) -> bool:
+    """中文分词旁路索引：search_tok(tokens, src)，src 指向 search_fts 的 rowid。
+
+    为什么做成**旁路**而不是改 search_fts 的表结构：search_fts 是 [对话]/[会话摘要]/
+    [记忆]/[档] 这些行的**唯一存储**（decisions/runs 才有真表），动它的 schema 就得迁移
+    真实数据，风险不对等。旁路表纯派生、可随时重建，加错了删掉就行。
+    """
+    global _TOK_OK
+    if _TOK_OK is None:
+        try:
+            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS search_tok USING fts5(tokens, src UNINDEXED)")
+            _TOK_OK = bool(_FTS_OK)   # 主表退化成普通表时 rowid 语义不保证，索性一起降级
+        except Exception:
+            _TOK_OK = False
+    return _TOK_OK
+
+
 def _conn() -> sqlite3.Connection:
     config.ensure_dirs()
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
+    from . import memory_lock
+    memory_lock.tune(conn)   # WAL + busy_timeout：多端同时用时不再 'database is locked'
     conn.execute("""CREATE TABLE IF NOT EXISTS decisions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         asin TEXT, term TEXT, kind TEXT, decision TEXT, ts REAL, note TEXT)""")
@@ -43,12 +63,24 @@ def _conn() -> sqlite3.Connection:
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         asin TEXT, ts REAL, negatives INTEGER, scale INTEGER, reduce INTEGER, note TEXT)""")
     _detect_fts(conn)
+    _detect_tok(conn)
     conn.commit()
     return conn
 
 
 def _index(conn: sqlite3.Connection, text: str, asin: str, ts: float) -> None:
-    conn.execute("INSERT INTO search_fts (text, asin, ts) VALUES (?, ?, ?)", (text, asin, ts))
+    """写入检索行，并同步维护分词旁路索引。所有记忆写入（决策/巡检/记要点/对话/摘要/档）
+    都收口在这里，所以分词索引只要挂这一个点就不会漏。"""
+    cur = conn.execute("INSERT INTO search_fts (text, asin, ts) VALUES (?, ?, ?)", (text, asin, ts))
+    if _TOK_OK:
+        # 先清同 src 的旧行：**FTS5 删行后会复用 rowid**，sync_markdown_index 每次重灌 [档]
+        # 都可能让新行拿到刚被删的 rowid。不清就会留下"src 相同、内容却是上一条记录"的陈旧
+        # 分词行——它既不算孤儿（src 确实存在）也不算缺失，静默地把检索结果污染掉。
+        conn.execute("DELETE FROM search_tok WHERE src = ?", (cur.lastrowid,))
+        # asin 一并喂进分词索引：让「B08XYZ123 上次怎么处理的」这类查询命中该 ASIN 的所有行，
+        # 哪怕正文里没再重复写一遍 ASIN。
+        conn.execute("INSERT INTO search_tok (tokens, src) VALUES (?, ?)",
+                     (textseg.index_text(f"{text} {asin}"), cur.lastrowid))
 
 
 def record_decision(asin: str, term: str, kind: str, decision: str, note: str = "") -> None:
@@ -106,21 +138,62 @@ def _like_search(conn, query: str, limit: int):
                         "ORDER BY ts DESC LIMIT ?", (f"%{query}%", limit)).fetchall()
 
 
+def _tok_search(conn, query: str, limit: int):
+    """走分词旁路索引 + FTS5 内建 bm25 排序。
+
+    bm25() 返回的是**负分**（越负越相关），所以 ORDER BY score 升序就是相关度降序——
+    别看到负数就以为排反了。
+    """
+    mq = textseg.match_query(query)
+    if not mq:
+        return []
+    return conn.execute(
+        "SELECT f.rowid AS rowid, f.text AS text, f.asin AS asin, f.ts AS ts, "
+        "       bm25(search_tok) AS score "
+        "FROM search_tok JOIN search_fts f ON f.rowid = search_tok.src "
+        "WHERE search_tok MATCH ? ORDER BY score LIMIT ?", (mq, limit)).fetchall()
+
+
 def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
-    """全文检索。FTS5 的 unicode61 把整段中文当一个 token，无法子串匹配，
-    故 FTS 命中为空时回退到 LIKE 子串检索（保证中文回忆可用）。"""
+    """全文检索。三级降级：分词索引(bm25) → 原始 FTS → LIKE 子串。
+
+    第一级是主力：FTS5 自带的 unicode61 把整段中文当成一个 token，中文只有整段一模一样
+    才命中，等于中文检索失效；textseg 预先把中文切成 bigram 存进 search_tok，才让
+    "广告花钱太狠" 能召回 "广告花费太高"。后两级保留是为了老库（旁路索引还没建）
+    和 FTS5 不可用的环境仍能用。
+    """
+    # 空/纯标点查询直接返回空：否则会一路降级到 `LIKE '%%'`，把**整个记忆库**当成命中结果
+    # 灌回给模型。用分词结果判空而不是 strip()，因为"，。！"这种也应当算无检索内容。
+    if not textseg.tokenize(query or ""):
+        return []
+    # 候选池取得比 limit 大：语义重排要有"把词法排第 20 的那条捞上来"的余地，
+    # 池子等于 limit 的话重排就只能在已选中的几条里换顺序，等于没重排。
+    # 没有 dense 后端时 hybrid_rank 原样截前 limit 条，结果与扩池前**逐条相同**（顺序未变）。
+    pool = max(limit * 4, 24)
     conn = _conn()
     rows = []
     try:
-        if _FTS_OK:
+        if _TOK_OK:
+            rows = _tok_search(conn, query, pool)
+        if not rows and _FTS_OK:
             rows = conn.execute("SELECT rowid, text, asin, ts FROM search_fts WHERE search_fts MATCH ? "
-                                "ORDER BY rank LIMIT ?", (query, limit)).fetchall()
+                                "ORDER BY rank LIMIT ?", (query, pool)).fetchall()
         if not rows:
-            rows = _like_search(conn, query, limit)
+            rows = _like_search(conn, query, pool)
     except Exception:
-        rows = _like_search(conn, query, limit)
+        try:
+            rows = _like_search(conn, query, pool)
+        except Exception:
+            rows = []
     conn.close()
-    return [dict(r) for r in rows]
+    # score 只是内部排序用，不进对外结果（调用方按 text/asin/ts 消费，多一个键会污染 JSON 输出）
+    out = [{k: r[k] for k in ("rowid", "text", "asin", "ts")} for r in rows]
+    # 语义重排：没配 dense 后端时 hybrid_rank 原样返回，行为与纯词法完全一致
+    try:
+        from . import memory_vectors
+        return memory_vectors.hybrid_rank(query, out, lambda r: r["text"], limit=limit)
+    except Exception:   # noqa: BLE001 —— 语义是增益，挂了也必须还给调用方词法结果
+        return out[:limit]
 
 
 def index_rows(limit: int = 5000) -> list[dict[str, Any]]:
@@ -135,13 +208,75 @@ def index_rows(limit: int = 5000) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def rebuild_token_index(force: bool = False) -> dict[str, Any]:
+    """把分词旁路索引对齐到 search_fts（幂等、增量）。
+
+    三种漂移都要修：
+    1. **老库升级**：升级前写入的行没有分词索引 → 补齐；
+    2. **源行被删**：sync_markdown_index 会重写 [档] 行 → 清掉指向已消失 rowid 的孤儿；
+    3. **强制重建**：分词规则改版后 token 语义变了 → force=True 全量重来。
+
+    刻意做成增量而不是每次全量：启动路径上会调它，语料涨到几万条时全量重切会拖慢冷启动，
+    而增量的代价只和"这次新增/删除了多少行"成正比。
+    """
+    conn = _conn()
+    if not _TOK_OK:
+        conn.close()
+        return {"ok": False, "reason": "FTS5 不可用，分词索引已降级"}
+    try:
+        if force:
+            conn.execute("DELETE FROM search_tok")
+        removed = conn.execute(
+            "DELETE FROM search_tok WHERE src NOT IN (SELECT rowid FROM search_fts)").rowcount
+        # 同 src 的重复行只留最新一条（rowid 最大）。老库在修复 rowid 复用问题之前写入的
+        # 陈旧分词行就是这么攒下来的，光靠孤儿清理认不出来。
+        removed += max(0, conn.execute(
+            "DELETE FROM search_tok WHERE rowid NOT IN "
+            "(SELECT MAX(rowid) FROM search_tok GROUP BY src)").rowcount)
+        rows = conn.execute(
+            "SELECT rowid, text, asin FROM search_fts "
+            "WHERE rowid NOT IN (SELECT src FROM search_tok)").fetchall()
+        for r in rows:
+            conn.execute("INSERT INTO search_tok (tokens, src) VALUES (?, ?)",
+                         (textseg.index_text(f"{r['text']} {r['asin'] or ''}"), r["rowid"]))
+        conn.commit()
+        return {"ok": True, "added": len(rows), "removed": max(0, removed)}
+    except Exception as e:  # noqa: BLE001
+        from . import log
+        log.dbg("memory.rebuild_token_index", f"重建分词索引失败: {e!r}")
+        return {"ok": False, "reason": str(e)}
+    finally:
+        conn.close()
+
+
+# 情景记忆的行前缀。[档] 不算——它是策展 markdown 的派生副本，不是新发生的经历，
+# 拿它去反思等于把已经沉淀过的结论再嚼一遍。
+EPISODE_PREFIXES = ("[对话:", "[会话摘要]", "[记忆]", "[决策]", "[巡检]")
+
+
+def episodes_since(ts: float = 0.0, limit: int = 200) -> list[dict[str, Any]]:
+    """取某时刻之后的情景记忆，按时间正序（反思要按事情发生顺序读才看得出规律）。"""
+    conn = _conn()
+    like = " OR ".join("text LIKE ?" for _ in EPISODE_PREFIXES)
+    params: list[Any] = [f"{p}%" for p in EPISODE_PREFIXES]
+    rows = conn.execute(
+        f"SELECT rowid, text, asin, ts FROM search_fts WHERE ts > ? AND ({like}) "
+        "ORDER BY ts ASC LIMIT ?", [float(ts or 0.0), *params, int(limit)]).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def stats() -> dict[str, Any]:
     conn = _conn()
     d = conn.execute("SELECT COUNT(*) c, SUM(decision='approve') a, SUM(decision='reject') r FROM decisions").fetchone()
     n = conn.execute("SELECT COUNT(*) c FROM runs").fetchone()["c"]
+    rows = conn.execute("SELECT COUNT(*) c FROM search_fts").fetchone()["c"]
+    toks = conn.execute("SELECT COUNT(*) c FROM search_tok").fetchone()["c"] if _TOK_OK else 0
     conn.close()
     return {"decisions": d["c"] or 0, "approved": d["a"] or 0, "rejected": d["r"] or 0,
-            "runs": n, "fts": _FTS_OK, "db": str(DB_PATH)}
+            "runs": n, "fts": _FTS_OK, "db": str(DB_PATH),
+            # indexed/tokenized 不等时说明分词索引漂移了，rebuild_token_index() 可修
+            "indexed": rows, "tokenized": toks, "segmented_search": bool(_TOK_OK)}
 
 
 def note_path(asin: str = ""):
@@ -208,12 +343,27 @@ def sync_markdown_index() -> None:
         conn.close()
     except Exception:
         pass
+    # 上面刚删掉一批 [档] 源行，会在分词旁路索引里留下孤儿；顺手把索引对齐。
+    # 同时这也是老库（升级前的行没有分词索引）补齐的入口——它在 CLI 启动路径上被调用。
+    rebuild_token_index()
 
 
 def load_memory_digest(limit: int = 3500) -> str:
-    """启动注入用：全局 MEMORY.md 摘要 + 账户记忆索引，让 agent 开箱就知道记忆里有什么、不必每次
-    靠回忆检索（曾出现"文件里明明有、recall 却说没有"）。超长则截断，其余仍可用「回忆记忆」检索。"""
+    """启动注入用：分类记忆**索引层** + 全局 MEMORY.md 摘要 + 账户记忆索引，
+    让 agent 开箱就知道记忆里有什么、不必每次靠回忆检索
+    （曾出现"文件里明明有、recall 却说没有"）。超长则截断，其余仍可用「回忆记忆」检索。
+
+    索引层排在最前：它是每条记忆一行的目录，模型据此判断该取哪条正文，
+    比把正文全塞进来省得多——这是整套记忆方案省 token 的关键。
+    """
     parts: list[str] = []
+    try:
+        from . import memory_store
+        index = memory_store.index_digest()
+        if index:
+            parts.append("[分类记忆索引]（需要正文时用 memory_read/memory_search 取）\n" + index)
+    except Exception:
+        pass
     try:
         p = note_path("")
         if p.exists():

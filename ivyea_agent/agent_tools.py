@@ -14,7 +14,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from . import account_diagnosis, action_queue, actions as act_mod, competitor_audit, executor, guardrails, hooks, image_audit, knowledge, listing_audit, memory, ocr, offer_audit, permission, patrol as patrol_mod, profiles, review_audit, skills, tools_general
+from . import account_diagnosis, action_queue, actions as act_mod, competitor_audit, executor, guardrails, hooks, image_audit, knowledge, listing_audit, memory, memory_core, memory_store, ocr, offer_audit, permission, patrol as patrol_mod, profiles, review_audit, skills, tools_general
 from .rule_engine import RuleEngineError
 
 
@@ -192,9 +192,72 @@ TOOL_SCHEMAS = [
             "required": ["paths"]}}},
     {"type": "function", "function": {
         "name": "recall",
-        "description": "检索历史记忆(过往巡检、决策、记的要点)，跨会话回忆。",
+        "description": "跨会话统一回忆：一次查遍分类记忆、历史记录（巡检/决策/对话），"
+                       "并列出相关的知识卡与 Skill 指针。想不起来「上次怎么处理的」就用它。",
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "memory_write",
+        "description": ("把一件值得长期记住的事写成一条**分类记忆文件**（一事一文件）。"
+                        "只记：用户的问题/指令要点、关键过程、最终结论——不要把整段对话抄进去。"
+                        "四种操作：add 新建（会自动查重，撞上相近记忆会让你改用 update）；"
+                        "update 覆盖同名记忆的正文（事实变了、有新结论就更新，别新建第二条）；"
+                        "delete 删掉已被推翻的记忆；noop 表示本次没有值得沉淀的东西。"
+                        "默认合并优先于新建——同一件事分裂成多条会让记忆越用越碎。"
+                        f"分类：{'; '.join(f'{k}={v}' for k, v in memory_store.CATEGORIES.items())}"),
+        "parameters": {"type": "object", "properties": {
+            "operation": {"type": "string", "enum": ["add", "update", "delete", "noop"]},
+            "name": {"type": "string", "description": "记忆名，要让人能开口叫出来，如「领星广告方法论」"},
+            "content": {"type": "string", "description": "记忆正文：问题/指令、关键过程、结论"},
+            "category": {"type": "string", "enum": list(memory_store.CATEGORIES)},
+            "description": {"type": "string", "description": "一句话描述，会进索引层供日后判断相关性"},
+            "keywords": {"type": "string", "description": "逗号分隔的关键词，帮助日后检索"},
+            "links": {"type": "string", "description": "关联的其它记忆名，写成 [[名字]] 形式"},
+            "scope": {"type": "string",
+                      "description": "作用域：这条只对某个店铺/ASIN 成立时填，如 store:US主店 或 asin:B08XXX。"
+                                     "全局适用就留空。填错会让别的店铺读到不该用的规则。"},
+            "valid_from": {"type": "string", "description": "事实生效日期 YYYY-MM-DD，如「双十一起改成…」"},
+            "valid_until": {"type": "string",
+                            "description": "事实失效日期 YYYY-MM-DD。**已知是临时的就一定要填**"
+                                           "（如旺季阈值、促销期规则），到期自动不再进检索，"
+                                           "省得日后拿过期规则误导决策"}},
+            "required": ["operation"]}}},
+    {"type": "function", "function": {
+        "name": "memory_search",
+        "description": "在分类记忆里检索相关条目，返回名字/描述/正文。你的上下文里已有记忆索引目录，"
+                       "先看目录判断哪条相关，需要正文时用这个或 memory_read 取。",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer"}}, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "memory_read",
+        "description": "按名字读取一条分类记忆的完整正文。",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "category": {"type": "string"}}, "required": ["name"]}}},
+    {"type": "function", "function": {
+        "name": "core_memory_view",
+        "description": "查看核心记忆块的当前内容。核心记忆每轮都在你的上下文里，改之前先看一眼，"
+                       "避免重复写入或改错位置。",
+        "parameters": {"type": "object", "properties": {
+            "block": {"type": "string", "enum": ["user", "agents"],
+                      "description": "user=用户画像；agents=账户打法与边界"}},
+            "required": ["block"]}}},
+    {"type": "function", "function": {
+        "name": "core_memory_edit",
+        "description": ("更新核心记忆——**关于用户本人或长期打法的事实**，写进去以后每轮常驻你的上下文，"
+                        "不需要检索就一直知道。什么时候用：用户表达了长期偏好('以后都用中文汇报')、"
+                        "定下了长期规则('品牌词永远不否')、纠正了你的做法、或透露了稳定的身份/目标信息。"
+                        "什么时候**不要**用：一次性的任务细节、某个 ASIN 的具体数据、会过期的临时状态——"
+                        "那些用 remember 写进普通记忆即可。"
+                        f"块：{'; '.join(k + '=' + v[1] for k, v in memory_core.BLOCKS.items())}"),
+        "parameters": {"type": "object", "properties": {
+            "block": {"type": "string", "enum": ["user", "agents"]},
+            "operation": {"type": "string", "enum": ["append", "replace", "remove"],
+                          "description": "append=追加一条；replace=把 old 精确换成 content；remove=删掉含 old 的行"},
+            "content": {"type": "string", "description": "append/replace 的新内容"},
+            "old": {"type": "string", "description": "replace/remove 的原文，必须唯一命中"}},
+            "required": ["block", "operation"]}}},
     {"type": "function", "function": {
         "name": "ivyea_ops_list_tools",
         "description": "仅 IvyeaOps 嵌入模式可用：列出当前用户可调用的 IvyeaOps 板块工具，包括 Home、市场、Listing、广告审计、领星、资讯、监控，**以及 AI 作图（image_generate）**。用户提出作图/出图/画一张/生成主图之类的需求时，先用这个查一下 —— 宿主机器上通常已经配好了生图链路，别直接回答\"我没有图像生成能力\"。",
@@ -374,6 +437,70 @@ def _t_remember(args: dict, ctx: ToolContext) -> str:
     return memory.remember(args.get("text", ""), args.get("asin") or ctx.asin)
 
 
+def _t_memory_write(args: dict, ctx: ToolContext) -> str:
+    res = memory_store.apply(
+        (args.get("operation") or "").strip(),
+        name=args.get("name") or "",
+        content=args.get("content") or "",
+        category=args.get("category") or "",
+        description=args.get("description") or "",
+        keywords=args.get("keywords") or "",
+        links=args.get("links") or "",
+        scope=args.get("scope") or "",
+        valid_from=args.get("valid_from") or "",
+        valid_until=args.get("valid_until") or "",
+    )
+    return res.get("message", "")
+
+
+def _t_memory_search(args: dict, ctx: ToolContext) -> str:
+    hits = memory_store.search(args.get("query", ""), limit=int(args.get("limit") or 8))
+    if not hits:
+        return "（分类记忆里没有相关条目）"
+    # 联想：把命中记忆显式链接到的那几条一并带出来（限 1 跳、限条数）。
+    # 这些是作者写下的"这两件事相关"，往往正是回答问题真正需要的那一半。
+    linked = memory_store.expand_linked([memory_store.get(h["name"], h["category"]) for h in hits])
+    extra = [e.to_dict() for e in linked[len(hits):]]
+    out = []
+    for h in hits + extra:
+        # 正文截断：检索结果是给模型判断"要不要细看"的，要全文用 memory_read
+        body = h["body"].strip()
+        if len(body) > 800:
+            body = body[:800] + f"\n…（正文共 {len(h['body'])} 字，用 memory_read 取全文）"
+        tag = f"（相关度 {h['score']}）" if h.get("score") else "（关联带出）"
+        note = " ⚠推断" if h.get("confidence", 1.0) < memory_store.UNCERTAIN_BELOW else ""
+        out.append(f"### [{h['category']}/{h['name']}]{tag}{note}\n"
+                   f"{h['description']}\n{body}")
+    return "\n\n".join(out)
+
+
+def _t_memory_read(args: dict, ctx: ToolContext) -> str:
+    e = memory_store.get(args.get("name", ""), args.get("category") or "")
+    if not e:
+        return f"没有找到名为 {args.get('name')!r} 的记忆。用 memory_search 查一下确切名字。"
+    return f"### [{e.category}/{e.name}]\n{e.description}\n\n{e.body}"
+
+
+def _t_core_memory_view(args: dict, ctx: ToolContext) -> str:
+    block = (args.get("block") or "").strip()
+    if block not in memory_core.BLOCKS:
+        return f"未知的记忆块 {block!r}，可选：{', '.join(memory_core.BLOCKS)}"
+    text = memory_core.view(block)
+    if not text.strip():
+        return f"{memory_core.BLOCKS[block][0]} 目前是空的。"
+    return text
+
+
+def _t_core_memory_edit(args: dict, ctx: ToolContext) -> str:
+    res = memory_core.edit(
+        (args.get("block") or "").strip(),
+        (args.get("operation") or "").strip(),
+        args.get("content") or "",
+        args.get("old") or "",
+    )
+    return res.get("message", "")
+
+
 def _t_knowledge_search(args: dict, ctx: ToolContext) -> str:
     query = str(args.get("query") or "")
     evidence = knowledge.evidence_context(query, limit=int(args.get("limit") or 5))
@@ -461,11 +588,46 @@ def _t_run_image_ocr(args: dict, ctx: ToolContext) -> str:
 
 
 def _t_recall(args: dict, ctx: ToolContext) -> str:
-    hits = memory.search(args.get("query", ""), limit=8)
-    if not hits:
-        return "（记忆里没有相关记录）"
-    import time as _t
-    return "\n".join(f"  · {_t.strftime('%m-%d', _t.localtime(h['ts']))} {h['text']}" for h in hits)
+    """统一回忆：分类记忆（提炼过的）→ 情景记忆（原始片段）→ 知识/Skill 指针。
+
+    知识卡和 Skill 只回**指针**（标题 + 取用工具），不回正文：knowledge 的正文必须经
+    knowledge_search → evidence_context 走一遍，才会登记引证键；这里直接把正文吐出来，
+    模型就会拿着没登记的 [K?] 键去标注结论，引证契约当场作废。指针既打通了"知道有这个"，
+    又不绕过登记。
+    """
+    query = str(args.get("query") or "")
+    blocks: list[str] = []
+
+    # 1) 分类记忆优先：它是提炼过的结论，比原始对话片段密度高得多
+    curated = memory_store.search(query, limit=4)
+    if curated:
+        blocks.append("【分类记忆】（用 memory_read 取全文）\n" + "\n".join(
+            f"  · [{h['category']}/{h['name']}] {h['description'] or h['body'][:60]}" for h in curated))
+
+    # 2) 情景记忆：原始片段，用于"上次聊到的那个…"这类模糊回忆
+    hits = memory.search(query, limit=6)
+    if hits:
+        import time as _t
+        blocks.append("【历史记录】\n" + "\n".join(
+            f"  · {_t.strftime('%m-%d', _t.localtime(h['ts']))} {h['text'][:160]}" for h in hits))
+
+    # 3) 知识 / Skill：只给指针
+    try:
+        cards = knowledge.search(query, limit=3)
+        if cards:
+            blocks.append("【相关知识卡】（要用作依据必须调 knowledge_search 取，才有引证键）\n"
+                          + "\n".join(f"  · {c['title']}（{c['id']}）" for c in cards))
+    except Exception:  # noqa: BLE001 —— 知识库缺失不该让回忆整个失败
+        pass
+    try:
+        found = skills.search(query, limit=3)
+        if found:
+            blocks.append("【相关 Skill】（用 skill_search 取流程）\n"
+                          + "\n".join(f"  · {sk.title}（{sk.id}）" for sk, _ in found))
+    except Exception:  # noqa: BLE001
+        pass
+
+    return "\n\n".join(blocks) if blocks else "（记忆里没有相关记录）"
 
 
 def _t_rollback(args: dict, ctx: ToolContext) -> str:
@@ -588,6 +750,11 @@ _DISPATCH = {
     "execute_actions": _t_execute_actions,
     "rollback": _t_rollback,
     "remember": _t_remember,
+    "memory_write": _t_memory_write,
+    "memory_search": _t_memory_search,
+    "memory_read": _t_memory_read,
+    "core_memory_view": _t_core_memory_view,
+    "core_memory_edit": _t_core_memory_edit,
     "knowledge_search": _t_knowledge_search,
     "skill_search": _t_skill_search,
     "run_listing_audit": _t_run_listing_audit,
@@ -662,7 +829,11 @@ READONLY_TOOLS = (PARALLEL_SAFE - {"dispatch_subagent"}) | {
     "code_search", "code_symbols", "code_impact", "code_repair",
     "mcp_list_tools", "mcp_list_resources", "mcp_read_resource",
     "mcp_list_prompts", "mcp_get_prompt",
-    "knowledge_search", "skill_search", "recall", "self_critique",
+    # core_memory_view 只读文件；core_memory_edit 故意**不**进只读集：
+    # 子 agent 不该改主人的长期画像，那是主线才有权做的决定。
+    "knowledge_search", "skill_search", "recall", "self_critique", "core_memory_view",
+    # memory_search/read 只读；memory_write 不进——子 agent 的探索结论该由主线判断要不要沉淀
+    "memory_search", "memory_read",
     "run_patrol", "run_account_diagnosis", "propose_actions",
     "run_listing_audit", "run_review_audit", "run_offer_audit",
     "run_competitor_audit", "run_image_audit", "run_image_ocr",

@@ -144,13 +144,19 @@ def configure_embeddings(
     model: str = "",
     model_path: str | None = None,
     allow_download: bool | None = None,
+    api_base: str = "",
+    api_model: str = "",
+    api_key_env: str = "",
 ) -> dict[str, Any]:
-    """Configure the optional local semantic embedding backend."""
+    """Configure the optional semantic embedding backend (local model or HTTP API)."""
     return retrieval_embeddings.configure(
         backend=backend,
         model=model,
         model_path=model_path,
         allow_download=allow_download,
+        api_base=api_base,
+        api_model=api_model,
+        api_key_env=api_key_env,
     )
 
 
