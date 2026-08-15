@@ -49,10 +49,15 @@ def dense(monkeypatch, ivyea_home):
 
 # ── 降级契约 ────────────────────────────────────────────────────────────────
 def test_no_dense_backend_returns_lexical_order_unchanged(ivyea_home):
-    """默认（hash 后端）下必须原样返回词法顺序——这是整个语义层的安全网。"""
+    """没有 dense 后端时必须原样返回词法顺序——这是整个语义层的安全网。
+
+    默认后端已经是内置模型（有语义），所以这里显式关掉语义来测这条安全网本身；
+    不关的话测的就变成"融合有没有改顺序"，那是另一回事。
+    """
     from ivyea_agent import memory_vectors
     items = [{"t": "甲"}, {"t": "乙"}, {"t": "丙"}]
-    out = memory_vectors.hybrid_rank("随便", items, lambda x: x["t"], limit=2)
+    with memory_vectors.lexical_only():
+        out = memory_vectors.hybrid_rank("随便", items, lambda x: x["t"], limit=2)
     assert out == items[:2]
 
 
@@ -314,10 +319,10 @@ def test_api_backend_missing_key_reports_clearly(ivyea_home, monkeypatch):
     retrieval_embeddings.configure(backend="api", api_base="http://127.0.0.1:1",
                                    api_key_env="NOPE_KEY")
     st = retrieval_embeddings.status()
-    # key 没配 → 不该走 api，但也不该把语义整个关掉：退到随包的自带查表
+    # key 没配 → 不该走 api，但也不该把语义整个关掉：退到随包的内置模型
     assert st["active_backend"] != retrieval_embeddings.API_BACKEND
     assert st["semantic_enabled"] is True
-    assert st["active_backend"] == retrieval_embeddings.STATIC_BACKEND
+    assert st["active_backend"] == retrieval_embeddings.BUILTIN_BACKEND
     # 原因必须说清楚，否则用户只会觉得"配了没反应"
     assert "NOPE_KEY" in st["fallback_reason"]
 
@@ -329,20 +334,20 @@ def test_api_backend_missing_base_reports_clearly(ivyea_home, monkeypatch):
     st = retrieval_embeddings.status()
     assert st["active_backend"] != retrieval_embeddings.API_BACKEND
     assert st["semantic_enabled"] is True
-    assert st["active_backend"] == retrieval_embeddings.STATIC_BACKEND
+    assert st["active_backend"] == retrieval_embeddings.BUILTIN_BACKEND
     assert "api_base" in st["fallback_reason"]
 
 
 def test_default_backend_is_bundled_and_semantic(ivyea_home):
-    """默认必须**零依赖零配置**——但现在这件事由随包的静态查表满足，而不是退回没有语义。
+    """默认必须**零依赖零配置**——但现在这件事由随包的内置模型满足，而不是退回没有语义。
 
     旧契约是"默认 hash"，那等于所有人装完都没有语义检索，除非自己去配 API 或装
-    2G 的本地模型。static 同样不联网、不要 key、不加依赖，但真的能按语义召回。
+    2G 的本地模型。builtin 同样不联网、不要 key、无需额外配置，但真的能按语义召回。
     """
     from ivyea_agent import retrieval_embeddings
     st = retrieval_embeddings.status()
-    assert st["configured_backend"] == retrieval_embeddings.STATIC_BACKEND
-    assert st["active_backend"] == retrieval_embeddings.STATIC_BACKEND
+    assert st["configured_backend"] == retrieval_embeddings.BUILTIN_BACKEND
+    assert st["active_backend"] == retrieval_embeddings.BUILTIN_BACKEND
     assert st["semantic_enabled"] is True
     # 零依赖仍是硬约束：不许因此要求用户装 sentence-transformers 或配 key
     assert st["external_dependency"] is False

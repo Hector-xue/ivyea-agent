@@ -37,8 +37,10 @@ def test_retrieval_combines_knowledge_and_memory(ivyea_home):
     caps = result["capabilities"]
     assert caps["local"] is True
     assert caps["local_vectors"]["enabled"] is True
-    # 默认后端已从 hash 换成随包的静态查表：零依赖零联网，但真的有语义
-    assert caps["index"]["backend"] == "static"
+    # 持久索引这一层**刻意固定稀疏**（上千分块，用真模型编码一次要 6 分钟，
+    # 而 search 在索引缺失时会同步重建 —— 那就是一次搜索卡死几分钟）。
+    assert caps["index"]["backend"] == "local_hash_embedding_v1"
+    # 语义在别处：分类记忆的检索走内置模型的稠密向量
     assert caps["semantic_vectors"]["enabled"] is True
 
 
@@ -56,7 +58,7 @@ def test_retrieval_index_rebuild_and_status(ivyea_home):
 
     status = retrieval_index.status()
     assert status["enabled"] is True
-    assert status["backend"] == "static"
+    assert status["backend"] == "local_hash_embedding_v1"
     assert status["chunks"] == rebuilt["chunks"]
     assert status["memory_chunks"] == rebuilt["memory_chunks"]
     assert status["needs_rebuild"] is False
@@ -65,7 +67,7 @@ def test_retrieval_index_rebuild_and_status(ivyea_home):
     hits = retrieval_index.search("主图 转化", limit=3)
     assert hits
     assert hits[0]["source"] == "knowledge_index"
-    assert hits[0]["match"] == "static"
+    assert hits[0]["match"] == "local_hash_embedding_v1"
 
     memory_hits = retrieval_index.search("Prime Day 品牌词预算", limit=3, sources=["memory"])
     assert memory_hits
@@ -90,8 +92,8 @@ def test_retrieval_embeddings_status_and_config(ivyea_home):
     from ivyea_agent import retrieval
 
     default = retrieval.embeddings_status()
-    assert default["configured_backend"] == "static"
-    assert default["active_backend"] == "static"
+    assert default["configured_backend"] == "builtin"
+    assert default["active_backend"] == "builtin"
     assert default["semantic_enabled"] is True
     assert default["offline_safe"] is True
     local_model = ivyea_home / "models" / "embedding" / "bge-small"
@@ -107,16 +109,16 @@ def test_retrieval_embeddings_status_and_config(ivyea_home):
         allow_download=False,
     )
     assert semantic["configured_backend"] == "sentence-transformers"
-    # 依赖没装 → 退到**自带查表**而不是退回没有语义。配错一个字就把语义层整个关掉太苛刻。
+    # 依赖没装 → 退到**内置模型**而不是退回没有语义。配错一个字就把语义层整个关掉太苛刻。
     assert semantic["semantic_enabled"] is True
-    assert semantic["active_backend"] == "static"
+    assert semantic["active_backend"] == "builtin"
     assert semantic["fallback_reason"]
     probe = retrieval.probe_embeddings()
     assert probe["ready"] is True
-    assert probe["active_backend"] == "static"
+    assert probe["active_backend"] == "builtin"
 
     rebuilt = retrieval.rebuild_index()
-    assert rebuilt["backend"] == "static"
+    assert rebuilt["backend"] == "local_hash_embedding_v1"
     assert rebuilt["embeddings"]["configured_backend"] == "sentence-transformers"
 
 
@@ -149,17 +151,17 @@ def test_retrieval_cli_outputs_json(ivyea_home, capsys):
 
     assert main(["retrieval", "embeddings", "--json"]) == 0
     emb = json.loads(capsys.readouterr().out)
-    assert emb["embeddings"]["active_backend"] == "static"
+    assert emb["embeddings"]["active_backend"] == "builtin"
 
     assert main(["retrieval", "embeddings", "--backend", "sentence-transformers", "--no-download", "--json"]) == 0
     emb = json.loads(capsys.readouterr().out)
     assert emb["embeddings"]["configured_backend"] == "sentence-transformers"
-    assert emb["embeddings"]["active_backend"] == "static"
+    assert emb["embeddings"]["active_backend"] == "builtin"
 
     assert main(["retrieval", "embeddings", "--probe", "--json"]) == 0
     emb = json.loads(capsys.readouterr().out)
     assert "probe" in emb
-    assert emb["probe"]["active_backend"] == "static"
+    assert emb["probe"]["active_backend"] == "builtin"
 
     assert main(["retrieval", "index", "--json"]) == 0
     indexed = json.loads(capsys.readouterr().out)
@@ -173,7 +175,7 @@ def test_retrieval_cli_outputs_json(ivyea_home, capsys):
 
     assert main(["retrieval", "status", "--json"]) == 0
     status = json.loads(capsys.readouterr().out)
-    assert status["index"]["backend"] == "static"
+    assert status["index"]["backend"] == "local_hash_embedding_v1"
     assert status["index"]["needs_rebuild"] is False
 
     assert main(["retrieval", "search", "否词", "--limit", "3", "--json"]) == 0
@@ -1116,9 +1118,10 @@ def test_local_service_health_and_retrieval(ivyea_home, monkeypatch):
             status = json.loads(resp.read().decode("utf-8"))
         assert status["ok"] is True
         assert status["index"]["enabled"] is True
-        # 换了向量后端（static dense → sparse）必须要求重建：两种向量算不出可比的余弦，
-        # 不重建就是拿新查询去比一堆旧类型的向量，结果是安静的乱序。
-        assert status["index"]["needs_rebuild"] is True
+        # 换 embedding 后端**不该**让持久索引失效：这一层固定用稀疏向量，
+        # 存的东西根本没变。以前把后端算进指纹，用户一改配置就被判"索引过期"，
+        # 重建出来还是同一批向量，纯属白跑。
+        assert status["index"]["needs_rebuild"] is False
     finally:
         server.shutdown()
         server.server_close()

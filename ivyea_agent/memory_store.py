@@ -428,6 +428,10 @@ def get(name: str, category: str = "") -> Optional[Entry]:
     return None
 
 
+# 一次检索最多花在"现算向量"上的秒数，见 search() 里的说明。
+SEARCH_EMBED_SECONDS = 1.5
+
+
 # ── 检索 ────────────────────────────────────────────────────────────────────
 def search(query: str, limit: int = 8, *, scope: str = "",
            include_expired: bool = False, record: bool = True) -> List[Dict[str, Any]]:
@@ -461,7 +465,12 @@ def search(query: str, limit: int = 8, *, scope: str = "",
     from . import memory_vectors
     ranked = memory_vectors.hybrid_rank(
         query, entries, lambda e: f"{e.header_text} {e.body[:1500]}",
-        limit=limit, lex_ranked=lex_ranked, budget=max(len(entries), memory_vectors.MAX_EMBED_PER_CALL))
+        limit=limit, lex_ranked=lex_ranked,
+        budget=max(len(entries), memory_vectors.MAX_EMBED_PER_CALL),
+        # 时间护栏：条数不设上限（快后端一次算完），但一次检索最多花这么久现算向量。
+        # 内置模型一条长记忆约 240ms，没有这道闸的话 400 条的库首次检索要卡 97 秒。
+        # 没算到的条目这轮就只走词法，下次检索再补几条，`ivyea memory embed` 可一次算完。
+        time_budget=SEARCH_EMBED_SECONDS)
     # 记一次召回：这是"用得多不多、最近用没用过"的唯一数据来源，
     # 没有它遗忘就只能按时间拍脑袋。放在返回前、失败不影响检索。
     #

@@ -284,25 +284,43 @@ ivyea memory reindex          # 重建中文分词索引（升级后或提示漂
 
 对话里直接说「记住…」「回忆…」「更新一下某某记忆」也都可以。
 
-**启用语义检索**（可选，不配也能用，只是少一路召回）：
+**语义检索**：装完就有，不用配任何东西。
+
+包里带了一个 24MB 的 bge-small-zh（ONNX int8），装 ivyea-agent 时一并装好，
+**不需要 API key、不需要联网、不需要 torch**。换个说法提问也能召回：
 
 ```bash
-# 方式一：接任意 OpenAI 兼容的 embedding 端点（推荐，不占内存）
+ivyea retrieval embeddings          # 看它是否真的生效
+ivyea memory embed                  # 预热：把现有记忆一次性向量化（首次建议跑一下）
+```
+
+实测（153 条口语化提问 / 52 篇中文记忆，问题措辞由模型改写、不含原文词）：
+MRR 0.381 → 0.483（+27%），关键词检索召不回的 64 条里净多召回 9 条。
+
+<details><summary>想要更强 / 想关掉</summary>
+
+```bash
+# 接远端 embeddings 接口（模型更强，但记忆正文会出网）
 ivyea retrieval embeddings --backend api \
     --api-base https://<供应商>/v1 --api-model <模型名> --api-key-env EMBEDDING_API_KEY
-# 然后把 key 写进 ~/.ivyea/.env 的 EMBEDDING_API_KEY
+# key 写进 ~/.ivyea/.env 的 EMBEDDING_API_KEY
 
-# 方式二：本地模型，离线可用，但需要约 2G 内存和 300MB 磁盘
-pip install "ivyea-agent[semantic]"
+# 本地完整模型（需要约 2G 内存和 300MB 磁盘）
+pipx inject ivyea-agent sentence-transformers   # 注意：一键脚本装的是 pipx 环境，
+                                                 # 用 pip install 装到系统 Python 里 agent 是看不见的
 ivyea retrieval embeddings --backend sentence-transformers --model-path <模型目录>
+
+# 只要关键词检索
+ivyea retrieval embeddings --backend sparse
 ```
+</details>
 
 ```bash
 ivyea retrieval index                 # 把知识库 + 记忆写入本地持久检索索引
 ivyea retrieval search "高点击 零单 是否否词"
 ```
 
-默认索引后端 `local_hash_embedding_v1` 不依赖外部向量库，开箱可用；需要本地 dense embedding 时可装 `pip install "ivyea-agent[semantic]"` 并配 `sentence-transformers` 模型，失败自动降级回 hash 索引。
+持久索引这一层用的是零成本的词频稀疏向量（上千个分块，用真模型编码一遍要几分钟，不适合在搜索里同步做）；语义发生在记忆检索那条路径上，见上文。
 
 ---
 

@@ -25,9 +25,13 @@ classifiers = [
 ]
 dependencies = [
     "pandas>=2.0",
-    # 自带语义检索（static_embedding）的查表运算靠它。pandas 本来就会拖进来，
-    # 但那是**传递依赖**——显式写出来才是契约，否则哪天 pandas 换了依赖就静默失效。
+    # 自带语义检索（onnx_embedding）要用。pandas 本来就会拖进来，但那是**传递依赖**——
+    # 显式写出来才是契约，否则哪天 pandas 换了依赖就静默失效。
     "numpy>=1.21",
+    # 随包的 bge-small-zh（ONNX int8，24MB）靠它跑，这是"装完就有语义检索"的前提。
+    # 纯 CPU 轮子约 19MB，Linux/Windows/macOS 都有——**刻意不是 torch**：
+    # pip 默认会给 Linux 拉 GB 级的 CUDA 版，小内存机器直接被 OOM 杀掉。
+    "onnxruntime>=1.16",
     "openpyxl>=3.1",
     "httpx>=0.27",
     "prompt_toolkit>=3.0",
@@ -75,6 +79,6 @@ namespaces = true
 
 [tool.setuptools.package-data]
 "ivyea_agent.rule_engine_scripts" = ["*.csv"]
-# data/static_embedding.npz 是"装完就有语义检索"的全部依赖（约 4.5MB 的 int8 查表）。
-# 漏进 wheel 的话不会报错，只会静默退回词法检索——tests/test_packaging.py 盯着这件事。
-"ivyea_agent" = ["knowledge_base/*.json", "knowledge_base/**/*.md", "skills_builtin/**/*.json", "skills_builtin/**/*.md", "data/*.npz", "data/*.json"]
+# data/embedding_int8.onnx + 词表是"装完就有语义检索"的全部依赖（约 24MB）。
+# 漏进 wheel 的话不会报错，只会静默退回词法检索——tests/test_packaging_builtin_model.py 盯着这件事。
+"ivyea_agent" = ["knowledge_base/*.json", "knowledge_base/**/*.md", "skills_builtin/**/*.json", "skills_builtin/**/*.md", "data/*.onnx", "data/*.json", "data/*.txt"]

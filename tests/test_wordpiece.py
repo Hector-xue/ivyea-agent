@@ -1,7 +1,7 @@
 """纯 Python WordPiece 分词的守卫测试。
 
-**为什么值得单独测**：它是静态语义查表的入口——切出来的 token 和蒸馏时差一个，
-就查到别的行去了，向量变成噪音，而且**不会报任何错**，只会让检索悄悄变差。
+**为什么值得单独测**：它是内置语义模型的入口——切出来的 token id 和模型训练时对不上，
+算出来的向量就是噪音，而且**不会报任何错**，只会让检索悄悄变差。
 
 装了 transformers 时会拿 HuggingFace 的 BertTokenizer 逐 token 对拍（开发机/CI）；
 没装就退回固定用例（用户机不该为了跑测试装 2G 依赖）。
@@ -12,14 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from ivyea_agent import static_embedding, wordpiece
+from ivyea_agent import onnx_embedding, wordpiece
 
 
 @pytest.fixture(scope="module")
 def vocab():
-    state = static_embedding._load()
+    state = onnx_embedding._load()
     if not state:
-        pytest.skip(f"静态向量表不可用：{static_embedding.unavailable_reason()}")
+        pytest.skip(f"内置模型不可用：{onnx_embedding.unavailable_reason()}")
     return state["vocab"]
 
 
