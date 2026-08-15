@@ -56,7 +56,9 @@ def _load() -> Optional[Dict[str, Any]]:
             return None
         try:
             z = np.load(path, allow_pickle=False)
-            vocab_list = [str(t) for t in z["vocab"]]
+            # 词表是一整块换行分隔的字符串：整块 split 比逐个 str() 快一倍多，
+            # 也不用把每条按最长 token 补齐。空行是有意义的（vocab.txt 里就有 3 个）。
+            vocab_list = str(z["vocab_blob"]).split("\n")
             # 词表按"后来者覆盖"建索引：vocab.txt 里有 3 个空行，HuggingFace 就是这么处理的，
             # 换成"首次出现优先"会和蒸馏时用的 id 对不上，查表整体错位。
             vocab = {tok: i for i, tok in enumerate(vocab_list)}

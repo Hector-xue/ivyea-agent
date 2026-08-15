@@ -171,7 +171,10 @@ def main() -> int:
         weights=weights,
         doc_mean=doc_mean.astype(np.float32),
         pcs=pcs.astype(np.float32),
-        vocab=np.array(vocab_list, dtype=object).astype("U"),
+        # 词表存成**一整块换行分隔的字符串**，而不是 21128 个元素的 unicode 数组：
+        # 后者会把每条按最长 token 补齐（浪费），加载时还要逐个转 str（30ms）。
+        # 整块 split 只要 13ms。token 本身不可能含换行（vocab.txt 就是按行存的）。
+        vocab_blob=np.array("\n".join(vocab_list)),
     )
     out.with_suffix(".meta.json").write_text(json.dumps({
         "source_model": "BAAI/bge-small-zh-v1.5",
