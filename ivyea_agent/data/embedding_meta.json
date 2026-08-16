@@ -1,0 +1,9 @@
+{
+  "source_model": "BAAI/bge-small-zh-v1.5",
+  "pooling": "cls",
+  "normalized": true,
+  "max_seq_length": 512,
+  "dimensions": 512,
+  "quantization": "onnxruntime dynamic int8",
+  "fingerprint": "7961517d6f1e9495"
+}

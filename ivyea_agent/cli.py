@@ -2424,10 +2424,11 @@ def _cmd_memory(args: argparse.Namespace) -> int:
         from . import memory_vectors
         vs = memory_vectors.stats()
         if not vs["semantic"]:
-            print("语义检索未启用（当前 hash 后端，纯词法）。启用方式：")
-            print("  ivyea retrieval embeddings --backend api \\")
-            print("      --api-base https://<供应商>/v1 --api-model <模型> --api-key-env EMBEDDING_API_KEY")
-            print("  然后把 key 写进 ~/.ivyea/.env 的 EMBEDDING_API_KEY")
+            print("语义检索未启用（当前只有关键词检索）。")
+            print("正常情况下随包的内置模型会自动生效，先看看它为什么没起来：")
+            print("  ivyea retrieval embeddings --probe")
+            print("如果是刻意关掉的（配成了 sparse），恢复：")
+            print("  ivyea retrieval embeddings --backend builtin")
             return 0
         # 预热：把现有分类记忆的向量一次性算好，避免第一次检索时集中现算卡顿
         entries = memory_store.list_entries()
@@ -3515,10 +3516,28 @@ def _cmd_retrieval(args: argparse.Namespace) -> int:
             emb = data["embeddings"]
             print("Ivyea 本地语义检索后端")
             print("")
+            # 头一行先给结论。以前只列一堆字段，用户看半天也不知道"到底有没有语义"——
+            # 而这恰恰是唯一要紧的信息。
+            if emb.get("semantic_enabled"):
+                where = {"builtin": "内置模型（随包发布，无需联网/无需 key）",
+                         "api": "远端 embeddings 接口",
+                         "sentence-transformers": "本地完整模型"}.get(emb.get("active_backend"), "")
+                print(f"✓ 语义检索已生效 —— {where}")
+            else:
+                print("✗ 语义检索未生效，当前只有关键词检索")
+                if emb.get("fallback_reason"):
+                    print(f"  原因：{emb.get('fallback_reason')}")
+            print("")
             print(f"- configured_backend: {emb.get('configured_backend')}")
             print(f"- active_backend: {emb.get('active_backend')}")
             print(f"- semantic_enabled: {emb.get('semantic_enabled')}")
             print(f"- vector_kind: {emb.get('vector_kind')}")
+            builtin = emb.get("builtin_model") or {}
+            if builtin.get("available"):
+                print(f"- builtin_model: {builtin.get('source_model')} · {builtin.get('dimensions')} 维 · "
+                      f"{builtin.get('quantization')}（{builtin.get('size_bytes', 0) / 1e6:.0f} MB）")
+            elif builtin.get("reason"):
+                print(f"- builtin_model: 不可用（{builtin.get('reason')}）")
             print(f"- model: {emb.get('model')}")
             print(f"- model_path: {emb.get('model_path') or '-'}")
             candidates = emb.get("local_model_candidates") or []
@@ -3984,8 +4003,9 @@ def build_parser() -> argparse.ArgumentParser:
     pret.add_argument("query", nargs="?")
     pret.add_argument("--limit", type=int, default=8)
     pret.add_argument("--source", action="append", choices=["knowledge", "memory"], help="限定来源，可重复")
-    pret.add_argument("--backend", choices=["hash", "sentence-transformers", "sentence_transformers", "api"],
-                      help="检索向量后端：hash(零依赖默认) / sentence-transformers(本地离线，需 ~2G 内存) / api(通用 OpenAI 兼容端点)")
+    pret.add_argument("--backend", choices=["builtin", "sparse", "hash", "sentence-transformers", "sentence_transformers", "api"],
+                      help="检索向量后端：builtin(默认，随包自带模型，零配置) / api(通用 OpenAI 兼容端点) / "
+                           "sentence-transformers(本地完整模型，需 ~2G 内存) / sparse(关掉语义，只留关键词)")
     pret.add_argument("--api-base", help="api 后端：OpenAI 兼容 embeddings 端点，如 https://api.siliconflow.cn/v1")
     pret.add_argument("--api-model", help="api 后端：embedding 模型名，如 BAAI/bge-m3")
     pret.add_argument("--api-key-env", help="api 后端：存放 key 的环境变量名（写在 ~/.ivyea/.env），默认 EMBEDDING_API_KEY")

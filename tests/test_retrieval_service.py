@@ -37,8 +37,11 @@ def test_retrieval_combines_knowledge_and_memory(ivyea_home):
     caps = result["capabilities"]
     assert caps["local"] is True
     assert caps["local_vectors"]["enabled"] is True
+    # 持久索引这一层**刻意固定稀疏**（上千分块，用真模型编码一次要 6 分钟，
+    # 而 search 在索引缺失时会同步重建 —— 那就是一次搜索卡死几分钟）。
     assert caps["index"]["backend"] == "local_hash_embedding_v1"
-    assert caps["semantic_vectors"]["enabled"] is False
+    # 语义在别处：分类记忆的检索走内置模型的稠密向量
+    assert caps["semantic_vectors"]["enabled"] is True
 
 
 def test_retrieval_index_rebuild_and_status(ivyea_home):
@@ -89,9 +92,9 @@ def test_retrieval_embeddings_status_and_config(ivyea_home):
     from ivyea_agent import retrieval
 
     default = retrieval.embeddings_status()
-    assert default["configured_backend"] == "hash"
-    assert default["active_backend"] == "local_hash_embedding_v1"
-    assert default["semantic_enabled"] is False
+    assert default["configured_backend"] == "builtin"
+    assert default["active_backend"] == "builtin"
+    assert default["semantic_enabled"] is True
     assert default["offline_safe"] is True
     local_model = ivyea_home / "models" / "embedding" / "bge-small"
     local_model.mkdir(parents=True)
@@ -106,12 +109,13 @@ def test_retrieval_embeddings_status_and_config(ivyea_home):
         allow_download=False,
     )
     assert semantic["configured_backend"] == "sentence-transformers"
-    assert semantic["semantic_enabled"] is False
-    assert semantic["active_backend"] == "local_hash_embedding_v1"
+    # 依赖没装 → 退到**内置模型**而不是退回没有语义。配错一个字就把语义层整个关掉太苛刻。
+    assert semantic["semantic_enabled"] is True
+    assert semantic["active_backend"] == "builtin"
     assert semantic["fallback_reason"]
     probe = retrieval.probe_embeddings()
     assert probe["ready"] is True
-    assert probe["active_backend"] == "local_hash_embedding_v1"
+    assert probe["active_backend"] == "builtin"
 
     rebuilt = retrieval.rebuild_index()
     assert rebuilt["backend"] == "local_hash_embedding_v1"
@@ -147,17 +151,17 @@ def test_retrieval_cli_outputs_json(ivyea_home, capsys):
 
     assert main(["retrieval", "embeddings", "--json"]) == 0
     emb = json.loads(capsys.readouterr().out)
-    assert emb["embeddings"]["active_backend"] == "local_hash_embedding_v1"
+    assert emb["embeddings"]["active_backend"] == "builtin"
 
     assert main(["retrieval", "embeddings", "--backend", "sentence-transformers", "--no-download", "--json"]) == 0
     emb = json.loads(capsys.readouterr().out)
     assert emb["embeddings"]["configured_backend"] == "sentence-transformers"
-    assert emb["embeddings"]["active_backend"] == "local_hash_embedding_v1"
+    assert emb["embeddings"]["active_backend"] == "builtin"
 
     assert main(["retrieval", "embeddings", "--probe", "--json"]) == 0
     emb = json.loads(capsys.readouterr().out)
     assert "probe" in emb
-    assert emb["probe"]["active_backend"] == "local_hash_embedding_v1"
+    assert emb["probe"]["active_backend"] == "builtin"
 
     assert main(["retrieval", "index", "--json"]) == 0
     indexed = json.loads(capsys.readouterr().out)
@@ -1101,19 +1105,22 @@ def test_local_service_health_and_retrieval(ivyea_home, monkeypatch):
 
         req = urllib.request.Request(
             f"http://{host}:{port}/v1/retrieval/embeddings",
-            data=json.dumps({"backend": "hash"}).encode("utf-8"),
+            data=json.dumps({"backend": "sparse"}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             configured = json.loads(resp.read().decode("utf-8"))
         assert configured["ok"] is True
-        assert configured["embeddings"]["configured_backend"] == "hash"
+        assert configured["embeddings"]["configured_backend"] == "sparse"
 
         with urllib.request.urlopen(f"http://{host}:{port}/v1/retrieval/status", timeout=5) as resp:
             status = json.loads(resp.read().decode("utf-8"))
         assert status["ok"] is True
         assert status["index"]["enabled"] is True
+        # 换 embedding 后端**不该**让持久索引失效：这一层固定用稀疏向量，
+        # 存的东西根本没变。以前把后端算进指纹，用户一改配置就被判"索引过期"，
+        # 重建出来还是同一批向量，纯属白跑。
         assert status["index"]["needs_rebuild"] is False
     finally:
         server.shutdown()

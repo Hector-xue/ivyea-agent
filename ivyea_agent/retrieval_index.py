@@ -1,9 +1,14 @@
 """Persistent local retrieval index.
 
-This is a no-dependency retrieval substrate for IvyeaOps integration. It stores
-knowledge chunks plus a deterministic sparse vector in SQLite. The backend is
-not a neural embedding model; it is a stable local fallback that can be replaced
-by a downloaded embedding model later without changing the service contract.
+这一层**刻意固定用词频稀疏向量**，不跟随 `retrieval_embeddings` 的后端配置。
+
+原因是规模：索引里是上千个分块（本机实测 1538 个），用内置的真模型编码一遍要 6 分钟，
+而 `search()` 在索引缺失或过期时会**同步重建**——那就是一次搜索卡死几分钟。
+稀疏向量零成本、确定性、随时可重建，正是这一层要的性质。
+
+语义检索发生在别处：分类记忆的检索（`memory_store.search` → `memory_vectors`）走内置
+模型的稠密向量，并且有时间护栏。让知识卡也用上稠密向量是后续工作，前提是先解决
+"上千分块怎么增量向量化而不卡住任何一次搜索"。
 """
 from __future__ import annotations
 
@@ -63,7 +68,10 @@ def status() -> dict[str, Any]:
     updated_at = ""
     indexed_fingerprint = ""
     emb_status = retrieval_embeddings.status()
-    vector_backend = emb_status["active_backend"]
+    # 这一层固定稀疏（见模块说明），所以 backend 报的就是 BACKEND，
+    # 不跟随 embedding 配置——否则换个后端就会把索引标记成"需要重建"，
+    # 而重建出来的其实还是同一批稀疏向量。
+    vector_backend = BACKEND
     vector_kind = emb_status["vector_kind"]
     if exists:
         conn = _conn()
@@ -103,8 +111,12 @@ def status() -> dict[str, Any]:
 
 
 def source_fingerprint(*, emb_status: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Fingerprint knowledge, memory, and embedding backend for cheap sync checks."""
-    emb = emb_status or retrieval_embeddings.status()
+    """给 sync 用的廉价变更检测：只看知识与记忆的内容。
+
+    `emb_status` 参数保留是为了不改调用方签名——但**刻意不再参与指纹**：这一层固定
+    稀疏向量，换 embedding 后端不影响它存的东西，算进去只会导致无谓的重建。
+    """
+    del emb_status
     knowledge_parts = []
     for card in knowledge.list_cards():
         knowledge_parts.append("|".join([
@@ -121,9 +133,10 @@ def source_fingerprint(*, emb_status: dict[str, Any] | None = None) -> dict[str,
             _hash(str(row.get("text") or "")),
         ]))
     payload = {
-        "backend": emb.get("active_backend", ""),
-        "vector_kind": emb.get("vector_kind", ""),
-        "model": emb.get("model", "") if emb.get("semantic_enabled") else "",
+        # 指纹里刻意**不含** embedding 后端：这一层固定稀疏，换后端不影响它存的向量。
+        # 含进去的话，用户一改 embedding 配置就会被判定"索引过期"，重建出来还是同一批东西。
+        "backend": BACKEND,
+        "vector_kind": "sparse",
         "knowledge": sorted(knowledge_parts),
         "memory": sorted(memory_parts),
     }
@@ -132,8 +145,8 @@ def source_fingerprint(*, emb_status: dict[str, Any] | None = None) -> dict[str,
         "fingerprint": _hash(raw),
         "knowledge_cards": len(knowledge_parts),
         "memory_rows": len(memory_parts),
-        "backend": emb.get("active_backend", ""),
-        "vector_kind": emb.get("vector_kind", ""),
+        "backend": BACKEND,
+        "vector_kind": "sparse",
     }
 
 
@@ -185,7 +198,7 @@ def rebuild() -> dict[str, Any]:
                 " ".join(card.get("tags") or []),
                 text,
             ])
-            vector = retrieval_embeddings.encode_document(vector_text)
+            vector = retrieval_embeddings.encode_sparse(vector_text)
             conn.execute(
                 "INSERT OR REPLACE INTO chunks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
@@ -208,7 +221,7 @@ def rebuild() -> dict[str, Any]:
         source_id = f"memory:{rowid or int(ts)}"
         tags = ["memory"] + ([asin] if asin else [])
         vector_text = " ".join([asin, text])
-        vector = retrieval_embeddings.encode_document(vector_text)
+        vector = retrieval_embeddings.encode_sparse(vector_text)
         conn.execute(
             "INSERT OR REPLACE INTO chunks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
@@ -221,8 +234,8 @@ def rebuild() -> dict[str, Any]:
         chunk_count += 1
         memory_count += 1
     _set_meta(conn, "backend", BACKEND)
-    _set_meta(conn, "vector_backend", emb["active_backend"])
-    _set_meta(conn, "vector_kind", emb["vector_kind"])
+    _set_meta(conn, "vector_backend", BACKEND)
+    _set_meta(conn, "vector_kind", "sparse")
     _set_meta(conn, "updated_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)))
     _set_meta(conn, "source_fingerprint", fp["fingerprint"])
     conn.commit()
@@ -230,9 +243,9 @@ def rebuild() -> dict[str, Any]:
     return {
         "ok": True,
         "changed": True,
-        "backend": emb["active_backend"],
+        "backend": BACKEND,
         "index_backend": BACKEND,
-        "vector_kind": emb["vector_kind"],
+        "vector_kind": "sparse",
         "knowledge_cards": card_count,
         "memory_chunks": memory_count,
         "sources": {"knowledge": card_count, "memory": memory_count},
@@ -250,9 +263,10 @@ def search(query: str, limit: int = 8, sources: list[str] | tuple[str, ...] | No
         return []
     if not db_path().exists() or status()["chunks"] == 0:
         rebuild()
-    qvec = retrieval_embeddings.encode_query(q)
+    qvec = retrieval_embeddings.encode_sparse_query(q)
     if not qvec:
         return []
+    vector_backend = str(qvec.get("backend") or BACKEND)
     wanted = _normal_sources(sources)
     conn = _conn()
     placeholders = ",".join("?" * len(wanted))
@@ -274,7 +288,9 @@ def search(query: str, limit: int = 8, sources: list[str] | tuple[str, ...] | No
             "title": row["title"],
             "snippet": _snippet(text, terms),
             "score": int(12 + sim * 80),
-            "match": BACKEND,
+            # 报**实际使用的向量后端**，不是索引实现的名字（index_backend 才是那个）。
+            # 硬编码 BACKEND 的话，dense 后端下这条会谎称命中来自 hash 稀疏向量。
+            "match": vector_backend,
             "vector_score": round(sim, 4),
             "scope": row["scope"],
             "source_type": row["source_type"],

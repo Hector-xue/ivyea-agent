@@ -92,7 +92,14 @@ def backend_key() -> Tuple[str, str, bool]:
     st = retrieval_embeddings.status()
     active = str(st.get("active_backend") or "")
     dense = bool(st.get("semantic_enabled")) and not _FORCE_LEXICAL
-    model = str(st.get("api_model") if active == retrieval_embeddings.API_BACKEND else st.get("model") or "")
+    if active == retrieval_embeddings.API_BACKEND:
+        model = str(st.get("api_model") or "")
+    elif active == retrieval_embeddings.BUILTIN_BACKEND:
+        # 内置模型要用**指纹**而不是来源模型名：换了模型或量化方式之后名字可能一样，
+        # 缓存里的旧向量会被当成有效继续用——数值全错且不报错。
+        model = str((st.get("builtin_model") or {}).get("identity") or "builtin")
+    else:
+        model = str(st.get("model") or "")
     return active, model, dense
 
 
@@ -134,17 +141,29 @@ def _dense_values(payload: Dict[str, Any]) -> Optional[List[float]]:
     return None
 
 
-def embed_texts(texts: Sequence[str], *, budget: int = MAX_EMBED_PER_CALL) -> Dict[str, List[float]]:
-    """取一批文本的向量（缓存优先）。返回 {text_hash: vector}，拿不到的键直接缺席。"""
+def embed_texts(texts: Sequence[str], *, budget: int = MAX_EMBED_PER_CALL,
+                time_budget: float = 0.0) -> Dict[str, List[float]]:
+    """取一批文本的向量（缓存优先）。返回 {text_hash: vector}，拿不到的键直接缺席。
+
+    `time_budget`（秒，>0 生效）是给**检索路径**用的护栏：不同后端的编码速度差两个数量级
+    （内置模型一条长记忆约 240ms，hash 后端几乎为零），按条数定预算在慢后端上就是灾难——
+    一个 400 条的记忆库首次检索要现算 97 秒，用户看到的就是"卡死"。
+    改成按时间截止：快的后端一次就全算完，慢的每次多算几条、越用越全，
+    而且**永远不会把一次检索拖成分钟级**。想一次性算完请用 `ivyea memory embed`。
+    """
     backend, model, dense = backend_key()
     if not dense or not texts:
         return {}
+    import time as _time
+    deadline = (_time.monotonic() + time_budget) if time_budget > 0 else 0.0
     hashes = [_hash(t) for t in texts]
     conn = _conn()
     try:
         vectors = _cached(conn, hashes, backend, model)
         missing = [(h, t) for h, t in zip(hashes, texts) if h not in vectors]
         for text_hash, text in missing[:budget]:
+            if deadline and _time.monotonic() >= deadline:
+                break
             payload = retrieval_embeddings.encode_document(text)
             values = _dense_values(payload)
             if values is None:
@@ -213,7 +232,8 @@ def _min_similarity() -> float:
 
 
 def vector_recall(query: str, items: List[Any], text_of: Callable[[Any], str],
-                  *, budget: int = MAX_EMBED_PER_CALL, top_n: int = 0) -> List[int]:
+                  *, budget: int = MAX_EMBED_PER_CALL, top_n: int = 0,
+                  time_budget: float = 0.0) -> List[int]:
     """**独立的**向量召回：对全部候选算余弦，返回按相似度降序的下标列表。
 
     注意这是一条独立召回路径，不是对词法结果的重排。早先的实现把语义做成"重排词法
@@ -230,7 +250,7 @@ def vector_recall(query: str, items: List[Any], text_of: Callable[[Any], str],
     if not qvec:
         return []
     texts = [text_of(it) for it in items]
-    vectors = embed_texts(texts, budget=budget)
+    vectors = embed_texts(texts, budget=budget, time_budget=time_budget)
     if not vectors:
         return []
     floor = _min_similarity()
@@ -269,7 +289,8 @@ def fuse(lex_ranked: Sequence[int], vec_ranked: Sequence[int], *, limit: int) ->
 
 def hybrid_rank(query: str, items: List[Any], text_of: Callable[[Any], str],
                 *, limit: int = 8, lex_ranked: Optional[Sequence[int]] = None,
-                budget: int = MAX_EMBED_PER_CALL) -> List[Any]:
+                budget: int = MAX_EMBED_PER_CALL,
+                time_budget: float = 0.0) -> List[Any]:
     """双路召回 + RRF 融合。
 
     `lex_ranked` 是词法召回的下标排名；省略时视为"items 已按词法序排好且全部命中"
@@ -282,7 +303,7 @@ def hybrid_rank(query: str, items: List[Any], text_of: Callable[[Any], str],
     _, _, dense = backend_key()
     if not dense:
         return [items[i] for i in lex[:limit]]
-    vec = vector_recall(query, items, text_of, budget=budget,
+    vec = vector_recall(query, items, text_of, budget=budget, time_budget=time_budget,
                         top_n=max(limit * VEC_CANDIDATE_FACTOR, VEC_CANDIDATE_MIN))
     if not vec:
         return [items[i] for i in lex[:limit]]

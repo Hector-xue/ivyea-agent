@@ -18,13 +18,24 @@ from . import config
 
 
 HASH_BACKEND = "local_hash_embedding_v1"
+# 配置值 "sparse" = 显式关掉语义。**不能存成 "hash"**：那个字符串被当作"老的默认值"
+# 迁移到 builtin 了，存 hash 等于关不掉。
+SPARSE_BACKEND = "sparse"
+BUILTIN_BACKEND = "builtin"
 SENTENCE_BACKEND = "sentence-transformers"
 API_BACKEND = "api"
+# 默认后端。**刻意是 builtin 而不是 hash**：hash 只是词频稀疏向量，根本不是语义，
+# 而语义检索以前要么配 API（多一个 key + 记忆正文出网）、要么装 2G 依赖——
+# 门槛的结果是绝大多数用户装完压根没有语义。builtin 是随包发布的 bge-small-zh
+# （ONNX int8，24MB），零配置零联网装完即用；要更强的仍可切 api / sentence-transformers。
+DEFAULT_BACKEND = BUILTIN_BACKEND
 DEFAULT_SENTENCE_MODEL = "BAAI/bge-small-zh-v1.5"
 # 通用 OpenAI 兼容 /v1/embeddings 的默认值。刻意不绑定任何供应商：
 # ivyea-agent 是自托管 CLI，主脑可能是 DeepSeek（**实测无 embeddings 接口，404**）、
 # 也可能是硅基流动/OpenAI/Jina/本地 Ollama。用户指哪打哪，才不会因为换了主脑就没语义检索。
 DEFAULT_API_MODEL = "BAAI/bge-m3"
+# 内置模型的来源，只用于对外显示"这批向量是谁生成的"
+BUILTIN_MODEL = "bge-small-zh-v1.5-int8"
 API_TIMEOUT = 30.0
 
 QUERY_ALIASES = {
@@ -64,7 +75,7 @@ def api_settings() -> dict[str, str]:
 
 
 def status() -> dict[str, Any]:
-    backend = _normal_backend(str(config.get_setting("retrieval_embedding_backend", "hash")))
+    backend = _normal_backend(str(config.get_setting("retrieval_embedding_backend", DEFAULT_BACKEND)))
     model = str(config.get_setting("retrieval_embedding_model", DEFAULT_SENTENCE_MODEL) or DEFAULT_SENTENCE_MODEL)
     model_path = str(config.get_setting("retrieval_embedding_model_path", "") or "")
     allow_download = bool(config.get_setting("retrieval_embedding_allow_download", False))
@@ -72,9 +83,19 @@ def status() -> dict[str, Any]:
     path_exists = bool(model_path and Path(model_path).expanduser().exists())
     local_candidates = _local_model_candidates()
 
+    from . import onnx_embedding
+
     api = api_settings()
     api_requested = backend == API_BACKEND
     api_ready = api_requested and bool(api["base"]) and bool(api["key"])
+
+    builtin_requested = backend == BUILTIN_BACKEND
+    # 内置模型是否**可用**，与用户配没配它无关：它是所有 dense 后端的兜底。
+    # 用户配了 API 但 key 没填、配了本地模型但没装依赖——这些情况该退到内置语义，
+    # 而不是一路退回"没有语义"。配错一个字就把整个语义层关掉，太苛刻了。
+    builtin_available = onnx_embedding.available()
+    builtin_ready = builtin_requested and builtin_available
+    sparse_requested = backend == SPARSE_BACKEND
 
     semantic_requested = backend == SENTENCE_BACKEND
     semantic_ready = semantic_requested and package_available and (path_exists or allow_download)
@@ -89,11 +110,17 @@ def status() -> dict[str, Any]:
         fallback_reason = "retrieval_embedding_api_base is not configured"
     elif api_requested and not api["key"]:
         fallback_reason = f"环境变量 {api['key_env']} 未设置（在 ~/.ivyea/.env 里配）"
+    elif builtin_requested and not builtin_ready:
+        fallback_reason = onnx_embedding.unavailable_reason() or "内置 embedding 模型不可用"
 
-    if api_ready:
+    if sparse_requested:
+        active, kind, dense = HASH_BACKEND, "sparse", False
+    elif api_ready:
         active, kind, dense = API_BACKEND, "dense", True
     elif semantic_ready:
         active, kind, dense = SENTENCE_BACKEND, "dense", True
+    elif builtin_available:
+        active, kind, dense = BUILTIN_BACKEND, "dense", True
     else:
         active, kind, dense = HASH_BACKEND, "sparse", False
 
@@ -106,6 +133,8 @@ def status() -> dict[str, Any]:
         "api_model": api["model"],
         "api_key_env": api["key_env"],
         "api_ready": api_ready,
+        "builtin_ready": builtin_ready,
+        "builtin_model": onnx_embedding.info(),
         "model": model,
         "model_path": model_path,
         "model_path_exists": path_exists,
@@ -158,6 +187,26 @@ def encode_document(text: str) -> dict[str, Any]:
     return _encode(text)
 
 
+def encode_sparse(text: str) -> dict[str, Any]:
+    """强制走词频稀疏向量，不看当前配置。
+
+    给 `retrieval_index` 这类**成千上万个分块**的场景用：它们要的是"零成本、确定性、
+    可即时重建"的基底，不是语义。用真模型编码 1538 个分块要 6 分钟，塞进一次搜索里
+    就是卡死——而搜索本来就会在索引缺失时同步重建。
+    """
+    return _hash_payload(text)
+
+
+def encode_sparse_query(text: str) -> dict[str, Any]:
+    """稀疏向量的**查询**侧编码：先做别名扩展再编码。
+
+    别漏掉扩展这一步：知识卡正文是英文，用户查的是中文，全靠 QUERY_ALIASES 把
+    "主图"扩成 "main image hero image" 才能命中。少了它，中文查询对英文语料直接零命中
+    （实测 `retrieval_index.search("主图 转化")` 从有结果变成空）。
+    """
+    return _hash_payload(_expand_query(text))
+
+
 def encode_query(text: str) -> dict[str, Any]:
     return _encode(_expand_query(text))
 
@@ -176,7 +225,12 @@ def probe(text: str = "ivyea retrieval embedding probe") -> dict[str, Any]:
         }
     active = st["active_backend"]
     try:
-        values = _api_vector(text, st) if active == API_BACKEND else _sentence_vector(text, st)
+        if active == API_BACKEND:
+            values = _api_vector(text, st)
+        elif active == BUILTIN_BACKEND:
+            values = _builtin_vector(text)
+        else:
+            values = _sentence_vector(text, st)
     except Exception as exc:
         return {
             "ok": False,
@@ -236,7 +290,22 @@ def _encode(text: str) -> dict[str, Any]:
             return {"kind": "dense", "backend": SENTENCE_BACKEND, "model": st["model"], "values": values}
         except Exception as exc:
             return _hash_payload(text, f"{type(exc).__name__}: {exc}")
+    if active == BUILTIN_BACKEND:
+        try:
+            values = _builtin_vector(text)
+            if values:
+                return {"kind": "dense", "backend": BUILTIN_BACKEND,
+                        "model": BUILTIN_MODEL, "values": values}
+        except Exception as exc:
+            return _hash_payload(text, f"{type(exc).__name__}: {exc}")
+        # 纯标点/空串这类切不出 token 的输入：没有语义可言，退回稀疏就好
+        return _hash_payload(text)
     return _hash_payload(text)
+
+
+def _builtin_vector(text: str) -> list[float]:
+    from . import onnx_embedding
+    return onnx_embedding.encode(text) or []
 
 
 def _api_vector(text: str, st: dict[str, Any]) -> list[float]:
@@ -281,12 +350,20 @@ def _sentence_vector(text: str, st: dict[str, Any]) -> list[float]:
 
 
 def _normal_backend(value: str) -> str:
-    raw = (value or "hash").strip().lower().replace("_", "-")
+    raw = (value or DEFAULT_BACKEND).strip().lower().replace("_", "-")
     if raw in ("sentence", "sentence-transformer", "sentence-transformers", "semantic"):
         return SENTENCE_BACKEND
     if raw in ("api", "openai", "openai-compatible", "remote", "http"):
         return API_BACKEND
-    return "hash"
+    if raw in ("builtin", "static", "bundled", "local", "onnx"):
+        return BUILTIN_BACKEND
+    if raw in ("sparse", "none", "off", "lexical"):
+        # 显式关掉语义的逃生口（调试、或者真的不想要向量）
+        return SPARSE_BACKEND
+    # "hash" 是**旧的默认值**，不是谁主动选的——它压根不是语义，只是当年"零依赖"
+    # 的占位。升级到自带静态表之后，老部署 settings.json 里躺着的这个 hash 应当
+    # 跟着走到 builtin（同样零配置零联网，但真的有语义）。要保留稀疏请写 "sparse"。
+    return DEFAULT_BACKEND
 
 
 def _local_model_root() -> Path:
