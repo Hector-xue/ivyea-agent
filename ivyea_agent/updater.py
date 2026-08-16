@@ -96,31 +96,65 @@ def _source_repo() -> Path | None:
         return None
 
 
-def update_commands() -> list[list[str]]:
+REPO_URL = f"https://github.com/{_REPO}.git"
+
+
+def source_url(ref: str) -> str:
+    """pip 能装的源地址。**装 tag，不装 PyPI，也不装 main。**
+
+    `ivyea-agent` 从来没发布到 PyPI（实测 404），旧实现却对 pip/pipx 用户返回
+    `pip install --upgrade ivyea-agent` —— 那条命令必然失败。更麻烦的是这个名字
+    在 PyPI 上是空的，随时可能被人抢注，届时它会给用户装上**别人的包**。
+
+    也不用 `@main`：更新检测比的是 GitHub 最新 **release tag**，装 main 就意味着
+    "提示你更新到 v1.13.0，实际给你装了含未发布代码的 main"。发行流水线
+    (release.yml) 早就刻意拒绝回退 main，这里保持同一策略。
+    """
+    return f"git+{REPO_URL}@{ref}"
+
+
+def update_commands(ref: str = "") -> list[list[str]]:
     """本机的更新命令（跨平台，**不依赖 bash**——Windows 没有 bash，旧版把命令包成
     `bash -lc` 直接 WinError 2）：
-    - 源码仓 → `git pull`（git 跨平台在 PATH）。
-    - pipx 安装 → 直接跑 `pipx upgrade ivyea-agent`（解析 pipx 可执行文件绝对路径，
-      Windows 下即 pipx.exe）。
-    - 其余（venv / ivyea-runtime / unknown）→ 用当前解释器的 pip 升级，无 PATH/shell 依赖。
+    - 源码仓 → `git pull`（开发机；不把开发者硬拽到某个 tag 上）。
+    - pipx 安装 → `pipx install --force <git+...@tag>`（pipx 没有"从 VCS 升级"的
+      子命令，--force 重装是官方做法）。
+    - 其余（venv / ivyea-runtime / unknown）→ 当前解释器的 pip 装同一个 tag。
+
+    `ref` 为空表示调用方没解析出 release tag —— 这时**不返回 pip/pipx 命令**，
+    宁可让上层报"取不到版本"，也不能退回 PyPI 或 main 去装一个来路不明的东西。
     """
     root = _source_repo()
     if root is not None:
         return [["git", "-C", str(root), "pull", "--ff-only"]]
+    if not ref:
+        return []
+    url = source_url(ref)
     try:
         from . import self_manage
         info = self_manage.install_info()
         if info.get("method") == "pipx":
             pipx = shutil.which("pipx") or (info.get("pipx") or "") or "pipx"
-            return [[pipx, "upgrade", "ivyea-agent"]]
+            return [[pipx, "install", "--force", url]]
     except Exception:
         pass
-    return [[sys.executable, "-m", "pip", "install", "--upgrade", "ivyea-agent"]]
+    # 不加 --no-deps：版本之间会新增依赖（1.13.0 就加了 Pillow / rapidocr），
+    # 跳过依赖会让新功能装完即坏，且坏得很安静。
+    return [[sys.executable, "-m", "pip", "install", "--upgrade",
+             "--no-cache-dir", "--force-reinstall", url]]
 
 
 def do_update() -> tuple[bool, str]:
     """执行更新命令，返回 (ok, 合并输出)。"""
-    cmds = update_commands()
+    ref = ""
+    if _source_repo() is None:
+        ref = _fetch_latest(timeout=8.0) or ""
+        if not ref:
+            return False, ("取不到 GitHub 最新 release，已中止更新。\n"
+                           "这里**故意不回退**到 main 或 PyPI —— 前者会装上未发布代码，"
+                           "后者根本不存在这个包。请检查网络后重试，或用 "
+                           "IVYEA_AGENT_REF 指定版本手动安装。")
+    cmds = update_commands(ref)
     if not cmds:
         return False, "没有可用的更新命令。"
     out: list[str] = []
