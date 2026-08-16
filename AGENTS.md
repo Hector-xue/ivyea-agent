@@ -86,4 +86,4 @@ systemctl restart ivyea-agent        # 生产 serve（127.0.0.1:8765）改完重
 ## 想了解这个项目怎么走到今天
 
 - [CHANGELOG.md](./CHANGELOG.md) —— 81 个版本的人话说明
-- [docs/decisions/](./docs/decisions/) —— 7 份 ADR，为什么这么选
+- [docs/decisions/](./docs/decisions/) —— 8 份 ADR，为什么这么选

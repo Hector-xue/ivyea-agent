@@ -25,6 +25,7 @@ git log 记得住「改了什么」，记不住「为什么不选另一条路」
 | [0005](./0005-stream-reliability.md) | 长任务不能因为客户端断开就白跑 | 2026-07-16 |
 | [0006](./0006-memory-and-retrieval.md) | 记忆三层架构与语义双路召回 | 2026-08-15 |
 | [0007](./0007-vision-tier-chain.md) | 视觉三档降级链 | 2026-08-16 |
+| [0008](./0008-borrow-from-deepseek-harness.md) | 对标 DeepSeek Harness：借上下文经济学，不借插件架构 | 2026-08-16 |
 
 相关的工作台侧决策见
 [IvyeaOps 的 ADR 目录](https://github.com/Hector-xue/IvyeaOps/tree/main/docs/decisions)，
