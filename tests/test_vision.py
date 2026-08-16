@@ -176,13 +176,17 @@ class _SeenProvider:
         return {"content": self.reply, "tool_calls": []}
 
 
-def test_route_images_passthrough_when_main_has_vision(tmp_path, monkeypatch):
+def test_route_images_passthrough_when_main_has_vision(tmp_path, monkeypatch, ivyea_home):
     from ivyea_agent import vision
     img = tmp_path / "a.png"
     _png(img)
-    mcfg = {"provider_id": "openai", "provider": "openai"}
-    content, imgs = vision.route_images("看图", [str(img)], mcfg, lambda s: None)
+    # 判定改成按**模型**而非按 provider：同一个 openai，gpt-4o 能看图、
+    # 老的 text-davinci 不能，所以 mcfg 必须带 model。
+    mcfg = {"provider_id": "openai", "provider": "openai", "model": "gpt-4o",
+            "api_mode": "chat_completions"}
+    content, imgs, tier = vision.route_images("看图", [str(img)], mcfg, lambda s: None)
     assert content == "看图" and imgs == [str(img)]     # 有视觉：原样透传，不剥图
+    assert tier["tier"] == vision.TIER_MAIN
 
 
 def test_route_images_sidecar_injects_and_strips(tmp_path, monkeypatch, ivyea_home):
@@ -194,10 +198,11 @@ def test_route_images_sidecar_injects_and_strips(tmp_path, monkeypatch, ivyea_ho
     monkeypatch.setattr(providers, "from_settings", lambda cfg, key: prov)
     notes = []
     mcfg = {"provider_id": "deepseek", "provider": "deepseek"}   # 主脑无视觉
-    content, imgs = vision.route_images("这图说明什么？", [str(img)], mcfg, notes.append)
+    content, imgs, tier = vision.route_images("这图说明什么？", [str(img)], mcfg, notes.append)
     assert imgs == []                                   # 图已剥掉，主脑只见文本
     assert "销量趋势图" in content and "视觉模型" in content and "这图说明什么？" in content
     assert any("视觉旁路代读" in n for n in notes)
+    assert tier["tier"] == vision.TIER_SIDECAR
     # sidecar 收到的是多模态 content（含 image_url）且带用户问题原文
     user = prov.seen[-1]
     assert isinstance(user["content"], list)
@@ -205,27 +210,67 @@ def test_route_images_sidecar_injects_and_strips(tmp_path, monkeypatch, ivyea_ho
     assert "这图说明什么" in user["content"][0]["text"]
 
 
-def test_route_images_no_vision_provider_available(tmp_path, monkeypatch, ivyea_home):
+def test_route_images_falls_to_local_cv_when_no_vision_model(tmp_path, monkeypatch, ivyea_home):
+    """T3：没有任何视觉模型时**不再丢图**，改用本地 CV 量化回灌。
+
+    旧行为是 warn 一句然后把图片扔掉，模型对着空气编结论——这比降级更糟，
+    也正是 Listing 图片分析长期静默空转的根因。
+    """
+    from ivyea_agent import vision
+    img = tmp_path / "a.png"
+    _png(img, 1200, 1200)
+    monkeypatch.setattr(vision, "pick_vision_model", lambda: None)
+    notes = []
+    content, imgs, tier = vision.route_images("看图", [str(img)], {"provider_id": "deepseek"}, notes.append)
+    assert imgs == []                                   # 图不再随请求发出
+    assert tier["tier"] == vision.TIER_LOCAL_CV
+    assert "看图" in content                            # 原问题保留
+    assert "本地视觉度量" in content                     # CV 读数已注入
+    assert "1200×1200" in content
+    assert any("本地 CV" in n for n in notes)
+
+
+def test_route_images_sidecar_error_degrades_to_local_cv(tmp_path, monkeypatch, ivyea_home):
+    """视觉旁路挂了要继续往下降到 T3，而不是直接放弃图片。"""
+    from ivyea_agent import vision
+    img = tmp_path / "a.png"
+    _png(img, 1000, 1000)
+    monkeypatch.setattr(vision, "pick_vision_model", _fake_pick)
+    monkeypatch.setattr(vision, "sidecar_describe", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("api down")))
+    notes = []
+    content, imgs, tier = vision.route_images("看图", [str(img)], {"provider_id": "deepseek"}, notes.append)
+    assert imgs == []
+    assert tier["tier"] == vision.TIER_LOCAL_CV
+    assert any("视觉旁路调用失败" in n for n in notes)
+
+
+def test_route_images_gives_up_only_when_local_cv_also_dead(tmp_path, monkeypatch, ivyea_home):
+    """三档全灭才回到"忽略图片"，且必须明确 warn。"""
     from ivyea_agent import vision
     img = tmp_path / "a.png"
     _png(img)
     monkeypatch.setattr(vision, "pick_vision_model", lambda: None)
+    monkeypatch.setattr(vision, "local_cv_describe", lambda *a, **k: ("", ""))
     notes = []
-    content, imgs = vision.route_images("看图", [str(img)], {"provider_id": "deepseek"}, notes.append)
-    assert imgs == [] and content == "看图"             # 忽略图片继续文本
-    assert any("没有可用的视觉模型" in n for n in notes)
+    content, imgs, tier = vision.route_images("看图", [str(img)], {"provider_id": "deepseek"}, notes.append)
+    assert imgs == [] and content == "看图" and tier["tier"] == 0
+    assert any("忽略图片" in n for n in notes)
 
 
-def test_route_images_sidecar_error_fail_open(tmp_path, monkeypatch, ivyea_home):
+def test_chain_status_reports_tier(monkeypatch, ivyea_home):
+    """/health 的 vision_chain：ops 靠它判 agent 能不能接带图任务。"""
     from ivyea_agent import vision
-    img = tmp_path / "a.png"
-    _png(img)
-    monkeypatch.setattr(vision, "pick_vision_model", _fake_pick)
-    monkeypatch.setattr(vision, "sidecar_describe", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("api down")))
-    notes = []
-    content, imgs = vision.route_images("看图", [str(img)], {"provider_id": "deepseek"}, notes.append)
-    assert imgs == [] and content == "看图"
-    assert any("视觉旁路调用失败" in n for n in notes)
+    monkeypatch.setattr(vision, "pick_vision_model", lambda: None)
+    st = vision.chain_status({"provider_id": "deepseek", "model": "deepseek-chat",
+                              "api_mode": "chat_completions"})
+    assert st["tier"] == vision.TIER_LOCAL_CV
+    assert st["effective"] is True                      # 主脑没视觉 ≠ 这条链没视觉
+    assert st["main"]["vision"] is False
+    assert st["local_cv"]["available"] is True
+
+    st1 = vision.chain_status({"provider_id": "openai", "model": "gpt-4o",
+                               "api_mode": "chat_completions"})
+    assert st1["tier"] == vision.TIER_MAIN
 
 
 def test_pick_vision_model_prefers_config_key(monkeypatch, ivyea_home):
@@ -238,10 +283,47 @@ def test_pick_vision_model_prefers_config_key(monkeypatch, ivyea_home):
 
 
 def test_pick_vision_model_auto_detects_first_configured(monkeypatch, ivyea_home):
-    from ivyea_agent import vision
-    for env in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"):
-        monkeypatch.delenv(env, raising=False)
+    from ivyea_agent import models, vision
+    # 现在**任何**带视觉模型的 provider 配了 key 都算数（不再是三家白名单），
+    # 所以要清空全部候选的 key_env 才能构造"全未配"。
+    for p in models.providers():
+        env = str(p.get("key_env") or "")
+        if env:
+            monkeypatch.delenv(env, raising=False)
     assert vision.pick_vision_model() is None           # 全未配 → 无可用
     monkeypatch.setenv("ANTHROPIC_API_KEY", "a-key")
     got = vision.pick_vision_model()
     assert got and got["cfg"]["provider_id"] == "anthropic"
+
+
+def test_pick_vision_model_picks_a_vision_model_not_the_default(monkeypatch, ivyea_home):
+    """选中的必须是该 provider 的**视觉**模型，不能是它的默认文本旗舰。
+
+    旧实现直接取 default_model，于是 OpenRouter 被选中时会拿
+    default_model 去当 sidecar；provider 的默认模型多半是文本模型，必 400。
+    """
+    from ivyea_agent import models, vision
+    for p in models.providers():
+        env = str(p.get("key_env") or "")
+        if env:
+            monkeypatch.delenv(env, raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-router")
+    got = vision.pick_vision_model()
+    assert got and got["cfg"]["provider_id"] == "openrouter"
+    assert models.model_name_has_vision(got["cfg"]["model"]) is True
+
+
+def test_vision_slot_overrides_everything(monkeypatch, ivyea_home):
+    """IvyeaOps 下推的显式视觉槽最优先，且不复核模型名。
+
+    自建网关/私有部署的模型名可能完全不带视觉特征词（如 "vlm-prod-v3"），
+    再拿模型名判定一次就会把用户明确配好的槽位否掉。
+    """
+    from ivyea_agent import config, vision
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a-key")
+    config.set_setting("vision_slot", {"provider": "custom", "model": "vlm-prod-v3",
+                                       "base_url": "https://gw.internal/v1", "api_key": "k-1"})
+    got = vision.pick_vision_model()
+    assert got["cfg"]["model"] == "vlm-prod-v3"
+    assert got["cfg"]["base_url"] == "https://gw.internal/v1"
+    assert got["key"] == "k-1"

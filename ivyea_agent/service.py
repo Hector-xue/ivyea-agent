@@ -150,7 +150,21 @@ def health() -> dict[str, Any]:
             "user_cards": len(knowledge.list_user_cards()),
         },
         "retrieval": retrieval.capabilities(),
+        # 视觉三档链的实时状态。IvyeaOps 判"agent 能不能接带图任务"要看
+        # vision_chain.effective，**不要**再看 model.capabilities.vision——
+        # 后者只说明主脑本身，主脑没视觉不等于这条链没视觉（还有 T2/T3）。
+        "vision_chain": _vision_chain_status(),
     }
+
+
+def _vision_chain_status() -> dict[str, Any]:
+    """/health 里的视觉链快照。绝不能因为它出错而让整个 /health 挂掉——
+    ops 的自动启动、状态卡、模型同步全靠 /health 活着。"""
+    try:
+        from . import vision
+        return vision.chain_status()
+    except Exception as exc:  # noqa: BLE001
+        return {"tier": 0, "effective": False, "error": str(exc)}
 
 
 def manifest() -> dict[str, Any]:
@@ -208,6 +222,8 @@ def manifest() -> dict[str, Any]:
             {"method": "GET", "path": "/v1/model/providers/{id}/models", "description": "live/cache/builtin model catalog for one provider"},
             {"method": "POST", "path": "/v1/model/providers/{id}/probe", "description": "minimal provider connectivity probe without returning secrets"},
             {"method": "POST", "path": "/v1/model/configure", "description": "configure the active IvyeaAgent model without returning secrets"},
+            {"method": "GET", "path": "/v1/config/vision", "description": "vision fallback chain status (tier 1 main brain / 2 sidecar / 3 local CV)"},
+            {"method": "POST", "path": "/v1/config/vision", "description": "configure the tier-2 sidecar vision model without returning secrets"},
             {"method": "GET", "path": "/v1/mcp/self-config", "description": "stdio MCP server config for local clients"},
             {"method": "GET", "path": "/v1/system/status", "description": "install/runtime status for IvyeaOps diagnostics"},
             {"method": "GET", "path": "/v1/system/doctor", "description": "install/runtime doctor checks"},
@@ -475,6 +491,55 @@ def model_configure(payload: dict[str, Any]) -> dict[str, Any]:
             "key_configured": bool(isinstance(api_key, str) and api_key) or bool(config.get_active_key()),
         },
     }
+
+
+def vision_configure(payload: dict[str, Any]) -> dict[str, Any]:
+    """配置 T2 的 sidecar 视觉模型（IvyeaOps 的"独立视觉槽"下推到这里）。
+
+    存进 config 的 `vision_slot`，`vision.pick_vision_model()` 最优先读它。
+    key 落 `~/.ivyea/.env`（复用 model_configure 同一套 set_env_key），不回显。
+
+    为什么要下推而不是让 agent 自己配一遍：同一个视觉模型在 IvyeaOps 界面配一次
+    就该同时对网页和 CLI 生效，两边各配一份必然长期不一致。
+
+    空 model 视为**清除**视觉槽——这样"取消配置"有确定路径，否则用户只能去手改
+    配置文件。
+    """
+    provider = str(payload.get("provider") or "").strip().lower()
+    model = str(payload.get("model") or "").strip()
+    base_url = str(payload.get("base_url") or "").strip()
+    api_key = str(payload.get("api_key") or "").strip()
+
+    if not model:
+        config.set_setting("vision_slot", {})
+        return {"ok": True, "cleared": True, "vision_chain": _vision_chain_status()}
+
+    entry = models.provider_by_id(provider) if provider else None
+    if entry is None and not base_url:
+        return {"ok": False, "error": "unknown_provider_requires_base_url",
+                "detail": f"provider={provider or '(空)'} 不在内置目录里，必须同时提供 base_url。"}
+
+    slot = {
+        "provider": provider or "custom",
+        "model": model,
+        "base_url": base_url or str((entry or {}).get("base") or ""),
+    }
+    # key 有两条落法：内置 provider 有 key_env 就写进 .env（与主脑同一套密钥管理），
+    # 自定义端点没有 key_env，就只能连同槽位一起存 —— 后者由 config 文件权限保护。
+    key_env = str((entry or {}).get("key_env") or "").strip()
+    if api_key and key_env:
+        config.set_env_key(key_env, api_key)
+    elif api_key:
+        slot["api_key"] = api_key
+    config.set_setting("vision_slot", slot)
+
+    public = {k: v for k, v in slot.items() if k != "api_key"}
+    public["key_configured"] = bool(api_key or (key_env and os.environ.get(key_env)))
+    return {"ok": True, "configured": public, "vision_chain": _vision_chain_status()}
+
+
+def vision_status() -> dict[str, Any]:
+    return {"ok": True, "vision_chain": _vision_chain_status()}
 
 
 def task_detail(task_id: str) -> dict[str, Any]:
@@ -1141,6 +1206,10 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
     def narrate(text: str) -> None:
         events.append({"type": "event", "text": security.redact_text(str(text))})
 
+    # 视觉降级发生在 _chat_messages 里（那时 narrate 还没定义），这里补发它的说明。
+    for note in (ctx.vision_notes or []):
+        narrate(note)
+
     try:
         provider = provider or build_chain(model_cfg, api_key, narrate=narrate)
         text = agent_loop.run_turn(provider, ctx, messages, max_steps=(_int(payload.get("max_steps"), 0) or None),
@@ -1159,6 +1228,8 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
         "todos": list(ctx.todos or []),
         "progress": progress_reporting.public_state(ctx),
     }
+    if ctx.vision_tier:
+        result["vision_tier"] = dict(ctx.vision_tier)
     if ctx.task_id:
         try:
             result["task"] = task_runner.load(ctx.task_id)
@@ -1246,6 +1317,13 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
     def narrate(text: str) -> None:
         send("event", {"type": "event", "text": security.redact_text(str(text))})
 
+    # 视觉降级发生在 _chat_messages 里（narrate 尚未定义），这里补发说明并单发一个
+    # vision_tier 事件——前端要靠它画"本轮走了哪一档"的徽标。
+    for note in (ctx.vision_notes or []):
+        narrate(note)
+    if ctx.vision_tier:
+        send("vision_tier", dict(ctx.vision_tier))
+
     # 本轮的执行步骤，按 call_id 收口成"每个调用只留最终态"（running → ok/error 合并，
     # 与前端 mergeStep 同一语义）。轮次收尾时落盘 —— 此前它们只流给前端就扔了，
     # 于是刷新之后"它刚才干了什么"一片空白。
@@ -1324,6 +1402,8 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         "todos": list(ctx.todos or []),
         "progress": progress_reporting.public_state(ctx),
     }
+    if ctx.vision_tier:
+        data["vision_tier"] = dict(ctx.vision_tier)
     send("final", data)
     return data
 
@@ -1441,7 +1521,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, openapi_spec())
             return
         if parsed.path == "/v1/capabilities":
-            self._json(200, {"ok": True, "retrieval": retrieval.capabilities()})
+            self._json(200, {"ok": True, "retrieval": retrieval.capabilities(),
+                             "vision_chain": _vision_chain_status()})
+            return
+        if parsed.path == "/v1/config/vision":
+            self._json(200, vision_status())
             return
         if parsed.path == "/v1/model":
             self._json(200, {"ok": True, "model": health()["model"]})
@@ -1813,6 +1897,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/model/configure":
             self._json(200, model_configure(body))
             return
+        if parsed.path == "/v1/config/vision":
+            self._json(200, vision_configure(body))
+            return
         if parsed.path == "/v1/system/service/start":
             self._json(200, system_service_start(body))
             return
@@ -2124,7 +2211,7 @@ def _chat_messages(message: str, payload: dict[str, Any],
     # 本轮起点：这之前都是历史，这之后（含这条 user 和后续工具/回答）才是本轮新增。
     # 落盘时只写这一段，见 sessions.append_turn —— 整份覆盖会吃掉并发的另一轮。
     base = len(messages)
-    messages.append({"role": "user", "content": _with_payload_images(user_content, payload)})
+    messages.append({"role": "user", "content": _with_payload_images(user_content, payload, ctx)})
     return messages, created_at, base
 
 
@@ -2178,23 +2265,39 @@ def _auto_skill_context(message: str, messages: list) -> list[dict[str, Any]]:
     return out
 
 
-def _with_payload_images(user_content: str, payload: dict[str, Any]):
-    """可选多模态：payload["images"] 为 data URI 列表时，把 user 消息升级成
-    OpenAI 多模态 list-content（provider 适配器各自转换，codex→input_image、
-    anthropic→image block）。主脑无视觉能力时显式报错——复核/看图类调用
-    不允许静默丢图后瞎编结论。"""
+def _with_payload_images(user_content: str, payload: dict[str, Any], ctx: Any = None):
+    """可选多模态：payload["images"] 为 data URI 列表时，走**与 CLI 同一条**视觉
+    三档降级链（vision.route_images）。
+
+    此前这里是 `raise main_brain_no_vision` —— serve 自己拦掉了带图请求，于是
+    IvyeaOps（唯一走 serve 的调用方）在主脑无视觉时整块功能死掉，而同一台机器上
+    的 CLI 却有旁路可走。两边必须共用一条链，不要在这里另写降级逻辑。
+
+    T1 返回多模态 list-content（provider 适配器各自转换，codex→input_image、
+    anthropic→image block）；T2/T3 返回已注入视觉文本的纯字符串。
+    档位写进 ctx.vision_tier，由调用方在 narrate 可用之后发事件并回传。
+    """
     images = payload.get("images")
     if not isinstance(images, list) or not images:
         return user_content
     uris = [str(u) for u in images if isinstance(u, str) and u.startswith("data:image/")][:4]
     if not uris:
         return user_content
+
     from . import config as _config
-    from .vision import main_has_vision
-    if not main_has_vision(_config.get_model_config()):
-        raise ValueError("main_brain_no_vision: 当前主脑不支持图片输入，无法处理带图请求")
-    parts: list[dict[str, Any]] = [{"type": "text", "text": user_content}]
-    for uri in uris:
+    from . import vision as _vision
+
+    notes: list[str] = []
+    content, kept, tier = _vision.route_images(
+        user_content, uris, _config.get_model_config(), notes.append)
+    if ctx is not None:
+        ctx.vision_tier = tier
+        ctx.vision_notes = notes
+
+    if not kept:
+        return content
+    parts: list[dict[str, Any]] = [{"type": "text", "text": content}]
+    for uri in kept:
         parts.append({"type": "image_url", "image_url": {"url": uri}})
     return parts
 
