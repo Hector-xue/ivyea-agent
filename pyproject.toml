@@ -32,6 +32,16 @@ dependencies = [
     # 纯 CPU 轮子约 19MB，Linux/Windows/macOS 都有——**刻意不是 torch**：
     # pip 默认会给 Linux 拉 GB 级的 CUDA 版，小内存机器直接被 OOM 杀掉。
     "onnxruntime>=1.16",
+    # T3 本地视觉（local_vision）的图像解码。纯 wheel、约 3MB，各平台都有。
+    "Pillow>=10.0",
+    # T3 的 OCR 引擎（PP-OCR 系模型的 ONNX 封装，模型内置在 wheel 里，中英电商图
+    # 明显强于 tesseract）。onnxruntime 上面已经有了，这里主要多出 opencv-python。
+    #
+    # **精简 Linux 镜像的坑**：opencv-python 依赖 libGL.so.1，slim/alpine 基础镜像
+    # 默认没有，`import cv2` 会直接抛。ocr.py 的引擎探测是**运行时**做的，抛了会
+    # 自动落到 tesseract、再落到"无 OCR"，T3 的几何/色彩度量不受影响。要修就装
+    # 系统包 mesa-libGL（RHEL 系）/ libgl1（Debian 系）。
+    "rapidocr-onnxruntime>=1.4",
     "openpyxl>=3.1",
     "httpx>=0.27",
     "prompt_toolkit>=3.0",

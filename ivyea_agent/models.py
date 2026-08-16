@@ -493,6 +493,87 @@ def key_status(provider: dict[str, Any], *, environ: dict[str, str] | None = Non
     return "configured" if env.get(key_env) else f"missing:{key_env}"
 
 
+# ── 视觉能力判定 ──────────────────────────────────────────────────────────
+# 这里刻意分成两个层级，别再把它们混成一个开关（历史上就是混了才出的事）：
+#
+#   provider 级 `capabilities["vision"]` = "这家**有**视觉可选模型"，只喂 UI 徽标。
+#   模型级 `model_has_vision(mcfg)`      = "**当前选中的这个模型**能吃图"，
+#                                          视觉降级链（T1/T2）只认它。
+#
+# 旧实现只有 provider 级，而且是硬编码厂商白名单 {openai, anthropic, gemini,
+# openai-codex}。后果：硅基流动/DashScope/智谱/OpenRouter/Ollama 上的 Qwen-VL、
+# GLM-4V、本地 VLM 即使配好 key 也永远选不中——而这些恰恰是国内用户唯一配得起
+# 的视觉模型。判定改成"传输格式能装图 AND 模型名是视觉模型"。
+
+# 能在请求体里装图片的传输格式。绝大多数 provider 是 kind=openai /
+# api_mode=chat_completions，OpenAI 的 image_url content block 通吃。
+VISION_TRANSPORTS = {
+    "chat_completions",
+    "anthropic_messages",
+    "anthropic_oauth",
+    "gemini_native",
+    "gemini_code_assist",
+    "copilot_chat_completions",
+    "codex_responses",
+    "bedrock_converse",
+}
+
+# 模型名里出现即视为多模态。全部小写子串匹配，覆盖 provider 前缀写法
+# （openrouter 的 "qwen/qwen3-vl-235b"、bedrock 的 "us.anthropic.claude-..."）。
+VISION_MODEL_MARKERS = (
+    "-vl", "vl-", "vision", "-v-", "multimodal", "omni",
+    "gpt-4o", "gpt-4.1", "gpt-4-turbo", "gpt-5", "o3", "o4-mini",
+    "claude", "gemini", "grok-4", "grok-2-vision",
+    "glm-4v", "glm-5", "step-1v", "yi-vision", "ernie-4.5",
+    "llava", "pixtral", "internvl", "minicpm-v", "moondream", "florence",
+)
+
+# 明确**没有**视觉的模型，优先于上面的 marker 判定。
+# 存在的意义：marker 是子串匹配，难免误伤——例如 "deepseek-vl" 是真视觉模型，
+# 但 "glm-5-air-text" 之类带 glm-5 前缀的纯文本变体不是。命中这里直接判无视觉。
+VISION_MODEL_DENY = (
+    "-text", "text-only", "embed", "rerank", "whisper", "tts", "audio",
+    "deepseek-chat", "deepseek-reasoner", "deepseek-coder", "deepseek-r1",
+    "qwen3-coder", "kimi-k2", "-code-fast",
+)
+
+
+def model_name_has_vision(model: str) -> Optional[bool]:
+    """只看模型名的视觉判定。True/False 是确信，None 是"看不出来"。
+
+    分三态而不是两态：调用方对"看不出来"和"确定没有"要给不同待遇——前者可以
+    乐观试一把（T1 失败再降级），后者直接跳过 T1 省一次必失败的请求。
+    """
+    low = (model or "").strip().lower()
+    if not low:
+        return None
+    if any(bad in low for bad in VISION_MODEL_DENY):
+        return False
+    if any(good in low for good in VISION_MODEL_MARKERS):
+        return True
+    return None
+
+
+def model_has_vision(mcfg: dict[str, Any], *, environ: dict[str, str] | None = None) -> bool:
+    """当前选中的模型能不能直接吃图。视觉降级链判 T1 就看这个。
+
+    用户覆盖 > 模型名判定 > 保守判否。覆盖项是给判错时的逃生门：模型名千变万化，
+    不可能穷举，所以必须留一个用户说了算的开关。
+    """
+    from . import config
+    override = str(config.get_setting("vision_capable_override", "auto") or "auto").strip().lower()
+    if override in ("true", "yes", "1", "on"):
+        return True
+    if override in ("false", "no", "0", "off"):
+        return False
+
+    api_mode = str(mcfg.get("api_mode") or "")
+    if api_mode and api_mode not in VISION_TRANSPORTS:
+        return False
+    verdict = model_name_has_vision(str(mcfg.get("model") or ""))
+    return verdict is True
+
+
 def provider_capabilities(provider: dict[str, Any]) -> dict[str, Any]:
     """Return stable, product-facing provider capabilities.
 
@@ -533,9 +614,15 @@ def provider_capabilities(provider: dict[str, Any]) -> dict[str, Any]:
         "chat": provider.get("status", "usable") == "usable",
         "tools": api_mode in tool_modes,
         "streaming": api_mode in stream_modes,
-        # openai-codex（Responses API）适配器已支持 input_image 多模态，GPT-5 系自带视觉
-        "vision": pid in {"openai", "anthropic", "anthropic-oauth", "gemini", "openai-codex"}
-        or api_mode in {"gemini_native", "codex_responses"},
+        # provider 级视觉 = "这家有视觉可选模型"（UI 徽标语义）。
+        # **不要**拿它判"当前模型能不能吃图"——那是 model_has_vision() 的活。
+        # 判据：传输格式装得下图 且（列出的模型里有视觉模型 或 是开放目录的聚合/
+        # 自定义端点——后者模型随用户填，不能一口咬定没有）。
+        "vision": api_mode in VISION_TRANSPORTS and (
+            any(model_name_has_vision(m) for m in (provider.get("models") or []))
+            or bool(provider.get("models_url"))
+            or pid in {"custom", "azure-foundry", "ollama"}
+        ),
         "oauth": auth in {"oauth_external", "oauth_device_code", "copilot"},
         "api_key": auth == "api_key",
         "local": auth == "none" or base.startswith(("http://localhost", "http://127.0.0.1")),

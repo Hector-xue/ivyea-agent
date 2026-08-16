@@ -1967,7 +1967,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if _mention_imgs:
             narrate(ui.message("muted", "已引用图片: " + ", ".join(os.path.basename(p) for p in _mention_imgs)))
             from . import vision as _vision_mod   # 主脑无视觉时 sidecar 代读、文本回灌
-            user_content, _mention_imgs = _vision_mod.route_images(
+            user_content, _mention_imgs, _vision_tier = _vision_mod.route_images(
                 user_content, _mention_imgs, cfg.get_model_config(), narrate)
         if scope_note:
             user_content += "\n\n" + scope_note
@@ -2143,7 +2143,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             if _mention_imgs:
                 print(ui.message("muted", "已引用图片: " + ", ".join(os.path.basename(p) for p in _mention_imgs)))
                 from . import vision as _vision_mod   # 主脑无视觉时 sidecar 代读、文本回灌
-                user_content, _mention_imgs = _vision_mod.route_images(
+                user_content, _mention_imgs, _vision_tier = _vision_mod.route_images(
                     user_content, _mention_imgs, cfg.get_model_config(), print)
             if scope_note:
                 user_content += "\n\n" + scope_note

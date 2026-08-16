@@ -333,12 +333,28 @@ SIDECAR_PROMPT = (
 
 
 def main_has_vision(mcfg: dict) -> bool:
-    """主脑是否自带视觉能力（按 provider 能力位判定，离线保守）。"""
+    """主脑**当前选中的模型**能否直接吃图。
+
+    从"按 provider 白名单"改成"按模型判定"（见 models.model_has_vision）：
+    provider 级只说明"这家有视觉模型"，而主脑走 T1 与否取决于用户到底选了哪个
+    模型——同一个 OpenRouter，选 claude 能看图，选 deepseek-chat 就不能。
+    """
     from . import models
-    prov = models.provider_by_id(str(mcfg.get("provider_id") or mcfg.get("provider") or ""))
-    if not prov:
-        return False
-    return bool(models.provider_capabilities(prov).get("vision"))
+    return models.model_has_vision(mcfg)
+
+
+def _vision_model_of(provider: dict) -> str:
+    """从 provider 的模型列表里挑一个**视觉**模型。
+
+    不能用 default_model：绝大多数 provider 的默认模型是文本旗舰
+    （deepseek-chat、qwen3-coder…），拿它当 sidecar 必然 400。挑不出来就返回空，
+    让上层跳过这家。
+    """
+    from . import models
+    for m in provider.get("models") or []:
+        if models.model_name_has_vision(m) is True:
+            return str(m)
+    return ""
 
 
 def pick_vision_model() -> dict | None:
@@ -352,14 +368,35 @@ def pick_vision_model() -> dict | None:
         if not models.provider_capabilities(p).get("vision"):
             return None
         key = os.environ.get(str(p.get("key_env") or ""), "")
-        if not key:
+        if not key and str(p.get("auth_type") or "") != "none":
             return None
-        model = p.get("default_model") or next(iter(p.get("models") or []), "")
+        model = _vision_model_of(p)
+        if not model:
+            return None
         cfg2 = {"kind": p.get("kind"), "provider_id": p.get("id"),
                 "api_mode": p.get("api_mode", ""), "auth_type": p.get("auth_type", "api_key"),
                 "model": model, "base": p.get("base", ""), "base_url": p.get("base", ""),
                 "key_env": p.get("key_env", ""), "label": p.get("label") or p.get("id")}
         return {"cfg": cfg2, "key": key, "label": f"{cfg2['label']} · {model}"}
+
+    # 显式视觉槽最优先。它由 IvyeaOps 通过 POST /v1/config/vision 下推
+    # （provider / model / base_url / api_key 四件套），也可以本地
+    # `ivyea config set vision_slot '{...}'`。有它就不再猜——用户配的就是权威，
+    # 连模型名视觉判定都不复核（自建网关的模型名可能完全不带视觉特征词）。
+    slot = config.get_setting("vision_slot", None)
+    if isinstance(slot, dict) and str(slot.get("model") or "").strip():
+        pid = str(slot.get("provider") or "custom").strip() or "custom"
+        prov = models.provider_by_id(pid) or {}
+        key = str(slot.get("api_key") or "").strip() or os.environ.get(str(prov.get("key_env") or ""), "")
+        base = str(slot.get("base_url") or "").strip() or str(prov.get("base") or "")
+        if key or str(prov.get("auth_type") or "") == "none":
+            cfg2 = {"kind": prov.get("kind", "openai"), "provider_id": pid,
+                    "api_mode": prov.get("api_mode", "chat_completions"),
+                    "auth_type": prov.get("auth_type", "api_key"),
+                    "model": str(slot["model"]).strip(), "base": base, "base_url": base,
+                    "key_env": prov.get("key_env", ""),
+                    "label": prov.get("label") or pid}
+            return {"cfg": cfg2, "key": key, "label": f"{cfg2['label']} · {cfg2['model']}"}
 
     prefer = str(config.get_setting("vision_model", "") or "").strip()
     if prefer:
@@ -390,36 +427,179 @@ def sidecar_describe(images: list[str], question: str, picked: dict) -> str:
     """用选定的视觉模型代读图片，返回分析文本。异常向上抛，由 route_images 兜底。"""
     from . import mentions
     from .providers import from_settings
+
+    content = mentions.build_user_content(
+        f"用户的问题：{question or '（无文字，仅图片）'}", images)
+    # 一张图都没挂上就绝不发出去。build_user_content 对单张编码失败是静默跳过的
+    # （损坏/过大图不该拖垮整轮），但全部失败还照发，视觉模型就会对着纯文字
+    # **编造画面**——实测编出过一整张不存在的柱状图，数字有名有姓。
+    # 这里抛出去，route_images 会接住并降到 T3 本地度量：读数不好看，但是真的。
+    attached = sum(1 for part in content if isinstance(part, dict) and part.get("type") == "image_url") \
+        if isinstance(content, list) else 0
+    if attached == 0:
+        raise ValueError(f"视觉旁路未能附上任何图片（收到 {len(images)} 项，全部编码失败）")
+
     provider = from_settings(picked["cfg"], picked["key"])
     msg = provider.chat([
         {"role": "system", "content": SIDECAR_PROMPT},
-        {"role": "user", "content": mentions.build_user_content(
-            f"用户的问题：{question or '（无文字，仅图片）'}", images)},
+        {"role": "user", "content": content},
     ], tools=None)
     return (msg.get("content") or "").strip()
 
 
-def route_images(user_content: str, images: list[str], mcfg: dict, narrate) -> tuple[str, list[str]]:
-    """视觉旁路总入口：主脑有 vision 或本轮无图 → 原样返回；
-    否则 sidecar 分析注入文本、剥掉图片；无可用视觉模型/出错 → warn 后忽略图片继续（fail-open）。"""
-    from . import ui
-    if not images or main_has_vision(mcfg):
-        return user_content, images
-    picked = pick_vision_model()
-    if not picked:
-        narrate(ui.message("warn", "主脑不支持图片且没有可用的视觉模型（配 OPENAI/ANTHROPIC/GEMINI key，"
-                                   "或 ivyea config set vision_model <provider>），本轮忽略图片仅按文字继续。"))
-        return user_content, []
+# ── 三档降级链 ────────────────────────────────────────────────────────────
+#
+#   T1 主脑自带视觉        → 图片原样进主脑上下文
+#   T2 主脑无视觉 + 配了视觉模型 → sidecar 代读，文本回灌主脑
+#   T3 两者都没有          → 本地 CV + OCR 量化成文本回灌主脑（local_vision）
+#
+# 三档实现在这一个函数里，CLI 和 serve 都走它——**不要**在 serve 里另写一套，
+# 历史上 serve 就是因为自己 raise 了 main_brain_no_vision 而完全没有降级。
+
+TIER_MAIN = 1
+TIER_SIDECAR = 2
+TIER_LOCAL_CV = 3
+
+
+def local_data_urls_to_paths(images: list[str]) -> tuple[list[str], list[str]]:
+    """把 data URI 落成临时文件供本地 CV 读取，返回 (临时路径, 待清理路径)。
+
+    T3 全程在本机跑，图片不出网。落临时文件是因为 Pillow/OCR 都按路径吃图。
+    """
+    import base64
+    import tempfile
+
+    paths: list[str] = []
+    tmp: list[str] = []
+    for uri in images:
+        if not isinstance(uri, str):
+            continue
+        if not uri.startswith("data:image/"):
+            if Path(uri).is_file():
+                paths.append(uri)
+            continue
+        try:
+            header, b64 = uri.split(",", 1)
+            ext = header.split(";")[0].split("/")[-1].lower()
+            ext = {"jpeg": ".jpg"}.get(ext, "." + ext)
+            if ext not in image_audit.IMAGE_EXTS:
+                ext = ".png"
+            fd = tempfile.NamedTemporaryFile(prefix="ivyea-vision-", suffix=ext, delete=False)
+            fd.write(base64.b64decode(b64))
+            fd.close()
+            paths.append(fd.name)
+            tmp.append(fd.name)
+        except Exception:  # noqa: BLE001 — 单张解不开不该拖垮整批
+            continue
+    return paths, tmp
+
+
+def local_cv_describe(images: list[str], question: str) -> tuple[str, str]:
+    """T3：本地量化图片，返回 (注入文本, OCR 引擎名)。失败返回 ("", "")。"""
+    import os as _os
+    from . import local_vision
+
+    paths, tmp = local_data_urls_to_paths(images)
     try:
-        analysis = sidecar_describe(images, user_content, picked)
-    except Exception as e:  # noqa: BLE001
-        narrate(ui.message("warn", f"视觉旁路调用失败（{e}），本轮忽略图片仅按文字继续。"))
-        return user_content, []
-    if not analysis:
-        narrate(ui.message("warn", "视觉模型未返回内容，本轮忽略图片仅按文字继续。"))
-        return user_content, []
-    narrate(ui.message("info", f"主脑不支持图片，已由 {picked['label']} 视觉旁路代读 {len(images)} 张图"))
-    injected = (user_content
-                + f"\n\n[图片内容（主脑不支持图片，已由视觉模型 {picked['label']} 代读，共 {len(images)} 张）]\n"
-                + analysis)
-    return injected, []
+        if not paths:
+            return "", ""
+        result = local_vision.analyze(paths, recursive=False)
+        if not result.get("available"):
+            return "", ""
+        return local_vision.render_for_text_model(result, question=question), str(result.get("ocr_engine") or "")
+    finally:
+        for p in tmp:
+            try:
+                _os.unlink(p)
+            except OSError:
+                pass
+
+
+def route_images(user_content: str, images: list[str], mcfg: dict, narrate) -> tuple[str, list[str], dict]:
+    """视觉三档降级总入口。
+
+    返回 (注入后的 user 内容, 仍要随请求发出的图片, 档位信息)。第三个返回值是
+    新增的——调用方要把它回传给前端/ops，否则用户永远不知道自己拿到的是哪一档的
+    结果（这正是此前"功能静默死掉"的根源）。
+    """
+    from . import ui
+
+    if not images:
+        return user_content, images, {"tier": 0, "label": "无图片", "images": 0}
+
+    if main_has_vision(mcfg):
+        return user_content, images, {
+            "tier": TIER_MAIN,
+            "label": f"主脑直读 · {mcfg.get('model') or mcfg.get('label') or '主脑'}",
+            "images": len(images),
+        }
+
+    picked = pick_vision_model()
+    if picked:
+        try:
+            analysis = sidecar_describe(images, user_content, picked)
+        except Exception as e:  # noqa: BLE001
+            narrate(ui.message("warn", f"视觉旁路调用失败（{e}），改用本地视觉度量。"))
+            analysis = ""
+        if analysis:
+            narrate(ui.message("info", f"主脑不支持图片，已由 {picked['label']} 视觉旁路代读 {len(images)} 张图"))
+            injected = (user_content
+                        + f"\n\n[图片内容（主脑不支持图片，已由视觉模型 {picked['label']} 代读，共 {len(images)} 张）]\n"
+                        + analysis)
+            return injected, [], {"tier": TIER_SIDECAR, "label": f"视觉旁路 · {picked['label']}",
+                                  "images": len(images), "model": picked["cfg"].get("model", "")}
+        narrate(ui.message("warn", "视觉模型未返回内容，改用本地视觉度量。"))
+
+    # T3：本地 CV + OCR。注意这里**不再** fail-open 丢图——丢图会让模型对着
+    # 空气编结论，那比降级更糟。
+    text, ocr_engine = local_cv_describe(images, user_content)
+    if text:
+        narrate(ui.message("info",
+                           f"未配置视觉模型，已用本地 CV{('+' + ocr_engine) if ocr_engine else ''} "
+                           f"量化 {len(images)} 张图（可测量项照常分析，语义/审美判断需配视觉模型）"))
+        return user_content + "\n\n" + text, [], {
+            "tier": TIER_LOCAL_CV,
+            "label": f"本地 CV{('+' + ocr_engine) if ocr_engine else ''}",
+            "images": len(images),
+            "ocr_engine": ocr_engine,
+        }
+
+    narrate(ui.message("warn", "主脑不支持图片，且视觉模型与本地视觉都不可用（本地视觉需要 Pillow），"
+                               "本轮忽略图片仅按文字继续。"))
+    return user_content, [], {"tier": 0, "label": "不可用", "images": len(images)}
+
+
+def chain_status(mcfg: dict | None = None) -> dict:
+    """当前视觉链的状态快照，供 /health 暴露给 IvyeaOps 判定。
+
+    ops 此前只看主脑 caps.vision，主脑无视觉就整块判 agent 不可用；改看这里的
+    `effective` 之后，T2/T3 也算"能处理带图请求"。
+    """
+    from . import config, local_vision
+
+    mcfg = mcfg if mcfg is not None else config.get_model_config()
+    main = main_has_vision(mcfg)
+    picked = None if main else pick_vision_model()
+    cv_ok, cv_detail = local_vision.available()
+    ocr_engine = ""
+    if not main and not picked and cv_ok:
+        from . import ocr as ocr_mod
+        ocr_engine = ocr_mod.engine_name()
+
+    if main:
+        tier = TIER_MAIN
+    elif picked:
+        tier = TIER_SIDECAR
+    elif cv_ok:
+        tier = TIER_LOCAL_CV
+    else:
+        tier = 0
+    return {
+        "tier": tier,
+        "effective": tier > 0,
+        "main": {"vision": main, "model": mcfg.get("model", "")},
+        "sidecar": {"available": bool(picked), "label": picked["label"] if picked else "",
+                    "model": picked["cfg"].get("model", "") if picked else ""},
+        "local_cv": {"available": cv_ok, "detail": cv_detail, "ocr_engine": ocr_engine},
+        "labels": {1: "主脑直读", 2: "视觉旁路", 3: "本地 CV 度量", 0: "不可用"},
+    }

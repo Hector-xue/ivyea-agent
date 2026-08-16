@@ -71,6 +71,11 @@ class ToolContext:
     knowledge_retrieval_expected: bool = False                              # 命中亚马逊检索路由
     knowledge_risk: str = "none"                                           # none/low/medium/high
     knowledge_query: str = ""
+    # 本轮带图请求实际走了视觉三档中的哪一档（见 vision.route_images）。
+    # 必须一路回传到前端/IvyeaOps：降级本身不是问题，**降级了却不说**才是——
+    # 此前正是因为没人知道降级发生过，Listing 的图片分析静默空转了很久。
+    vision_tier: dict[str, Any] = field(default_factory=dict)
+    vision_notes: list[str] = field(default_factory=list)
 
 
 # OpenAI function-calling schema

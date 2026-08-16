@@ -62,14 +62,21 @@ def build_user_content(text: str, image_paths: list[str]):
     """构造一条 user 消息的 content：无图返回纯文本 str；有图返回 OpenAI 多模态
     list-content（[{type:text},{type:image_url,image_url:{url:data:...}}]）。
     各 provider 适配器把 image_url 转成自身格式（codex/anthropic/gemini），
-    不支持多模态的 provider 会安全拍平只取文本。"""
+    不支持多模态的 provider 会安全拍平只取文本。
+
+    **每一项既可以是本地文件路径，也可以是 data URI。** 两种都要收：CLI 那条路
+    传的是 `@图片` 展开出来的文件路径，而 serve（IvyeaOps 网页上传）传的是
+    data URI。曾经只按文件路径处理，data URI 会在 read_bytes 上抛异常、被下面
+    那个 except 静默吞掉——模型一张图都没收到却照常作答，于是凭空编出画面内容。
+    """
     if not image_paths:
         return text
     from . import image_audit
     parts: list = [{"type": "text", "text": text}]
     for p in image_paths:
         try:
-            parts.append({"type": "image_url", "image_url": {"url": image_audit.data_url(p)}})
+            url = p if isinstance(p, str) and p.startswith("data:image/") else image_audit.data_url(p)
+            parts.append({"type": "image_url", "image_url": {"url": url}})
         except Exception:
             pass   # 单张编码失败(过大/损坏)跳过，不阻塞整轮
     return parts
