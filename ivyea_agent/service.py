@@ -688,6 +688,7 @@ def system_service_stop(payload: dict[str, Any]) -> dict[str, Any]:
     result = self_manage.service_stop(
         timeout=float(payload.get("timeout") or 10),
         force=bool(payload.get("force")),
+        port=int(payload.get("port") or DEFAULT_PORT),
     )
     return {"ok": bool(result.get("ok")), "result": result}
 

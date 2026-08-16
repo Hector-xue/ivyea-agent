@@ -97,6 +97,36 @@ def _pid_cmdline(pid: int) -> list[str]:
     return [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
 
 
+def _discover_service_pid(port: int) -> int:
+    """在 pidfile 之外，按"谁真的在跑这个 serve"找出 PID。
+
+    **为什么必须有这条兜底**：service_stop 原本只认 pidfile，pidfile 不在或里面是
+    个陈旧 PID 时直接 `return already_stopped=True` —— 可服务明明还在跑。这台机上
+    实测就是这样：pidfile 里躺着一个早就死掉的 PID，health 却是通的，于是
+    `ivyea self service-stop` **谎报停止成功，旧进程原封不动**。IvyeaOps 的升级流程
+    正是先调它再启新进程，结果是"版本号更新了、跑的还是旧代码"，而且毫无报错。
+
+    凡是不经 `self service-start` 拉起的 serve 都会命中这个坑：systemd 托管的、
+    手动 `python -m ivyea_agent.cli serve` 起的、以及 setsid 起的孤儿进程。
+
+    只在 Linux 上按 /proc 扫（能拿到 cmdline 做精确匹配）；其它平台返回 0，
+    交给原有的 pidfile 路径——宁可不动，也不能凭猜杀进程。
+    """
+    if os.name == "nt" or not Path("/proc").exists():
+        return 0
+    try:
+        pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return 0
+    me = os.getpid()
+    for pid in pids:
+        if pid == me:
+            continue
+        if _pid_matches_service(pid, port) and _pid_cmdline(pid):
+            return pid
+    return 0
+
+
 def _pid_matches_service(pid: int, port: int | None = None) -> bool:
     parts = _pid_cmdline(pid)
     if not parts:
@@ -284,15 +314,27 @@ def service_start(
     }
 
 
-def service_stop(timeout: float = 10.0, force: bool = False) -> dict[str, Any]:
-    current = service_status(probe=False)
+def service_stop(timeout: float = 10.0, force: bool = False, port: int = 8765) -> dict[str, Any]:
+    # probe=True：**必须真探一下端口**。只看 pidfile 的话，pidfile 缺失或过期时会
+    # 直接报"已停止"，而服务还在好好地跑（见 _discover_service_pid 的说明）。
+    current = service_status(port=port, probe=True)
     pid = int(current.get("pid") or 0)
+    discovered = 0
     if not pid or not current.get("pid_running"):
-        try:
-            _pid_file().unlink(missing_ok=True)
-        except OSError:
-            pass
-        return {"ok": True, "already_stopped": True, "service": current}
+        # pidfile 不可信 → 按端口找真身。找不到、且健康检查也不通，才算真的停了。
+        discovered = _discover_service_pid(int(port))
+        if not discovered:
+            if current.get("health_running"):
+                return {"ok": False, "error": "service_running_but_pid_unknown",
+                        "detail": f"{port} 端口仍在响应，但找不到对应进程，无法停止。"
+                                  "请手动确认后停止（该端口的监听进程）。",
+                        "service": current}
+            try:
+                _pid_file().unlink(missing_ok=True)
+            except OSError:
+                pass
+            return {"ok": True, "already_stopped": True, "service": current}
+        pid = discovered
 
     if os.name == "nt":
         cmd = ["taskkill", "/PID", str(pid), "/T"]
@@ -318,7 +360,13 @@ def service_stop(timeout: float = 10.0, force: bool = False) -> dict[str, Any]:
             _pid_file().unlink(missing_ok=True)
         except OSError:
             pass
-    return {"ok": stopped, "stopped": stopped, "pid": pid, "service": service_status(probe=False)}
+    # 收尾也要真探端口：systemd 托管时进程被杀会立刻拉起新的，那**不是**失败——
+    # 端口照样通，且跑的是新代码。这里如实报出来，让调用方自己判断。
+    after = service_status(port=port, probe=True)
+    return {"ok": stopped, "stopped": stopped, "pid": pid,
+            "discovered_pid": bool(discovered),
+            "port_still_serving": bool(after.get("health_running")),
+            "service": after}
 
 
 def autostart_files(host: str = "127.0.0.1", port: int = 8765) -> dict[str, Any]:
@@ -360,13 +408,28 @@ def autostart_files(host: str = "127.0.0.1", port: int = 8765) -> dict[str, Any]
         target = Path.home() / ".config" / "systemd" / "user" / "ivyea-agent.service"
         content = "\n".join([
             "[Unit]",
-            "Description=Ivyea Agent local API",
+            "Description=IvyeaAgent serve (local HTTP API)",
+            "After=network.target",
             "",
             "[Service]",
-            "ExecStart=" + " ".join(cmd),
-            "Restart=on-failure",
-            "RestartSec=3",
+            "Type=simple",
+            # 从源码目录起时必须给 WorkingDirectory：`python -m ivyea_agent.cli` 按
+            # cwd 解析包，缺了它 systemd 会在 / 下找不到而直接启动失败。
+            f"WorkingDirectory={Path(__file__).resolve().parent.parent}",
+            # HOME 要显式给：配置、知识库、会话、密钥全在 ~/.ivyea 下，systemd 不
+            # 继承登录 shell 的环境，缺了它会静默用一套空配置（比启动失败更难查）。
+            f"Environment=HOME={Path.home()}",
+            "Environment=PYTHONUNBUFFERED=1",
             f"Environment=IVYEA_HOME={config.IVYEA_DIR}",
+            "ExecStart=" + " ".join(cmd),
+            # always 而不是 on-failure：升级流程会先把它 SIGTERM 掉（正常退出，
+            # on-failure 不会拉回来），再由 systemd 用**新代码**重新拉起。
+            "Restart=always",
+            "RestartSec=3",
+            "TimeoutStopSec=20",
+            # 别跟着别人的 cgroup 一起死：从终端复用器（ttyd/tmux）里手动拉起过的
+            # 实例，宿主一 OOM 就会被连坐带走。
+            "OOMPolicy=continue",
             "",
             "[Install]",
             "WantedBy=default.target",
