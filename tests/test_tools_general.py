@@ -56,13 +56,16 @@ def test_run_command_background_and_output(tmp_path):
     r = tg.t_run_command({"command": "echo hello-bg", "run_in_background": True}, ctx)
     assert "bash_id=" in r
     bid = re.search(r"bash_id=(bg-\d+)", r).group(1)
-    out = ""
+    # t_bash_output 是**增量**的：读过的不再返回。所以必须累加，不能只留最后一次——
+    # 机器一忙，"hello-bg" 和 "已结束" 就会落在两次轮询里，只看最后一次必然漏掉输出，
+    # 于是这条用例在负载高时随机变红（实测撞到过）。
+    seen = ""
     for _ in range(50):
-        out = tg.t_bash_output({"bash_id": bid}, ctx)
-        if "已结束" in out:
+        seen += tg.t_bash_output({"bash_id": bid}, ctx)
+        if "已结束" in seen:
             break
         time.sleep(0.1)
-    assert "hello-bg" in out and "已结束" in out       # 轮询到输出 + 退出状态
+    assert "hello-bg" in seen and "已结束" in seen     # 轮询到输出 + 退出状态
 
 
 def test_kill_bash(tmp_path):

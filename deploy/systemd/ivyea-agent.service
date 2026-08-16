@@ -1,0 +1,35 @@
+[Unit]
+Description=IvyeaAgent serve (local HTTP API on 127.0.0.1:8765)
+Documentation=https://agent.ivyea.com
+After=network.target
+# IvyeaOps 把几乎所有 AI 功能都转给这个服务（对话、知识库、Listing 文案与图片
+# 分析、ASIN 审计、定时任务）。它没起来时 ops 只剩很小一部分直连兜底能用，
+# 所以让 ops 排在它后面启动，省掉开机后那一阵"agent 未连接"。
+Before=ivyea-ops.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/ivyea-agent
+# HOME 必须显式给：agent 的配置、知识库、会话、密钥全在 ~/.ivyea 下，
+# systemd 不继承登录 shell 的环境，缺了它会去 / 下面找而静默用一套空配置。
+Environment=HOME=/root
+Environment=PYTHONUNBUFFERED=1
+# 用 `python -m` 而不是 `ivyea serve`：这台机是 editable 安装，`-m` 从
+# WorkingDirectory 解析，改完代码重启即生效，和发版流程一致。
+ExecStart=/usr/bin/python3 -m ivyea_agent.cli serve --host 127.0.0.1 --port 8765
+Restart=always
+RestartSec=3
+
+# 升级流程会先 `ivyea self service-stop`（SIGTERM）再启新进程。这里 Restart=always
+# 会在 3 秒内把它拉回来 —— 拉起来的是**新代码**（WorkingDirectory 就是源码树），
+# 之后 ops 那次 start 探到端口已通就直接返回 already_running，两边不打架。
+KillMode=control-group
+TimeoutStopSec=20
+
+# 别把它挂在别人的 cgroup 命运上：这台机上原先的 serve 是从 ttyd 里手动拉起的，
+# ttyd 一 OOM 或重启就可能连坐带走它（主终端那次故障就是这么来的）。
+OOMPolicy=continue
+
+[Install]
+WantedBy=multi-user.target

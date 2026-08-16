@@ -2851,7 +2851,7 @@ def _cmd_self(args: argparse.Namespace) -> int:
         print(self_manage.render_service_status(result.get("service") or self_manage.service_status(args.host, args.port)))
         return 0
     if args.action == "service-stop":
-        result = self_manage.service_stop(timeout=args.timeout, force=args.force)
+        result = self_manage.service_stop(timeout=args.timeout, force=args.force, port=args.port)
         print(self_manage.render_service_status(result.get("service") or self_manage.service_status(probe=False)))
         return 0 if result.get("ok") else 1
     if args.action == "service-logs":

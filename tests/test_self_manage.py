@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import types
 import zipfile
@@ -154,3 +155,67 @@ def test_self_cli_dry_run_and_backup(ivyea_home, capsys):
 
     assert main(["self", "backup", "--output", str(ivyea_home / "backup.zip")]) == 0
     assert "backup.zip" in capsys.readouterr().out
+
+
+def test_service_stop_finds_a_serve_it_did_not_start(ivyea_home, monkeypatch):
+    """pidfile 不可信时按端口找真身，绝不谎报"已停止"。
+
+    实测故障：pidfile 里躺着一个早就死掉的 PID，服务却在正常跑（health 通）。
+    旧实现直接 `return already_stopped=True`，于是 `ivyea self service-stop`
+    报成功而旧进程原封不动 —— IvyeaOps 的升级流程正是先调它再启新进程，
+    结果是"版本号更新了、跑的还是旧代码"，且毫无报错。
+
+    凡是不经 `self service-start` 拉起的 serve 都会命中：systemd 托管的、
+    手动起的、setsid 起的孤儿进程。
+    """
+    from ivyea_agent import self_manage
+
+    (ivyea_home / "run").mkdir(parents=True, exist_ok=True)
+    # 陈旧 pidfile：进程早没了
+    (ivyea_home / "run" / "ivyea-agent.pid").write_text(
+        json.dumps({"pid": 999999, "port": 8765}), encoding="utf-8")
+
+    monkeypatch.setattr(self_manage, "_probe_health", lambda h, p: {"ok": True})
+    monkeypatch.setattr(self_manage, "_discover_service_pid", lambda port: 4242)
+
+    killed: list = []
+    alive = {4242: True}      # 陈旧的 999999 从来就不在，4242 被杀之后才消失
+
+    monkeypatch.setattr(self_manage, "_pid_running", lambda pid: bool(alive.get(pid)))
+    if os.name == "nt":
+        monkeypatch.setattr(
+            self_manage.subprocess, "run",
+            lambda cmd, *a, **k: (killed.append(cmd), alive.pop(4242, None),
+                                  types.SimpleNamespace(returncode=0))[-1])
+    else:
+        monkeypatch.setattr(self_manage.os, "kill",
+                            lambda pid, sig: (killed.append(pid), alive.pop(pid, None)))
+
+    res = self_manage.service_stop(timeout=1)
+    assert res["discovered_pid"] is True
+    assert res["pid"] == 4242
+    assert killed, "必须真的去停那个发现出来的进程"
+
+
+def test_service_stop_refuses_to_lie_when_it_cannot_find_the_process(ivyea_home, monkeypatch):
+    """端口还在响应、又找不到进程时，必须报失败而不是"已停止"。"""
+    from ivyea_agent import self_manage
+
+    monkeypatch.setattr(self_manage, "_pid_running", lambda pid: False)
+    monkeypatch.setattr(self_manage, "_probe_health", lambda h, p: {"ok": True})
+    monkeypatch.setattr(self_manage, "_discover_service_pid", lambda port: 0)
+
+    res = self_manage.service_stop(timeout=1)
+    assert res["ok"] is False
+    assert res["error"] == "service_running_but_pid_unknown"
+
+
+def test_service_stop_still_reports_already_stopped_when_truly_down(ivyea_home, monkeypatch):
+    from ivyea_agent import self_manage
+
+    monkeypatch.setattr(self_manage, "_pid_running", lambda pid: False)
+    monkeypatch.setattr(self_manage, "_probe_health", lambda h, p: {"ok": False})
+    monkeypatch.setattr(self_manage, "_discover_service_pid", lambda port: 0)
+
+    res = self_manage.service_stop(timeout=1)
+    assert res["ok"] is True and res["already_stopped"] is True
