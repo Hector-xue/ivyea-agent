@@ -3338,7 +3338,18 @@ def _cmd_policy(args: argparse.Namespace) -> int:
 
 
 def _cmd_image(args: argparse.Namespace) -> int:
-    from . import image_audit, ocr, vision
+    from . import image_audit, local_vision, ocr, vision
+    if args.action == "local":
+        # 让用户能直接看到 T3 到底"读"到了什么。没有这个出口时，本地视觉是个
+        # 只在带图对话里间接生效的黑盒——降级结果对不对没法自己核。
+        result = local_vision.analyze(args.paths or [], recursive=not args.no_recursive,
+                                      max_images=args.max_images)
+        text = local_vision.render(result)
+        if args.prompt:
+            text += "\n## 注入主脑的文本\n\n" + local_vision.render_for_text_model(
+                result, question=args.context or "") + "\n"
+        print(text)
+        return 0
     if args.action == "ocr":
         print(ocr.render(ocr.run(args.paths or [], lang=args.lang or "eng", recursive=not args.no_recursive)))
         return 0
@@ -3943,8 +3954,9 @@ def build_parser() -> argparse.ArgumentParser:
     pvis.add_argument("--timeout", type=float, default=120.0)
     pvis.set_defaults(func=_cmd_vision)
 
-    pimg = sub.add_parser("image", help="Listing 图片资产诊断：audit / ocr / vision")
-    pimg.add_argument("action", choices=["audit", "ocr", "vision"])
+    pimg = sub.add_parser("image", help="Listing 图片资产诊断：audit / ocr / vision / local")
+    pimg.add_argument("action", choices=["audit", "ocr", "vision", "local"],
+                      help="local = 本地 CV+OCR 量化（视觉降级链 T3 用的就是它，纯本机、图片不出网）")
     pimg.add_argument("paths", nargs="+", help="图片文件或目录")
     pimg.add_argument("--no-recursive", action="store_true", help="目录扫描不递归")
     pimg.add_argument("--prompt", action="store_true", help="输出多模态大模型审核 prompt")

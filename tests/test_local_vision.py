@@ -157,6 +157,28 @@ def test_layout_from_ocr_boxes():
     assert local_vision._layout_from_ocr([], 1000, 1000) == {}
 
 
+def test_image_local_cli(tmp_path, capsys):
+    """`ivyea image local` —— 让用户能直接核 T3 到底读到了什么。
+
+    没有这个出口时本地视觉是个只在带图对话里间接生效的黑盒，降级结果对不对
+    用户没法自己验。
+    """
+    from ivyea_agent.cli import main
+
+    _canvas(tmp_path / "main.png", 1200, 1200, box=(300, 300, 899, 899))
+    assert main(["image", "local", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "本地视觉度量" in out
+    assert "1200×1200" in out
+    assert "主体占比" in out
+
+    assert main(["image", "local", str(tmp_path), "--prompt", "--context", "主图合规吗"]) == 0
+    out2 = capsys.readouterr().out
+    assert "注入主脑的文本" in out2
+    assert "主图合规吗" in out2
+    assert "禁止" in out2                      # 约束段必须跟着一起出去
+
+
 def test_broken_file_does_not_kill_the_batch(tmp_path):
     from ivyea_agent import local_vision
 
