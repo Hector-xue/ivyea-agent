@@ -123,3 +123,45 @@ def test_explicit_lock_is_not_silently_replaced_by_reading_other_repo(tmp_path):
     adopted = task_scope.adopt_project_from_path(ctx, ops / "README.md")
     assert adopted == ""
     assert ctx.target_root == str(agent)
+
+
+# ── 复杂度判据只看用户说的话 ──────────────────────────────────────────────
+
+
+def test_injected_knowledge_does_not_make_a_simple_task_complex():
+    """**注入的检索证据不算用户说的话。**
+
+    真事：用户在任务台打了 28 个字「把 UK 站某活动的日预算改成 8」，知识检索往后面
+    追加了 3851 字的证据块（里面自带"执行/分析/诊断"这些词）。复杂度判据拿整段去判，
+    命中"动作词 + 长度≥60"，把一步操作判成复杂多步任务 —— 于是整套 todo + 阶段汇报
+    状态机启动，同一个动作被拦两轮，来回几十条消息，用户等了 8 分钟才看到结果。
+    """
+    from ivyea_agent.task_scope import requires_progress_reporting
+
+    plain = "把 UK 站『绿植零号手动』这个广告活动的日预算改成 8"
+    injected = plain + """
+
+[Ivyea 本地知识检索 / 亚马逊知识证据]
+检索决策：risk=medium reason=amazon_domain_question。
+[K1] 2026年7月利润-提成.xlsx | authority=account_local
+     执行摘要：分析各 ASIN 的利润与提成，诊断异常项并给出处理建议……
+[K2] 广告优化方法论 | 执行前先分析大盘，再逐条诊断关键词表现……
+"""
+    assert requires_progress_reporting(plain) is False
+    assert requires_progress_reporting(injected) is False, "注入的证据把简单任务撑成了复杂任务"
+
+
+def test_really_complex_work_still_triggers_reporting():
+    """别为了修上面那个把纪律整个关掉 —— 真的多步工程仍然要走汇报闭环。"""
+    from ivyea_agent.task_scope import requires_progress_reporting
+
+    assert requires_progress_reporting(
+        "帮我把这个仓库的广告模块重构一遍，先分析现状再制定方案然后逐步实施") is True
+
+
+def test_user_said_strips_every_known_injection_marker():
+    from ivyea_agent.task_scope import _user_said
+
+    for marker in ("[Ivyea 本地知识检索 / 亚马逊知识证据]", "[知识引用门禁]",
+                   "[用户显式引用的资料 —— 优先据此作答]", "[角色设定 —— 按这个身份作答]"):
+        assert _user_said(f"改一下预算\n\n{marker}\n一堆注入内容") == "改一下预算"
