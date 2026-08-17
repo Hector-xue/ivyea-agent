@@ -136,3 +136,190 @@ def test_skill_cli(capsys):
     assert main(["skill", "export-lock"]) == 0
     out = capsys.readouterr().out
     assert "skills.lock.json" in out
+
+
+# ── SKILL.md + frontmatter（业界通行格式）─────────────────────────────────────
+
+
+def _write_skill(root, rel: str, frontmatter: str, body: str = "步骤一。", assets=None):
+    d = root / rel
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(f"---\n{frontmatter}\n---\n\n{body}\n", encoding="utf-8")
+    for path, content in (assets or {}).items():
+        f = d / path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(content, encoding="utf-8")
+    return d
+
+
+def test_frontmatter_skill_loads_without_a_skill_json(ivyea_home, monkeypatch):
+    """外部技能库（IvyeaOps 的 Skill 中心就是）用的就是这个格式，不该再要求 skill.json。"""
+    import importlib
+    importlib.reload(skills)
+    _write_skill(ivyea_home / "skills", "amazon/search-term",
+                 "name: search-term\ndescription: Analyze search term reports\n"
+                 "description_zh: 分析广告搜索词报表\nversion: 2.0.0\n"
+                 "triggers: [搜索词, 否词]")
+
+    rows = {s.id: s for s in skills.list_skills()}
+    sk = rows.get("amazon.search_term")
+    assert sk is not None
+    assert sk.version == "2.0.0"
+    assert sk.description == "分析广告搜索词报表"      # 中文描述优先
+    assert sk.triggers == ["搜索词", "否词"]
+    assert sk.domain == "amazon"
+
+
+def test_hermes_style_tags_become_triggers(ivyea_home):
+    import importlib
+    importlib.reload(skills)
+    _write_skill(ivyea_home / "skills", "amazon/legacy",
+                 "name: legacy\ndescription: d\n"
+                 "metadata:\n  hermes:\n    tags: [ads, 报表]")
+    sk = {s.id: s for s in skills.list_skills()}["amazon.legacy"]
+    assert sk.triggers == ["ads", "报表"]
+
+
+def test_skill_json_still_wins_for_existing_skills(ivyea_home):
+    """老技能一个都不能受影响。"""
+    import importlib
+    importlib.reload(skills)
+    d = _write_skill(ivyea_home / "skills", "amazon/both",
+                     "name: both\ndescription: 来自 frontmatter")
+    (d / "skill.json").write_text(json.dumps(
+        {"id": "amazon.both", "description": "来自 skill.json"}), encoding="utf-8")
+    sk = {s.id: s for s in skills.list_skills()}["amazon.both"]
+    assert sk.description == "来自 skill.json"
+
+
+def test_external_roots_are_loaded_in_place(ivyea_home, tmp_path, monkeypatch):
+    """上游把自己的技能库**原地**挂上来，不用复制、不用转格式。"""
+    import importlib
+    external = tmp_path / "hub" / "amazon"
+    _write_skill(external, "market-research", "name: market-research\ndescription_zh: 市场调研")
+    monkeypatch.setenv("IVYEA_SKILL_ROOTS", str(external))
+    importlib.reload(skills)
+
+    sk = {s.id: s for s in skills.list_skills()}.get("amazon.market_research")
+    assert sk is not None
+    assert sk.scope == "external"
+    # 目录名就是 domain —— 把 .../skills/amazon 整个挂上来也能得到正确的域
+    assert sk.domain == "amazon"
+    assert sk.path == str(external / "market-research")
+
+
+def test_external_roots_can_never_shadow_builtin(ivyea_home, tmp_path, monkeypatch):
+    """外部库里随手一个同名技能就顶掉内置技能，是最难查的那种故障。"""
+    import importlib
+    external = tmp_path / "hub" / "amazon"
+    _write_skill(external, "budget-pacing",
+                 "id: amazon.budget_pacing\nname: budget-pacing\ndescription_zh: 冒牌货")
+    monkeypatch.setenv("IVYEA_SKILL_ROOTS", str(external))
+    importlib.reload(skills)
+
+    sk = {s.id: s for s in skills.list_skills()}["amazon.budget_pacing"]
+    assert sk.scope == "builtin"
+    assert "冒牌货" not in sk.description
+
+
+def test_personal_skills_still_override_builtin(ivyea_home):
+    """个人技能覆盖内置 —— 这是本机作者的明确意图，语义不能跟着一起改掉。"""
+    import importlib
+    importlib.reload(skills)
+    _write_skill(ivyea_home / "skills", "amazon/mine",
+                 "id: amazon.budget_pacing\nname: mine\ndescription_zh: 我自己的版本")
+    sk = {s.id: s for s in skills.list_skills()}["amazon.budget_pacing"]
+    assert sk.description == "我自己的版本"
+
+
+def test_the_model_is_told_where_the_assets_are(ivyea_home):
+    """说明书写着"运行 scripts/x.py"，就得告诉它这些文件在哪。"""
+    import importlib
+    importlib.reload(skills)
+    d = _write_skill(ivyea_home / "skills", "amazon/with-assets",
+                     "name: with-assets\ndescription_zh: 带脚本的技能",
+                     body="按 scripts/render.py 渲染。",
+                     assets={"scripts/render.py": "print(1)"})
+    sk = {s.id: s for s in skills.list_skills()}["amazon.with_assets"]
+    assert str(d) in skills.render_skill(sk)
+
+    text, _ = skills.context_for_query("带脚本的技能", limit=2, max_chars=2000)
+    assert str(d) in text
+
+
+def test_no_assets_means_no_directory_noise(ivyea_home):
+    import importlib
+    importlib.reload(skills)
+    _write_skill(ivyea_home / "skills", "amazon/plain", "name: plain\ndescription_zh: 纯说明书")
+    sk = {s.id: s for s in skills.list_skills()}["amazon.plain"]
+    assert "文件目录" not in skills.render_skill(sk)
+
+
+def test_broken_frontmatter_does_not_take_down_the_loader(ivyea_home):
+    import importlib
+    importlib.reload(skills)
+    _write_skill(ivyea_home / "skills", "amazon/good", "name: good\ndescription_zh: 好的")
+    bad = ivyea_home / "skills" / "amazon" / "bad"
+    bad.mkdir(parents=True)
+    (bad / "SKILL.md").write_text("---\n: : 坏 yaml : :\n---\n正文", encoding="utf-8")
+
+    ids = {s.id for s in skills.list_skills()}
+    assert "amazon.good" in ids
+    assert "amazon.search_term_optimizer" in ids      # 内置的照常在
+
+
+def test_archive_dirs_are_skipped(ivyea_home):
+    import importlib
+    importlib.reload(skills)
+    _write_skill(ivyea_home / "skills", "amazon/.archive/old", "name: old\ndescription_zh: 归档")
+    assert "amazon.old" not in {s.id for s in skills.list_skills()}
+
+
+# ── 中文匹配 ────────────────────────────────────────────────────────────────
+
+
+def test_chinese_queries_are_split_into_bigrams():
+    """没有分词器时，整句中文会被当成一个词 —— 那样中文提问永远匹配不到技能。"""
+    terms = skills._terms("做个市场调研")
+    assert "市场" in terms and "调研" in terms
+
+
+def test_mixed_language_tokens_still_yield_chinese_bigrams():
+    terms = skills._terms("给 ASIN 做审计分析")
+    assert "asin" in terms
+    assert "审计" in terms
+
+
+def test_a_natural_chinese_question_matches_a_builtin_skill():
+    """这是这次改动要保住的东西：用户就是这么说话的。"""
+    hits = skills.search("帮我看看预算怎么放量", limit=3)
+    assert hits and any(sk.id == "amazon.budget_pacing" for sk, _ in hits)
+
+
+def test_a_long_body_cannot_outrank_a_skill_that_is_actually_about_it(ivyea_home):
+    """切了 2-gram 之后，长正文会靠噪音堆分。实测出现过一个几千字的技能在
+    完全不相干的查询上排第一 —— 所以正文命中要封顶、标识和描述要加权。"""
+    import importlib
+    importlib.reload(skills)
+    root = ivyea_home / "skills"
+    _write_skill(root, "amazon/on-topic",
+                 "name: on-topic\ndescription_zh: 库存周转与补货节奏",
+                 body="简短。")
+    _write_skill(root, "amazon/rambling",
+                 "name: rambling\ndescription_zh: 别的事",
+                 body=("库存 周转 补货 " * 200))
+
+    hits = skills.search("库存周转怎么算", limit=2)
+    assert hits[0][0].id == "amazon.on_topic"
+
+
+def test_trigger_lists_written_with_chinese_separators_are_split(ivyea_home):
+    """作者常把一行写成「调研报告、选品调研、市场分析」。不切开就是一条没法命中的长串。"""
+    import importlib
+    importlib.reload(skills)
+    _write_skill(ivyea_home / "skills", "amazon/research",
+                 "name: research\ndescription_zh: 调研\n"
+                 "triggers: ['调研报告、选品调研、市场分析']")
+    sk = {s.id: s for s in skills.list_skills()}["amazon.research"]
+    assert "市场分析" in sk.triggers
+    assert "选品调研" in sk.triggers
