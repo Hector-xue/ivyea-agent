@@ -43,6 +43,12 @@ dependencies = [
     # 系统包 mesa-libGL（RHEL 系）/ libgl1（Debian 系）。
     "rapidocr-onnxruntime>=1.4",
     "openpyxl>=3.1",
+    # 技能的 SKILL.md frontmatter 用它解析。业界通行的技能格式（Anthropic Agent
+    # Skills / Claude Code）就是 Markdown + YAML frontmatter，要认这个格式就绕不开
+    # 一个 YAML 解析器。**不手写**：这些 description 里有冒号、中文标点和引号，
+    # 手写解析器在这种输入上错得很安静。加载器对它缺失是容错的（跳过 frontmatter
+    # 技能而不是整个崩掉），所以老环境升级上来也不会炸。
+    "PyYAML>=5.4",
     "httpx>=0.27",
     "prompt_toolkit>=3.0",
     "Pygments>=2.17",
