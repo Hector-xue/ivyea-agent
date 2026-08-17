@@ -192,9 +192,39 @@ def _matches(text: str, candidates: list[Path]) -> list[Path]:
     return matched
 
 
+#: 注入块的开头标记。这些内容是**系统贴上去的**，不是用户说的话。
+_INJECTED_MARKERS = (
+    "[ivyea 本地知识检索",
+    "[知识引用门禁]",
+    "[用户显式引用的资料",
+    "[用户附图",
+    "[角色设定",
+    "[必须遵循的技能说明书]",
+)
+
+
+def _user_said(text: str) -> str:
+    """只保留用户真正打的那部分，切掉系统注入的检索证据 / 门禁提示 / 人设。
+
+    为什么必须切：判定"这活复不复杂"用的是文本长度和动作词密度，而知识检索会往
+    用户那句话后面追加几千字的证据块（实测 28 字的一句话被撑到 3851 字，里面自带
+    "执行/分析/诊断"这些词）。于是"把某个活动的预算改成 8"被判成复杂多步任务，
+    触发 todo + 阶段汇报的整套状态机 —— 一个动作被拦了两轮、来回几十条消息、
+    用户等了 8 分钟。**判据必须只看人说的话。**
+    """
+    body = text or ""
+    low = body.lower()
+    cut = len(body)
+    for marker in _INJECTED_MARKERS:
+        i = low.find(marker)
+        if i != -1:
+            cut = min(cut, i)
+    return body[:cut].strip()
+
+
 def requires_progress_reporting(text: str) -> bool:
     """Conservatively identify work that benefits from a reporting lifecycle."""
-    clean = _clean_query(text).lower()
+    clean = _clean_query(_user_said(text)).lower()
     if not clean:
         return False
     if any(term in clean for term in _STRONG_PROGRESS_HINTS):
