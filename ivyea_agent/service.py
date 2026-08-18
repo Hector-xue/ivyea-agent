@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from . import (
-    __version__, ads_evidence, agent_loop, code_agent, config, knowledge, knowledge_evidence,
+    __version__, ads_evidence, agent_loop, code_agent, config, context, knowledge, knowledge_evidence,
     knowledge_governance, knowledge_quality, knowledge_sync, models,
     progress_reporting, retrieval, routing, security, self_manage, sessions, skills, stream_json,
     task_runner, traces, transcript, workspace,
@@ -1184,12 +1184,17 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
     plan_mode = payload.get("plan_mode")
     if plan_mode is None:
         plan_mode = True
+    # 非流式入口没有回传确认卡的通道，所以 approval="remote" 在这里仍然是只读
+    # （问不到人就不能写）。只有 approval="auto"（调用方已一次性授权）能开写。
+    auto_approval = _approval_mode(payload.get("approval")) == "auto"
     ctx = ToolContext(
-        execute=False,
+        execute=bool(auto_approval and not plan_mode),
         plan_mode=bool(plan_mode),
         workspace=str(payload.get("workspace") or ""),
         task_id=str(payload.get("task_id") or ""),
     )
+    if auto_approval and not plan_mode:
+        ctx.perm.accept_edits = True
     if isinstance(payload.get("ops_bridge"), dict):
         ctx.ops_bridge = dict(payload.get("ops_bridge") or {})
     if isinstance(payload.get("ops_context"), dict):
@@ -1265,18 +1270,23 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         send("error", data)
         return data
 
-    # 远程审批模式：只有调用方明确要（approval="remote"）才放开写。
-    # 不传 approval 时下面这几行的结果与改动前逐字一致 —— 老调用方零影响。
-    remote_approval = str(payload.get("approval") or "none").strip() == "remote"
+    # 审批三档（对齐 CLI 的 --permission-mode）：
+    #   none   = 只读，写工具一律不落地（默认，老调用方零影响）
+    #   remote = 逐项审批，每个写操作弹网页确认卡、等人点
+    #   auto   = 完全放行，写操作不再问人（等价 CLI 的 --approve-all / accept_edits）
+    # 不传 approval 时下面这几行的结果与改动前逐字一致。
+    approval_mode = _approval_mode(payload.get("approval"))
+    remote_approval = approval_mode == "remote"
+    auto_approval = approval_mode == "auto"
     plan_mode = payload.get("plan_mode")
     if plan_mode is None:
-        # 只读仍是默认。开了远程审批的调用方通常会显式传 plan_mode=false；
+        # 只读仍是默认。开了审批/放行的调用方通常会显式传 plan_mode=false；
         # 没传就仍按只读走，宁可少做也不要在没人看着的时候动线上数据。
         plan_mode = True
     ctx = ToolContext(
-        # execute 只在"能真的问到人"的前提下打开：写工具落地前必过 permission，
-        # 而 permission 这时走的是网页确认卡。
-        execute=bool(remote_approval and not plan_mode),
+        # execute 只在"有人兜底"的前提下打开：逐项审批是"写之前问到人"，
+        # 完全放行是"人已经提前一次性授权了这一轮"。两者都不是无声开写。
+        execute=bool((remote_approval or auto_approval) and not plan_mode),
         plan_mode=bool(plan_mode),
         workspace=str(payload.get("workspace") or ""),
         task_id=str(payload.get("task_id") or ""),
@@ -1297,6 +1307,11 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
             send, ctx.session_id, client_gone=client_gone,
             timeout=float(payload.get("approval_timeout") or DEFAULT_APPROVAL_TIMEOUT),
         ).prompt
+    if auto_approval:
+        # 完全放行 = 本轮所有写操作自动批准，一张确认卡都不弹（CLI 的 --approve-all
+        # 走的是同一个开关）。**只在 plan_mode=false 时才有意义**：计划模式下写工具
+        # 在更外层就被拦住了，这里放行也落不了地。
+        ctx.perm.accept_edits = bool(not plan_mode)
 
     # 这一轮走哪条路线（闲聊快车道 / 板块直达 / 常规）。判不准一律落 work，
     # 也就是改动前的行为。见 routing.py 顶部那段"慢的是步数不是模型"。
@@ -1318,9 +1333,14 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         send("error", data)
         return data
     send("start", {"ok": True, "session_id": ctx.session_id, "read_only": bool(plan_mode),
-                   "approval": "remote" if remote_approval else "none",
+                   "approval": approval_mode,
                    "lane": route.lane, "lane_reason": route.reason,
                    "model": health()["model"]})
+
+    # 上下文占用：**在第一个 token 之前就发**。进度条要回答"这轮带了多少东西进去"，
+    # 等收尾再说就晚了 —— 那时候用户已经在等回答，看不看进度条都无所谓了。
+    turn_tools = _tools_for(payload, route)
+    send("context", context.snapshot(messages, turn_tools, model_cfg.get("model", "")))
 
     # 自动技能匹配：serve 一直只注入知识证据、不选技能（CLI 会）。开了 auto_skill
     # 就用同一套 skills.context_for_query，并把命中结果发给前端画技能芯片。
@@ -1369,7 +1389,7 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
             max_steps=(_int(payload.get("max_steps"), 0) or None),
             narrate=narrate,
             emit=emit,
-            tools=_tools_for(payload, route),
+            tools=turn_tools,
             render=lambda text: send("token", {"text": security.redact_text(str(text))}),
             model=model_cfg.get("model", ""),
             # Web 前端以 final.text 为准整体替换气泡：带知识引证也照常流式，
@@ -1419,6 +1439,9 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         "read_only": bool(plan_mode),
         "todos": list(ctx.todos or []),
         "progress": progress_reporting.public_state(ctx),
+        # 收尾再算一次：本轮的工具结果全都留在上下文里了，进度条要走到本轮之后的
+        # 真实位置 —— 下一轮就是从这里起步的。
+        "context": context.snapshot(messages, turn_tools, model_cfg.get("model", "")),
     }
     if ctx.vision_tier:
         data["vision_tier"] = dict(ctx.vision_tier)
@@ -2145,6 +2168,21 @@ def _tools_for(payload: dict[str, Any], route: "routing.Route | None" = None) ->
     return None
 
 
+#: 审批档位的别名 → 规范值。CLI 那边叫 `approve-all`，工作台叫 `auto`，说的是同一档；
+#: 认不出来的值一律落 "none"（只读）—— 审批档位判错的方向必须是"少做"。
+_APPROVAL_ALIASES = {
+    "": "none", "none": "none", "readonly": "none", "read_only": "none", "plan": "none",
+    "remote": "remote", "ask": "remote",
+    "auto": "auto", "all": "auto", "approve-all": "auto", "approve_all": "auto",
+    "accept-edits": "auto", "acceptedits": "auto", "bypass": "auto",
+}
+
+
+def _approval_mode(raw: Any) -> str:
+    """把调用方给的 approval 收敛成 none / remote / auto。"""
+    return _APPROVAL_ALIASES.get(str(raw or "none").strip().lower(), "none")
+
+
 def _model_requires_key(settings: dict[str, Any]) -> bool:
     auth = (settings.get("auth_type") or "api_key").lower()
     if auth in ("none", "aws_sdk"):
@@ -2157,7 +2195,19 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext,
     system = agent_loop.SYSTEM_PROMPT + agent_loop.runtime_context_note()
     if ctx.plan_mode:
         system += agent_loop.PLAN_NOTE
-    system += "\n\n[IvyeaOps 嵌入模式] 当前默认只读。需要写入广告、文件或执行命令时，先输出计划和审批项，不要在本轮直接执行。"
+    # 这句必须跟着审批档位走。**曾经它是无条件拼上去的** —— 于是用户在界面上选了
+    # 「逐项审批」「完全放行」，系统提示词里却还写着"当前默认只读、不要在本轮直接
+    # 执行"，模型照着这句话只给方案不动手，看起来就是那两档开关坏了。
+    if ctx.plan_mode:
+        system += "\n\n[IvyeaOps 嵌入模式] 当前只读。需要写入广告、文件或执行命令时，先输出计划和审批项，不要在本轮直接执行。"
+    elif ctx.perm.accept_edits:
+        system += ("\n\n[IvyeaOps 嵌入模式] 当前完全放行：用户已经为这一轮授权了写操作，"
+                   "该动手就动手，不要再逐条问他要不要执行。但每一次写入前仍要说清"
+                   "「改什么、改成什么、影响面」，做完给出可核对的结果。")
+    else:
+        system += ("\n\n[IvyeaOps 嵌入模式] 当前逐项审批：可以执行写操作，每一次写入会弹确认卡给用户点，"
+                   "所以直接调用对应工具即可，不要因为怕改坏而退回「只给方案」。工具参数要写准，"
+                   "并在确认卡的说明里讲清这一步会改什么。")
     if ctx.ops_bridge:
         current_board = str((ctx.ops_context or {}).get("board") or (ctx.ops_context or {}).get("pathname") or "").strip()
         system += (
@@ -2405,6 +2455,15 @@ def _public_session_detail(data: dict[str, Any], *, turns: int = _DETAIL_TURNS_D
     skills = [s for s in (data.get("skill_matches") or [])
               if str(s.get("anchor") or "") in call_ids]
 
+    # 这条会话现在占多少上下文。**按整份存档算，不是按这一页** —— 分页只影响
+    # 界面显示多少轮，下一轮真正要带进模型的是整份历史。
+    #
+    # 为什么要在详情里给：进度条此前只能靠 chat 流里的 context 事件长出来，于是
+    # 打开一条历史会话时它是空的（用户看到的是"这条会话没有进度条"），而切换会话
+    # 时留在界面上的还是上一条的数 —— 一个更糟的状态：它看起来有效，其实是别人的。
+    model_id = str(data.get("model") or "") or config.get_model_config().get("model", "")
+    ctx_snapshot = context.snapshot(list(data.get("messages") or []), None, model_id)
+
     return {
         "id": data.get("id", ""),
         "created": data.get("created"),
@@ -2414,6 +2473,7 @@ def _public_session_detail(data: dict[str, Any], *, turns: int = _DETAIL_TURNS_D
         "messages": rows,
         "steps": steps,
         "skill_matches": skills,
+        "context": ctx_snapshot,
         "turns": {"total": total, "from": start_turn, "to": end_turn,
                   "has_more": start_turn > 0},
     }

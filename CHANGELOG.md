@@ -10,6 +10,32 @@
 
 ---
 
+## [v1.15.1] - 2026-08-18
+
+### 新增
+
+- **审批三档**（[ADR-0011](./docs/decisions/0011-approval-tiers.md)）。`chat` / `chat/stream`
+  的 `approval` 现在收三个值：`none` 只读（默认，行为与改动前逐字一致）、`remote` 逐项审批
+  （每次写入弹确认卡）、**`auto` 完全放行**（本轮写操作不再逐条问人，等价 CLI 的
+  `--permission-mode approve-all`）。长任务里一次授权就够，不用守着屏幕点十几次确认。
+  认不出的档位值一律按只读处理。
+- **上下文用量上报**（[ADR-0012](./docs/decisions/0012-context-usage-snapshot.md)）。
+  serve 在第一个 token 之前发一个 `context` 事件、收尾时再随 `final.context` 发一份：
+  `{used, window, percent, breakdown{system,tools,messages}, estimated}`。工作台据此画
+  上下文进度条 —— 窗口还剩多少、是被系统提示词/工具/对话哪一块吃掉的，一眼可见。
+  数是**估算**（按字符，与服务商回报的 prompt_tokens 实测相差约 2%），事件里明说。
+  模型窗口按 id 匹配，查不到落 128K 保守值，`ivyea config set context_window` 可覆盖。
+  会话详情（`chat/sessions/{id}`）也带一份 `context`，**按整份存档算、不随分页变** ——
+  这样调用方打开一条历史会话时立刻就能画出进度条，不必等用户再问一句。
+
+### 修复
+
+- **选了「逐项审批」，模型却仍被告知"当前只读"**。`[IvyeaOps 嵌入模式]` 那句只读提示词
+  是无条件拼进系统提示的，于是放开写的两档里模型照样只给方案不动手 —— 界面上开关变了、
+  行为一点没变。现在这句话跟着档位走，三档三句话。
+
+---
+
 ## [v1.15.0] - 2026-08-18
 
 ### 修复
