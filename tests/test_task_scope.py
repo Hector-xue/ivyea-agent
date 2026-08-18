@@ -163,5 +163,56 @@ def test_user_said_strips_every_known_injection_marker():
     from ivyea_agent.task_scope import _user_said
 
     for marker in ("[Ivyea 本地知识检索 / 亚马逊知识证据]", "[知识引用门禁]",
-                   "[用户显式引用的资料 —— 优先据此作答]", "[角色设定 —— 按这个身份作答]"):
+                   "[用户显式引用的资料 —— 优先据此作答]", "[角色设定 —— 按这个身份作答]",
+                   # 这两条曾经漏掉：模块里有过**两份同名清单**，下面那份把上面那份
+                   # 整个遮蔽，而它恰好没有技能这一条。见 task_scope._INJECTED_MARKERS。
+                   "[Ivyea Skill：本轮相关可复用流程]", "[工程上下文]",
+                   "[Ivyea 内置亚马逊知识库：本轮相关摘录]", "[任务范围锁定 / 执行契约]"):
         assert _user_said(f"改一下预算\n\n{marker}\n一堆注入内容") == "改一下预算"
+
+
+def test_injection_markers_cover_every_real_injection_site():
+    """清单必须覆盖**代码里真的会拼到用户消息后面**的每一个块头。
+
+    只测"清单里的都能切"是不够的 —— 上一次出事正是因为某个真实注入点根本不在
+    清单里，而它照样通过了那条用例。这里反过来，从源码里把注入点抓出来对账。
+    """
+    import re
+    from pathlib import Path
+    from ivyea_agent import task_scope
+
+    root = Path(task_scope.__file__).parent
+    headers: set[str] = set()
+    for name in ("service.py", "cli.py"):
+        src = (root / name).read_text(encoding="utf-8")
+        # 只看**拼进用户消息**的那些（system += 是系统提示，判据本来就看不到它）。
+        # 形如  user_content += "\n\n[某某块头]\n" ...
+        headers |= set(re.findall(
+            r'\b(?:user_content|message|content|user_msg)\s*\+=\s*\(?\s*"\\n\\n(\[[^"\\]{2,40})', src))
+    assert headers, "没抓到任何注入点，正则该跟着代码更新"
+    # 例外：这一块拼的是**用户自己补的那句话**（续跑任务时的追加指令），
+    # 不是系统上下文。它必须留在判据里 —— 切掉就等于没听见用户刚说的话。
+    user_speech = {"[本轮补充要求]"}
+    lowered = tuple(m.lower() for m in task_scope._INJECTED_MARKERS)
+    for head in headers - user_speech:
+        assert any(head.lower().startswith(m) or m in head.lower() for m in lowered), (
+            f"注入块 {head!r} 不在 _INJECTED_MARKERS 里 —— 它会被当成用户说的话，"
+            f"把复杂度判据带偏"
+        )
+
+
+def test_short_command_stays_simple_even_with_skill_injected():
+    """一句"测试"被自动匹配的技能手册撑到 1600 字，仍然是简单任务。
+
+    实测事故：这条判成复杂 → 护栏要求先 todo_write + progress_update → 模型
+    18 步里 17 步在写待办和阶段汇报，一个词等了 2 分 16 秒。
+    """
+    from ivyea_agent.task_scope import requires_progress_reporting
+
+    # 注入块在这里**手写**，不走 skills.context_for_query —— 那边已经加了"名义命中"
+    # 闸门、"测试"不再命中任何技能。但判据必须独立扛得住长注入：显式注入
+    # （payload 带 skill=）和别的注入块照样会贴上来。
+    body = "执行 分析 优化 检查 广告 listing 报表 " * 40
+    injected = "测试\n\n[Ivyea Skill：本轮相关可复用流程]\n" + body
+    assert len(injected) > 200, "这条用例的前提就是注入块很长"
+    assert requires_progress_reporting(injected) is False

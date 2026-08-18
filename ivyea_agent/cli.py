@@ -1949,10 +1949,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if _lim > 0 and pricing.today_spend() >= _lim:
             narrate(ui.message("warn", f"今日已花 ¥{pricing.today_spend():.2f} 达上限 ¥{_lim:.2f}，已暂停。"))
             return {"text": "", "usage": {}, "blocked": True}
-        from . import engineering_context, knowledge, skills, task_scope
+        from . import engineering_context, knowledge, routing, skills, task_scope
+        # 这一轮走哪条路线。判据只看用户打的那句话，和 serve 用的是同一个函数
+        # （见 ADR-0010）。**ctx 在终端里跨轮复用**，所以这一行每轮都要赋值 ——
+        # 只在命中时置 True 的话，一句"你好"会把汇报纪律一路关到下一个真任务上。
+        route = routing.classify(line, ops_bridge=bool(getattr(ctx, "ops_bridge", None)))
+        ctx.progress_reporting_disabled = route.is_chat or route.is_board
         scope_note = task_scope.prepare_query(ctx, line, messages, base=os.getcwd())
-        ectx = engineering_context.build(ctx.workspace or os.getcwd(), line)
-        _inject = bool(getattr(ctx, "asin", "")) or _is_amazon_domain(line) or not _looks_like_code_task(line)
+        # 闲聊不扫工程上下文：那是一次真实的目录扫描，为一句问候跑它纯属浪费。
+        ectx = "" if route.is_chat else engineering_context.build(ctx.workspace or os.getcwd(), line)
+        _inject = (not route.is_chat) and (
+            bool(getattr(ctx, "asin", "")) or _is_amazon_domain(line) or not _looks_like_code_task(line))
         kev = knowledge.evidence_context(line, limit=4) if _inject else {
             "text": "", "ids": [], "citations": [], "should_retrieve": False, "risk": "none",
         }
@@ -1971,6 +1978,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 user_content, _mention_imgs, cfg.get_model_config(), narrate)
         if scope_note:
             user_content += "\n\n" + scope_note
+        if route.is_board:
+            user_content += routing.board_hint(route)
         if ectx:
             user_content += "\n\n[工程上下文]\n" + ectx
             narrate(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))
@@ -1996,7 +2005,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         ctx.provider = provider
         out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""),
                                          render=render, narrate=narrate, cancel_check=cancel_check,
-                                         render_reasoning=render_reasoning, emit=emit)
+                                         render_reasoning=render_reasoning, emit=emit,
+                                         tools=routing.tools_for(route))
         c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
         out["cost"] = c or 0.0
         _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
@@ -2120,12 +2130,16 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 if not _ask(f"今日已花 ¥{pricing.today_spend():.2f} 达上限 ¥{_lim:.2f}，仍继续？(y/N)").strip().lower().startswith("y"):
                     print(ui.message("info", "已暂停。调整上限：ivyea config set daily_cost_limit_cny <元>"))
                     continue
-            from . import engineering_context, knowledge, skills, task_scope
+            from . import engineering_context, knowledge, routing, skills, task_scope
+            # 同上（TUI 那一份的注释）：路线判定与 serve 共用，且每轮都要赋值。
+            route = routing.classify(line, ops_bridge=bool(getattr(ctx, "ops_bridge", None)))
+            ctx.progress_reporting_disabled = route.is_chat or route.is_board
             scope_note = task_scope.prepare_query(ctx, line, messages, base=os.getcwd())
-            ectx = engineering_context.build(ctx.workspace or os.getcwd(), line)
+            ectx = "" if route.is_chat else engineering_context.build(ctx.workspace or os.getcwd(), line)
             # 门控：工程/代码任务且无广告域信号(也无 ASIN) → 不注入亚马逊知识/skill，
             # 避免污染上下文、烧 token、把模型往运营方向带偏。广告/通用/模糊任务一律照常注入。
-            _inject_domain = (
+            # 闲聊路线更进一步：知识和技能都不注。
+            _inject_domain = (not route.is_chat) and (
                 bool(getattr(ctx, "asin", "")) or _is_amazon_domain(line)
                 or not _looks_like_code_task(line)
             )
@@ -2147,6 +2161,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                     user_content, _mention_imgs, cfg.get_model_config(), print)
             if scope_note:
                 user_content += "\n\n" + scope_note
+            if route.is_board:
+                user_content += routing.board_hint(route)
             if ectx:
                 user_content += "\n\n[工程上下文]\n" + ectx
                 print(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))
@@ -2182,7 +2198,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                         provider, ctx, messages, model=mcfg.get("model", ""),
                         render=lambda t: (rp.done(), sp.render(t)),
                         render_reasoning=rp.render,
-                        narrate=lambda s: (rp.done(), sp.commit(), print(s)))
+                        narrate=lambda s: (rp.done(), sp.commit(), print(s)),
+                        tools=routing.tools_for(route))
                     rp.done()
                     sp.rerender(out["text"])
                 elif render_md:
@@ -2192,13 +2209,15 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                         provider, ctx, messages, model=mcfg.get("model", ""),
                         render=lambda t: (rp.done(), spin.tick(t)),
                         render_reasoning=rp.render,
-                        narrate=lambda s: (rp.done(), spin.clear(), print(s)))
+                        narrate=lambda s: (rp.done(), spin.clear(), print(s)),
+                        tools=routing.tools_for(route))
                     rp.done()
                     spin.clear()
                     print(f"\n{_C['c']}●{_C['x']} " + markdown.render(out["text"]))   # 回答前留一空行
                 else:
                     print(f"{_C['c']}●{_C['x']} ", end="", flush=True)
-                    out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""))
+                    out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""),
+                                                     tools=routing.tools_for(route))
                 c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
                 _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
                 if c:

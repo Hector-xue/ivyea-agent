@@ -323,3 +323,27 @@ def test_trigger_lists_written_with_chinese_separators_are_split(ivyea_home):
     sk = {s.id: s for s in skills.list_skills()}["amazon.research"]
     assert "市场分析" in sk.triggers
     assert "选品调研" in sk.triggers
+
+
+def test_auto_injection_requires_a_named_hit(ivyea_home):
+    """自动注入只认"这条技能就是干这个的"，不认正文里撞了几个常用词。
+
+    线上事故：一句「测试」以 score=2 命中 ASIN 审计手册（全靠正文里出现过两次
+    "测试"），于是 1600 字流程被塞进上下文，把模型带进一整套审计动作。
+    """
+    import importlib
+    importlib.reload(skills)
+    root = ivyea_home / "skills"
+    _write_skill(root, "amazon/audit",
+                 "name: audit\ndescription_zh: ASIN 深度审计\ntriggers: ['asin审计']",
+                 body="第一步先做连通性测试，再测试报表口径。测试通过后进入下一阶段。")
+
+    # 正文里有"测试"，但这条技能不是干"测试"的 —— 自动注入必须放过
+    assert skills.context_for_query("测试", limit=2) == ("", [])
+    # 人工翻库不设这道闸：搜得到才好挑
+    assert "amazon.audit" in [sk.id for sk, _ in skills.search("测试", limit=5)]
+    # 名义命中照常注入
+    # 注意：ivyea_home 夹具不隔离 settings.skill_roots，真实技能库照样在列，
+    # 所以这里断言"命中里有它"，不断言"只有它"。
+    text, ids = skills.context_for_query("asin审计", limit=3)
+    assert "amazon.audit" in ids and text

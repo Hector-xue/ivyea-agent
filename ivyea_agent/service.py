@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from . import (
     __version__, ads_evidence, agent_loop, code_agent, config, knowledge, knowledge_evidence,
     knowledge_governance, knowledge_quality, knowledge_sync, models,
-    progress_reporting, retrieval, security, self_manage, sessions, skills, stream_json,
+    progress_reporting, retrieval, routing, security, self_manage, sessions, skills, stream_json,
     task_runner, traces, transcript, workspace,
 )
 from .agent_tools import ToolContext
@@ -1298,19 +1298,36 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
             timeout=float(payload.get("approval_timeout") or DEFAULT_APPROVAL_TIMEOUT),
         ).prompt
 
+    # 这一轮走哪条路线（闲聊快车道 / 板块直达 / 常规）。判不准一律落 work，
+    # 也就是改动前的行为。见 routing.py 顶部那段"慢的是步数不是模型"。
+    route = routing.classify(
+        message,
+        ops_bridge=bool(ctx.ops_bridge),
+        has_attachments=bool(payload.get("images") or payload.get("references")),
+    )
+    if route.is_chat or route.is_board:
+        # 闲聊没有阶段可汇报；板块工具本身就是一次长任务、自己会回报进度 ——
+        # 这两种情况下 todo + 阶段汇报的状态机只会挡在实际动作前面（实测一句
+        # 「测试」18 步里 17 步花在这上面）。
+        ctx.progress_reporting_disabled = True
+
     try:
-        messages, created_at, turn_base = _chat_messages(message, payload, ctx)
+        messages, created_at, turn_base = _chat_messages(message, payload, ctx, route)
     except ValueError as exc:
         data = {"ok": False, "error": str(exc)}
         send("error", data)
         return data
     send("start", {"ok": True, "session_id": ctx.session_id, "read_only": bool(plan_mode),
                    "approval": "remote" if remote_approval else "none",
+                   "lane": route.lane, "lane_reason": route.reason,
                    "model": health()["model"]})
 
     # 自动技能匹配：serve 一直只注入知识证据、不选技能（CLI 会）。开了 auto_skill
     # 就用同一套 skills.context_for_query，并把命中结果发给前端画技能芯片。
-    if payload.get("auto_skill") and not str(payload.get("skill") or "").strip():
+    # 闲聊路线不选技能：一句问候配一本 1600 字的运营手册，除了把模型往
+    # "按手册做审计"带没有别的作用。
+    if (payload.get("auto_skill") and not str(payload.get("skill") or "").strip()
+            and not route.is_chat):
         matched = _auto_skill_context(message, messages)
         if matched:
             send("skill_match", stream_json.skill_match_event(ctx.session_id, matched))
@@ -1352,7 +1369,7 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
             max_steps=(_int(payload.get("max_steps"), 0) or None),
             narrate=narrate,
             emit=emit,
-            tools=_tools_for(payload),
+            tools=_tools_for(payload, route),
             render=lambda text: send("token", {"text": security.redact_text(str(text))}),
             model=model_cfg.get("model", ""),
             # Web 前端以 final.text 为准整体替换气泡：带知识引证也照常流式，
@@ -2113,11 +2130,17 @@ def _int(value: Any, default: int) -> int:
         return default
 
 
-def _tools_for(payload: dict[str, Any]) -> list | None:
+def _tools_for(payload: dict[str, Any], route: "routing.Route | None" = None) -> list | None:
     """工具集：use_tools=false → 不挂任何工具（纯文本生成，模型不会绕去查工具，
     也不会在正文里夹带工具叙述）；默认 None = 全量 TOOL_SCHEMAS。
-    IvyeaOps 把 agent 当文本引擎用（报告合成/JSON 抽取）时传 false。"""
+    IvyeaOps 把 agent 当文本引擎用（报告合成/JSON 抽取）时传 false。
+
+    闲聊路线同样不挂：54 个工具 ≈ 6.9K token 每步重发，还会诱导模型"顺手查一下"，
+    白白多走一两个来回。板块任务和常规任务照挂全量 —— 裁工具省的是 token，
+    缺能力赔的是整件事做不成。"""
     if payload.get("use_tools") is False:
+        return []
+    if route is not None and route.is_chat:
         return []
     return None
 
@@ -2129,8 +2152,8 @@ def _model_requires_key(settings: dict[str, Any]) -> bool:
     return bool(settings.get("key_env") or auth in ("oauth_external", "oauth_device_code", "copilot"))
 
 
-def _chat_messages(message: str, payload: dict[str, Any],
-                   ctx: ToolContext) -> tuple[list[dict[str, Any]], float | None, int]:
+def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext,
+                   route: "routing.Route | None" = None) -> tuple[list[dict[str, Any]], float | None, int]:
     system = agent_loop.SYSTEM_PROMPT + agent_loop.runtime_context_note()
     if ctx.plan_mode:
         system += agent_loop.PLAN_NOTE
@@ -2192,7 +2215,11 @@ def _chat_messages(message: str, payload: dict[str, Any],
                 continue
             messages.append({"role": role, "content": str(row.get("content") or "")})
     user_content = message
-    if payload.get("inject_retrieval", True):
+    if route is not None and route.is_board:
+        user_content += routing.board_hint(route)
+    # 闲聊不查知识库：问候语检索不出东西，白跑一趟；万一检索到了，反而是给
+    # 「你好」配上几百字亚马逊证据。
+    if payload.get("inject_retrieval", True) and not (route is not None and route.is_chat):
         evidence = knowledge.evidence_context(message, limit=4)
         ctx.knowledge_citations = list(evidence.get("citations") or [])
         ctx.knowledge_retrieval_expected = bool(evidence.get("should_retrieve"))
