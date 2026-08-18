@@ -97,3 +97,24 @@ def test_board_and_chat_switch_off_the_reporting_state_machine(ivyea_home):
     text = open(src, encoding="utf-8").read()
     assert "route.is_chat or route.is_board" in text
     assert "ctx.progress_reporting_disabled = True" in text
+
+
+def test_cli_wires_routing_into_every_turn_call():
+    """终端那条路也要接上，而且**每一个** run_turn_stream 调用点都要带 tools。
+
+    cli.py 里有四个调用点（TUI/-p 共用一个，行式循环三个，按渲染模式分叉）。
+    漏掉任何一个，那种渲染模式下闲聊就又挂满 54 个工具了 —— 而这种漏接跑一次
+    正常对话是看不出来的（工具挂着不用，只是慢）。所以在源码层面钉死。
+    """
+    from pathlib import Path
+
+    from ivyea_agent import cli
+
+    src = Path(cli.__file__).read_text(encoding="utf-8")
+    # 不去解析括号（调用里嵌着 lambda，配对很脆）。直接对数量：**每一个调用点都要带一次**。
+    calls = src.count("agent_loop.run_turn_stream(")
+    wired = src.count("tools=routing.tools_for(route)")
+    assert calls >= 4, f"调用点数量变了（{calls}），这条用例要跟着更新"
+    assert wired == calls, f"{calls} 个调用点只接了 {wired} 个"
+    # 路线判定本身：ctx 跨轮复用，所以必须**每轮赋值**（含赋回 False）
+    assert src.count("ctx.progress_reporting_disabled = route.is_chat or route.is_board") == 2
