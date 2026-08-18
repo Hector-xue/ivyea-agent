@@ -488,7 +488,32 @@ _TRIGGER_BONUS = 3
 _TRIGGER_BONUS_CAP = 9
 
 
-def search(query: str, limit: int = 8) -> list[tuple[Skill, int]]:
+def _score_parts(sk: "Skill", terms: list[str], raw_terms: list[str], ql: str) -> tuple[int, int]:
+    """返回 (总分, 名义分)。
+
+    名义分 = 命中了这条技能的 **id / 标题 / 描述 / 触发词**，也就是"这条技能就是
+    干这个的"。正文分只算进总分：正文动辄几千字，任意常用词都能在里面撞上几次 ——
+    一句「测试」能以 score=2 命中 ASIN 审计手册，靠的全是正文里出现过两次"测试"。
+    """
+    meta = " ".join([sk.id, sk.title, sk.description, " ".join(sk.triggers)]).lower()
+    named = _META_WEIGHT * sum(min(meta.count(t), _META_HIT_CAP) for t in terms)
+    bonus = 0
+    for trigger in sk.triggers:
+        tl = trigger.lower()
+        if any(t in tl or tl in ql for t in raw_terms):
+            bonus += _TRIGGER_BONUS
+    named += min(bonus, _TRIGGER_BONUS_CAP)
+    total = named + sum(min(sk.body.lower().count(t), _BODY_HIT_CAP) for t in terms)
+    return total, named
+
+
+def search(query: str, limit: int = 8, *, named_only: bool = False) -> list[tuple[Skill, int]]:
+    """按相关度排序的技能。
+
+    `named_only=True` 只保留**名义命中**（标题/描述/触发词对上）的那些 —— 自动注入
+    走这条，见 _score_parts 的说明。人工检索（skill search）不设这道闸：那时候用户
+    是在翻库，宁可多给几条。
+    """
     terms = _terms(query)
     if not terms:
         return []
@@ -498,18 +523,10 @@ def search(query: str, limit: int = 8) -> list[tuple[Skill, int]]:
     ql = query.lower()
     rows: list[tuple[Skill, int]] = []
     for sk in list_skills():
-        meta = " ".join([sk.id, sk.title, sk.description, " ".join(sk.triggers)]).lower()
-        body = sk.body.lower()
-        score = _META_WEIGHT * sum(min(meta.count(t), _META_HIT_CAP) for t in terms)
-        score += sum(min(body.count(t), _BODY_HIT_CAP) for t in terms)
-        bonus = 0
-        for trigger in sk.triggers:
-            tl = trigger.lower()
-            if any(t in tl or tl in ql for t in raw_terms):
-                bonus += _TRIGGER_BONUS
-        score += min(bonus, _TRIGGER_BONUS_CAP)
-        if score:
-            rows.append((sk, score))
+        score, named = _score_parts(sk, terms, raw_terms, ql)
+        if not score or (named_only and not named):
+            continue
+        rows.append((sk, score))
     rows.sort(key=lambda x: (-x[1], x[0].id))
     return rows[:limit]
 
@@ -567,7 +584,12 @@ def render_skill(sk: Skill, include_knowledge: bool = True) -> str:
 
 
 def context_for_query(query: str, limit: int = 2, max_chars: int = 1800) -> tuple[str, list[str]]:
-    hits = search(query, limit=limit)
+    """自动注入用的技能上下文。**只认名义命中**（named_only）。
+
+    这里注入的是一本 1600 字的手册，它会实打实地改变模型的行为 —— 只靠正文撞词
+    命中就注入，等于给一句「测试」派了一份 ASIN 审计流程。
+    """
+    hits = search(query, limit=limit, named_only=True)
     if not hits:
         return "", []
     ids = []

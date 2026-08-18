@@ -6,7 +6,6 @@
 """
 from __future__ import annotations
 
-import pytest
 
 
 def test_append_creates_file_with_date(ivyea_home):

@@ -207,10 +207,12 @@ def test_short_command_stays_simple_even_with_skill_injected():
     实测事故：这条判成复杂 → 护栏要求先 todo_write + progress_update → 模型
     18 步里 17 步在写待办和阶段汇报，一个词等了 2 分 16 秒。
     """
-    from ivyea_agent import skills
     from ivyea_agent.task_scope import requires_progress_reporting
 
-    sctx, _ = skills.context_for_query("测试", limit=2)
-    injected = "测试\n\n[Ivyea Skill：本轮相关可复用流程]\n" + (sctx or "")
+    # 注入块在这里**手写**，不走 skills.context_for_query —— 那边已经加了"名义命中"
+    # 闸门、"测试"不再命中任何技能。但判据必须独立扛得住长注入：显式注入
+    # （payload 带 skill=）和别的注入块照样会贴上来。
+    body = "执行 分析 优化 检查 广告 listing 报表 " * 40
+    injected = "测试\n\n[Ivyea Skill：本轮相关可复用流程]\n" + body
     assert len(injected) > 200, "这条用例的前提就是注入块很长"
     assert requires_progress_reporting(injected) is False
