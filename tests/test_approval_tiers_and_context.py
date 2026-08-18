@@ -191,6 +191,35 @@ def test_snapshot_counts_full_tool_table_when_tools_is_none(ivyea_home):
     assert context.snapshot(messages, [], "x")["breakdown"]["tools"] == 0
 
 
+def test_session_detail_carries_a_context_snapshot(ivyea_home):
+    """打开历史会话时进度条要能立刻画出来 —— 不然它只在"刚跑过一轮"的会话里存在，
+    切到别的会话还会留着上一条的数（看起来有效、其实是别人的）。
+
+    按**整份存档**算，不是按这一页：分页只决定界面显示多少轮，下一轮带进模型的
+    是整份历史。"""
+    from ivyea_agent import service, sessions
+
+    sid = sessions.new_id()
+    sessions.save(sid, [
+        {"role": "system", "content": "系统提示" * 100},
+        {"role": "user", "content": "第一轮问题" * 20},
+        {"role": "assistant", "content": "第一轮回答" * 20},
+        {"role": "user", "content": "第二轮问题" * 20},
+        {"role": "assistant", "content": "第二轮回答" * 20},
+    ], model="deepseek-v4-pro")
+
+    # 只取最后一轮，快照仍然要覆盖整份历史
+    detail = service.chat_session_detail(sid, turns=1)["session"]
+    snap = detail["context"]
+    assert snap["window"] == 128_000
+    assert snap["breakdown"]["system"] > 0
+    assert snap["breakdown"]["messages"] > 0
+    assert snap["used"] == sum(snap["breakdown"].values())
+
+    full = service.chat_session_detail(sid, turns=50)["session"]
+    assert full["context"]["used"] == snap["used"], "快照不该跟着分页变"
+
+
 def test_chat_stream_emits_context_before_tokens_and_in_final(ivyea_home):
     """进度条要在第一个字之前就能画出来，收尾时再更新到本轮之后的位置。"""
     result, _, events = _run("新卖家注册身份验证失败怎么办")

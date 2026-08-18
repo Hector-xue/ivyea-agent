@@ -2455,6 +2455,15 @@ def _public_session_detail(data: dict[str, Any], *, turns: int = _DETAIL_TURNS_D
     skills = [s for s in (data.get("skill_matches") or [])
               if str(s.get("anchor") or "") in call_ids]
 
+    # 这条会话现在占多少上下文。**按整份存档算，不是按这一页** —— 分页只影响
+    # 界面显示多少轮，下一轮真正要带进模型的是整份历史。
+    #
+    # 为什么要在详情里给：进度条此前只能靠 chat 流里的 context 事件长出来，于是
+    # 打开一条历史会话时它是空的（用户看到的是"这条会话没有进度条"），而切换会话
+    # 时留在界面上的还是上一条的数 —— 一个更糟的状态：它看起来有效，其实是别人的。
+    model_id = str(data.get("model") or "") or config.get_model_config().get("model", "")
+    ctx_snapshot = context.snapshot(list(data.get("messages") or []), None, model_id)
+
     return {
         "id": data.get("id", ""),
         "created": data.get("created"),
@@ -2464,6 +2473,7 @@ def _public_session_detail(data: dict[str, Any], *, turns: int = _DETAIL_TURNS_D
         "messages": rows,
         "steps": steps,
         "skill_matches": skills,
+        "context": ctx_snapshot,
         "turns": {"total": total, "from": start_turn, "to": end_turn,
                   "has_more": start_turn > 0},
     }
