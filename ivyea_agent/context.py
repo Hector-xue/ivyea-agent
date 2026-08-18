@@ -129,3 +129,89 @@ def compact(messages: list[dict], provider, *, keep_system: bool = True,
     new.append({"role": "assistant", "content": transcript.COMPACT_ACK})
     new.extend(recent)
     return new, summary.strip()
+
+
+# ── 上下文用量快照 ─────────────────────────────────────────────────────────
+# 给调用方（IvyeaOps 任务台的上下文进度条）回答一件事：**这条会话把窗口用掉多少了**。
+#
+# 为什么不直接用服务商回报的 prompt_tokens：那是"上一次调用花了多少"，会话刚开、
+# 或本轮还没发出去时它根本不存在，而进度条要在发第一句话之前就说得出话。所以这里
+# 用 estimate_tokens 现算，并且**明说是估算**（estimated=True）——一个标着"估算"的
+# 数比一个看起来精确其实来路不明的数诚实得多。
+DEFAULT_WINDOW = 128_000
+
+# 模型 → 上下文窗口。按 id 子串匹配，长的先匹配（gpt-4.1 要先于 gpt-4）。
+# 查不到就落 DEFAULT_WINDOW —— 宁可把窗口说小（进度条偏保守），也不要凭空说成 1M。
+_WINDOW_HINTS: tuple[tuple[str, int], ...] = (
+    ("gpt-4.1", 1_047_576),
+    ("gpt-4o", 128_000),
+    ("gpt-5", 400_000),
+    ("o3", 200_000),
+    ("claude", 200_000),
+    ("gemini", 1_000_000),
+    ("kimi", 256_000),
+    ("moonshot", 256_000),
+    ("qwen", 128_000),
+    ("glm", 128_000),
+    ("deepseek", 128_000),
+    ("llama", 128_000),
+)
+
+
+def window_for(model: str) -> int:
+    """这个模型的上下文窗口。config 的 context_window 覆盖一切（换了个窗口不一样的
+    自建模型时，用户改一行配置就能让进度条说对）。"""
+    try:
+        override = int(config.get_setting("context_window", 0) or 0)
+    except (TypeError, ValueError):
+        override = 0
+    if override > 0:
+        return override
+    name = str(model or "").lower()
+    for key, win in _WINDOW_HINTS:
+        if key in name:
+            return win
+    return DEFAULT_WINDOW
+
+
+def _tool_tokens(tools: Optional[list]) -> int:
+    """工具定义也要占窗口，而且占得不少（全量 54 个工具 ≈ 6.9K token，每一步都重发）。
+    tools=None 表示"交给 agent_loop 兜底成全量"，这里跟着按全量算，否则进度条会把
+    最大的一块漏掉。"""
+    schemas = tools
+    if schemas is None:
+        try:
+            from . import agent_tools
+            schemas = agent_tools.TOOL_SCHEMAS
+        except Exception:  # noqa: BLE001 — 取不到工具表只是少算一项，不该炸掉整轮
+            return 0
+    if not schemas:
+        return 0
+    try:
+        return int(_est_text(json.dumps(schemas, ensure_ascii=False)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def snapshot(messages: list[dict], tools: Optional[list] = None, model: str = "") -> dict:
+    """上下文占用快照：{used, window, percent, breakdown{system,tools,messages}, estimated}。
+
+    分三档是因为"用满了"的成因完全不同：系统提示词大 = 人设/板块桥太长，工具大 =
+    挂了全量工具，对话消息大 = 该压缩了。只报一个总数的话，用户只知道满了、不知道
+    该动哪里。
+    """
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    other_msgs = [m for m in messages if m.get("role") != "system"]
+    sys_tok = estimate_tokens(system_msgs)
+    msg_tok = estimate_tokens(other_msgs)
+    tool_tok = _tool_tokens(tools)
+    used = sys_tok + msg_tok + tool_tok
+    window = window_for(model)
+    return {
+        "used": used,
+        "window": window,
+        "percent": round(used * 100.0 / window, 2) if window > 0 else 0.0,
+        "breakdown": {"system": sys_tok, "tools": tool_tok, "messages": msg_tok},
+        "estimated": True,
+        "model": str(model or ""),
+    }
