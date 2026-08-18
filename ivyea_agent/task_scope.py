@@ -18,12 +18,6 @@ from . import progress_reporting
 
 SCOPE_MARKER = "[任务范围锁定 / 执行契约]"
 _PROJECT_MARKERS = (".git", "pyproject.toml", "package.json", "Cargo.toml", "go.mod")
-_INJECTED_MARKERS = (
-    "\n\n[工程上下文]",
-    "\n\n[Ivyea Skill",
-    "\n\n[Ivyea 内置",
-    "\n\n[任务范围锁定",
-)
 _ENGINEERING_HINTS = (
     "代码", "项目", "仓库", "文件", "函数", "界面", "前端", "后端", "终端", "输出",
     "显示", "颜色", "高亮", "测试", "修复", "实现", "优化", "重构", "部署", "安装",
@@ -71,12 +65,20 @@ def _norm(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
 
 
+def _cut_injected(text: str) -> str:
+    """截到第一个系统注入块之前。大小写不敏感 —— 清单是小写的，正文不是。"""
+    body = text or ""
+    low = body.lower()
+    cut = len(body)
+    for marker in _INJECTED_MARKERS:
+        i = low.find(marker)
+        if i != -1:
+            cut = min(cut, i)
+    return body[:cut].strip()
+
+
 def _clean_query(text: str) -> str:
-    out = text or ""
-    cuts = [out.find(marker) for marker in _INJECTED_MARKERS if marker in out]
-    if cuts:
-        out = out[:min(cuts)]
-    return out.strip()
+    return _cut_injected(text)
 
 
 def _content_text(content: Any) -> str:
@@ -193,13 +195,28 @@ def _matches(text: str, candidates: list[Path]) -> list[Path]:
 
 
 #: 注入块的开头标记。这些内容是**系统贴上去的**，不是用户说的话。
+#:
+#: 这份清单一度有**两份**：模块顶上一份（含 "[Ivyea Skill"）被下面这份同名定义
+#: 整个遮蔽掉，而下面这份恰恰漏了技能注入那一条。后果是自动命中的技能手册
+#: （1600+ 字、满篇"执行/分析/优化/检查"）被当成用户说的话喂给复杂度判据 ——
+#: 一句"测试"被判成复杂多步任务，触发 todo + 阶段汇报状态机，实测 18 步里 17 步
+#: 是纯汇报、耗时 2 分 16 秒。**清单只留这一份，且必须覆盖每一处真实注入点**
+#: （见 tests/test_task_scope.py 里那条按注入点反查的用例）。
+#:
+#: 全部写成小写：匹配统一走 _cut_injected() 的 lower() 比对，大小写不敏感。
 _INJECTED_MARKERS = (
-    "[ivyea 本地知识检索",
+    "[ivyea 本地知识检索",          # service._chat_messages 的知识证据
+    "[ivyea 内置",                  # cli 的知识摘录
+    "[ivyea skill",                 # service._auto_skill_context / cli 的自动技能手册
+    "[必须遵循的技能说明书]",
+    "[工程上下文]",
     "[知识引用门禁]",
     "[用户显式引用的资料",
     "[用户附图",
     "[角色设定",
-    "[必须遵循的技能说明书]",
+    "[任务范围锁定",                # prepare_messages 自己贴回去的范围契约
+    "[记忆摘要",                    # cli 注入的 MEMORY.md 摘要
+    "[长期指令/画像]",              # cli 注入的长期指令
 )
 
 
@@ -212,14 +229,7 @@ def _user_said(text: str) -> str:
     触发 todo + 阶段汇报的整套状态机 —— 一个动作被拦了两轮、来回几十条消息、
     用户等了 8 分钟。**判据必须只看人说的话。**
     """
-    body = text or ""
-    low = body.lower()
-    cut = len(body)
-    for marker in _INJECTED_MARKERS:
-        i = low.find(marker)
-        if i != -1:
-            cut = min(cut, i)
-    return body[:cut].strip()
+    return _cut_injected(text)
 
 
 def requires_progress_reporting(text: str) -> bool:
