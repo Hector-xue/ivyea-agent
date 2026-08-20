@@ -41,6 +41,23 @@ jobs:
             exit 1
           fi
 
+      - name: 从 CHANGELOG 取本版说明
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          # 取 `## [vX.Y.Z]` 到下一个 `## [` 之间那一段。**取不到就让发版失败**：
+          # 一个没有"新增了什么、修复了什么"的 Release，对使用者等于没发。
+          awk -v tag="$TAG" '
+            $0 ~ "^## \\[" tag "\\]" { flag = 1; next }
+            flag && /^## \[/ { exit }
+            flag { print }
+          ' CHANGELOG.md > CHANGELOG_SECTION.md
+          if [ ! -s CHANGELOG_SECTION.md ]; then
+            echo "::error::CHANGELOG.md 里没有 $TAG 这一节。发版前要把 Unreleased 改成本版号。"
+            exit 1
+          fi
+          echo "取到 $(wc -l < CHANGELOG_SECTION.md) 行版本说明"
+
       - name: Build sdist + wheel
         run: python -m pip install --upgrade build && python -m build
       - name: Build offline installer bundles
@@ -48,6 +65,10 @@ jobs:
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          # body_path = CHANGELOG 里本版那一节；generate_release_notes 生成的
+          # commit 列表接在它后面。两者互补：一个说"改了什么、为什么"，
+          # 另一个说"由哪些提交组成"。
+          body_path: CHANGELOG_SECTION.md
           generate_release_notes: true
           files: |
             dist/*.whl
