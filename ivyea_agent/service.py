@@ -74,6 +74,20 @@ def pending_permissions() -> list[str]:
         return list(_PENDING_APPROVALS.keys())
 
 
+def pending_permissions_state() -> dict[str, Any]:
+    """此刻**真的还卡在等人点**的审批 id。
+
+    调用方是 IvyeaOps 的「待审批」页：它自己那张 console_approvals 表是流水账 ——
+    只有决策或 permission_timeout 帧回到 ops 时才会销账。页面关掉、网络断掉、
+    这边重启，三种情况下这一步在 agent 侧早就按"没人能确认了"收摊了，而 ops 那边
+    的行永远停在未决，于是会话都结束几天了，待审批里还挂着一张点不动的僵尸卡片。
+
+    真相只有这个进程知道（阻塞的队列就在 _PENDING_APPROVALS 里），所以把它端出去
+    让 ops 对账。重启后这里自然是空的 —— 那正是"全都作废了"的正确答案。
+    """
+    return {"ok": True, "pending": pending_permissions()}
+
+
 class RemoteApproval:
     """permission.PromptFn 的远程实现：发事件 → 阻塞等决策 → 返回选项 key。"""
 
@@ -1326,6 +1340,9 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         # 「测试」18 步里 17 步花在这上面）。
         ctx.progress_reporting_disabled = True
 
+    # 这一轮的起点。created_at 是**会话**的创建时刻（_chat_messages 从存档里取的），
+    # 拿它当起点算出来的是这条会话开了多久，不是这一轮跑了多久 —— 差着几天。
+    turn_started = time.time()
     try:
         messages, created_at, turn_base = _chat_messages(message, payload, ctx, route)
     except ValueError as exc:
@@ -1375,6 +1392,12 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         kind = str(ev.get("type") or "")
         if kind in ("step", "skill_match", "file_change"):
             send(kind, ev)
+        # 计划变了就**当场**播一份。step 事件里带不了它：_slim_args 只留标量键，
+        # todos 是个列表，一路上早被裁掉了（前端因此只能等 final 才拿到计划，
+        # 而"接下来要干什么"最该被看到的时刻恰恰是这一轮还在跑的时候）。
+        if (kind == "step" and str(ev.get("name") or "") == "todo_write"
+                and str(ev.get("status") or "") in ("ok", "error")):
+            send("todos", {"todos": list(ctx.todos or [])})
         if kind == "step" and ev.get("id"):
             turn_steps[str(ev["id"])] = dict(ev)
         elif kind == "skill_match" and ev.get("skills"):
@@ -1424,12 +1447,20 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         anchor = steps[0].get("id") if steps else ""
         skill_rows = ([{"anchor": anchor, "skills": turn_skills[-1].get("skills") or []}]
                       if steps and turn_skills else [])
+        # 这一轮的账：挂钟时间、真正干活的步数、模型回报的用量。
+        # **必须落盘**——它们此前只在流里飘过一次，前端记在内存里；刷新或换台机器
+        # 打开这条会话，"用时/输入/输出"就全没了，统计条只剩一句"几轮几步"。
+        turn_stat = {
+            "ms": int(max(0.0, time.time() - turn_started) * 1000),
+            "steps": sum(1 for st in steps if str(st.get("phase") or "") not in ("plan", "note")),
+            "usage": out.get("usage") or {},
+        }
         sessions.append_turn(
             ctx.session_id,
             str(messages[0].get("content") or "") if messages else "",
             messages[turn_base:],
             model=model_cfg.get("model", ""), usage={}, created=created_at,
-            steps=steps, skill_matches=skill_rows)
+            steps=steps, skill_matches=skill_rows, turn_stat=turn_stat)
     data = {
         "ok": True,
         "session_id": ctx.session_id,
@@ -1599,6 +1630,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/system/service/logs":
             self._json(200, system_service_logs(lines=_int(_first(qs, "lines"), 80)))
+            return
+        if parsed.path == "/v1/chat/permissions/pending":
+            self._json(200, pending_permissions_state())
             return
         if parsed.path == "/v1/chat/sessions":
             self._json(200, chat_session_list(limit=_int(_first(qs, "limit"), 20)))
@@ -2470,6 +2504,10 @@ def _public_session_detail(data: dict[str, Any], *, turns: int = _DETAIL_TURNS_D
         "updated": data.get("updated"),
         "model": data.get("model", ""),
         "usage": data.get("usage") or {},
+        # 整条会话的累计账。**按整份存档算，不是按这一页**（和上面的上下文占用同一条
+        # 理由）：分页只决定界面显示多少轮，而"这条会话一共花了多少时间/多少 token"
+        # 问的是整条。没有这一份时前端只能显示"几轮几步"——历史会话打开来一片空白。
+        "stats": data.get("stats") or {},
         "messages": rows,
         "steps": steps,
         "skill_matches": skills,
