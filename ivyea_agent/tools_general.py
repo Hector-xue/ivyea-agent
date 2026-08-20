@@ -82,7 +82,14 @@ def _gate(ctx, kind: str, preview: str, detail: dict | None = None) -> tuple[boo
     """写/执行前门控：计划模式拒绝；否则人工审批。返回 (放行?, 拒绝消息)。
     detail：给 policy 档无人值守判定用的结构化信息（command/path），并入 intent。"""
     if getattr(ctx, "plan_mode", False):
-        return False, f"计划模式（只读）：不执行 {kind}。请先给计划，/approve 后再做。"
+        # 记一笔：这一轮有多少个写操作是被"只读"挡下的。
+        # 界面上必须说得出这件事 —— 用户看到的是模型转述的"被拦截"，然后跑去
+        # 「待审批」页找，而只读档**根本不会产生审批请求**，那一页永远是空的。
+        # 真实反馈："经常跑一半跟我说被拦截，待审批那一页也从来没看到任何审批项"。
+        setattr(ctx, "readonly_blocks", int(getattr(ctx, "readonly_blocks", 0) or 0) + 1)
+        return False, (f"计划模式（只读）：不执行 {kind}。这是**档位**限制，不是出错，"
+                       f"也不会产生待审批项；要真做就让用户把审批档位切到「审批放行」"
+                       f"或「完全放行」。现在请先把方案给出来。")
     decision = permission.request_intent({"op_type": kind, **(detail or {})}, preview, ctx.perm)
     if decision == permission.APPROVE:
         return True, ""

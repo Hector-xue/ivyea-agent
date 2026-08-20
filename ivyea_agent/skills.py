@@ -487,6 +487,29 @@ _META_WEIGHT = 3
 _TRIGGER_BONUS = 3
 _TRIGGER_BONUS_CAP = 9
 
+# 中文查询是按 2-gram 切的，于是"为什么我的模型配置页面报错"会切出「为什」「什么」，
+# 而这两个 2-gram 正好落在技能触发词「**为什么**卖不好」里 —— 一句和亚马逊毫无关系
+# 的话就这样以 22 分命中了 ASIN 审计手册。用户的原话是"不管什么问题，任务台第一句
+# 好多都是：匹配最合适的技能 ✦ Amazon ASIN COSMO"。
+#
+# 这些片段是**疑问词/人称/礼貌语**，它们出现在哪条技能里都不说明任何事，所以不参与
+# 打分。只挡 2-gram 这一层：正文分本来就不进名义分，人工检索也不受影响。
+_STOP_GRAMS = frozenset("""
+为什 什么 怎么 么办 如何 是否 可以 能否 需要 应该 这个 那个 这些 那些 一下 一个
+我的 我们 你的 你们 他的 它的 帮我 帮忙 请问 麻烦 谢谢 你好 现在 目前 已经 还有
+问题 情况 时候 之后 之前 上面 下面 里面 外面 出现 发生 导致 造成 提示 显示 告诉
+不能 不了 没有 无法 不对 不行 怎样 多少 哪些 哪个 什麼 為什
+""".split())
+
+
+def _is_noise(gram: str) -> bool:
+    """这个片段是不是"出现在哪都不说明任何事"的通用词。
+
+    只对**两字片段**生效：更长的片段是用户真的打出来的词（"广告"" ASIN"），
+    再通用也是他自己选的词；两字片段则大半是切出来的碎渣。
+    """
+    return len(gram) == 2 and gram in _STOP_GRAMS
+
 
 def _score_parts(sk: "Skill", terms: list[str], raw_terms: list[str], ql: str) -> tuple[int, int]:
     """返回 (总分, 名义分)。
@@ -496,15 +519,23 @@ def _score_parts(sk: "Skill", terms: list[str], raw_terms: list[str], ql: str) -
     一句「测试」能以 score=2 命中 ASIN 审计手册，靠的全是正文里出现过两次"测试"。
     """
     meta = " ".join([sk.id, sk.title, sk.description, " ".join(sk.triggers)]).lower()
-    named = _META_WEIGHT * sum(min(meta.count(t), _META_HIT_CAP) for t in terms)
+    # 名义分只认**有信息量的片段**：通用疑问词/人称撞上触发词是噪音，不是命中。
+    named = _META_WEIGHT * sum(min(meta.count(t), _META_HIT_CAP)
+                               for t in terms if not _is_noise(t))
     bonus = 0
     for trigger in sk.triggers:
         tl = trigger.lower()
-        if any(t in tl or tl in ql for t in raw_terms):
+        if any(t in tl or tl in ql for t in raw_terms if not _is_noise(t)):
             bonus += _TRIGGER_BONUS
     named += min(bonus, _TRIGGER_BONUS_CAP)
-    total = named + sum(min(sk.body.lower().count(t), _BODY_HIT_CAP) for t in terms)
+    total = named + sum(min(sk.body.lower().count(t), _BODY_HIT_CAP)
+                        for t in terms if not _is_noise(t))
     return total, named
+
+
+# 自动注入要求的名义分下限。一个 _META_WEIGHT(3) 的单点命中不够 —— 那种大多是
+# 某个常用词恰好也出现在标题里；要求两处以上才认。人工检索不设这道闸。
+_AUTO_NAMED_MIN = 6
 
 
 def search(query: str, limit: int = 8, *, named_only: bool = False) -> list[tuple[Skill, int]]:
@@ -524,7 +555,7 @@ def search(query: str, limit: int = 8, *, named_only: bool = False) -> list[tupl
     rows: list[tuple[Skill, int]] = []
     for sk in list_skills():
         score, named = _score_parts(sk, terms, raw_terms, ql)
-        if not score or (named_only and not named):
+        if not score or (named_only and named < _AUTO_NAMED_MIN):
             continue
         rows.append((sk, score))
     rows.sort(key=lambda x: (-x[1], x[0].id))

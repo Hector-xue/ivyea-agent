@@ -1369,6 +1369,25 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         if matched:
             send("skill_match", stream_json.skill_match_event(ctx.session_id, matched))
 
+    # ── 用户这句话，**现在就落盘** ──────────────────────────────────────────
+    # 此前一整轮只在收尾时写一次盘。于是这一轮没跑完之前，磁盘上根本没有这条会话：
+    #   · 工作台左栏列的是"和 agent 实存对得上的会话"，所以跑着的会话不在列表里；
+    #   · 中途切走再回来，前端内存里那份没了，磁盘上又没有 —— 整段对话凭空消失；
+    #   · 断链/中止的轮次一个字都不留，用户看到的是"回到几小时前的某个时间点，
+    #     之后的全没了"（真实反馈，连着两三次）。
+    # 现在先写用户这句话，再把本轮起点推到它后面 —— 收尾时只追加模型的回答和
+    # 工具消息，不会重复。写盘失败绝不能打断这一轮：最坏退回改动前的行为。
+    if payload.get("persist", True):
+        try:
+            sessions.append_turn(
+                ctx.session_id,
+                str(messages[0].get("content") or "") if messages else "",
+                messages[turn_base:],
+                model=model_cfg.get("model", ""), created=created_at)
+            turn_base = len(messages)
+        except Exception:  # noqa: BLE001 — 落盘失败不该让用户这一轮跑不成
+            pass
+
     def narrate(text: str) -> None:
         send("event", {"type": "event", "text": security.redact_text(str(text))})
 
@@ -1468,6 +1487,10 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         "usage": out.get("usage") or {},
         "messages": _public_messages(messages),
         "read_only": bool(plan_mode),
+        # 这一轮有多少个写操作是被"只读"档挡下的。界面据此说清楚"这不是出错，是档位"
+        # —— 否则用户只会看到模型转述的"被拦截"，然后去待审批页空等（只读档不产生
+        # 任何审批项）。0 就是没被挡过。
+        "readonly_blocked": int(getattr(ctx, "readonly_blocks", 0) or 0),
         "todos": list(ctx.todos or []),
         "progress": progress_reporting.public_state(ctx),
         # 收尾再算一次：本轮的工具结果全都留在上下文里了，进度条要走到本轮之后的
