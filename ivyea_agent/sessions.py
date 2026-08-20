@@ -94,18 +94,25 @@ def save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[dic
 
 def _save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[dict] = None,
           created: Optional[float] = None, steps: Optional[list[dict]] = None,
-          skill_matches: Optional[list[dict]] = None) -> None:
+          skill_matches: Optional[list[dict]] = None,
+          stats: Optional[dict] = None) -> None:
     p = path_for(sid)
-    # steps/skill_matches 没传时**沿用盘上那份**，不能当成"清空"：`save()` 是整份覆盖
-    # 语义（CLI 每轮就这么写），它不知道也不关心步骤，但不该顺手把它们抹掉。
-    if steps is None or skill_matches is None:
+    # steps/skill_matches/stats 没传时**沿用盘上那份**，不能当成"清空"：`save()` 是整份
+    # 覆盖语义（CLI 每轮就这么写），它不知道也不关心这些，但不该顺手把它们抹掉。
+    if steps is None or skill_matches is None or stats is None:
         prev = load(sid) or {}
         if steps is None:
             steps = list(prev.get("steps") or [])
         if skill_matches is None:
             skill_matches = list(prev.get("skill_matches") or [])
+        if stats is None:
+            stats = dict(prev.get("stats") or {})
     data = {"id": sid, "created": created or time.time(), "updated": time.time(),
             "model": model, "messages": messages, "usage": usage or {},
+            # 整条会话的累计账（轮数/步数/挂钟时间/模型时间/token）。**存累计而不是
+            # 逐轮**：详情按轮分页，逐轮存的话打开一条长会话就只统计得到当前这一页，
+            # 而"这条会话一共花了多少"从来不是按页问的。
+            "stats": dict(stats or {}),
             # 执行过程与消息平行存放，**绝不塞进 messages 里的消息 dict**：
             # 那些 dict 会原样回灌给模型 API，多一个自定义键就有被 provider 拒的风险。
             "steps": list(steps)[-_STEPS_MAX:],
@@ -129,10 +136,38 @@ def _save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[di
             time.sleep(0.05 * (attempt + 1))
 
 
+# 累计账里可以直接相加的字段。写死一张表而不是把 usage 整个并进去：各家 provider
+# 的 usage 里什么键都可能有，无差别累加会把一堆看不懂的数糊成一笔。
+_STAT_SUMS = ("prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens", "llm_ms")
+
+
+def _merge_stats(prev: dict, turn: dict) -> dict:
+    """把这一轮的账并进整会话的累计账。
+
+    缺的项就不加 —— 补一个 0 等于替 provider 断言"这轮没花"，而真相是"没测到"。
+    """
+    out = dict(prev or {})
+    out["turns"] = int(out.get("turns") or 0) + 1
+    for key, val in (("steps", turn.get("steps")), ("elapsed_ms", turn.get("ms"))):
+        if isinstance(val, (int, float)) and val >= 0:
+            out[key] = int(out.get(key) or 0) + int(val)
+    usage = turn.get("usage") or {}
+    if isinstance(usage, dict):
+        acc = dict(out.get("usage") or {})
+        for key in _STAT_SUMS:
+            val = usage.get(key)
+            if isinstance(val, (int, float)):
+                acc[key] = int(acc.get(key) or 0) + int(val)
+        if acc:
+            out["usage"] = acc
+    return out
+
+
 def append_turn(sid: str, system: str, new_messages: list[dict], *, model: str = "",
                 usage: Optional[dict] = None, created: Optional[float] = None,
                 steps: Optional[list[dict]] = None,
-                skill_matches: Optional[list[dict]] = None) -> None:
+                skill_matches: Optional[list[dict]] = None,
+                turn_stat: Optional[dict] = None) -> None:
     """把**这一轮新增的**消息并进磁盘上那份，而不是拿内存里的整份覆盖。
 
     为什么不能整份覆盖：一轮的流程是"开始时读全部历史 → 跑 → 结束时写回全部"。
@@ -157,7 +192,9 @@ def append_turn(sid: str, system: str, new_messages: list[dict], *, model: str =
         _save(sid, msgs, model=model, usage=usage,
               created=cur.get("created") or created,
               steps=list(cur.get("steps") or []) + list(steps or []),
-              skill_matches=list(cur.get("skill_matches") or []) + list(skill_matches or []))
+              skill_matches=list(cur.get("skill_matches") or []) + list(skill_matches or []),
+              stats=(_merge_stats(cur.get("stats") or {}, turn_stat)
+                     if turn_stat else dict(cur.get("stats") or {})))
 
 
 def load(sid: str) -> Optional[dict[str, Any]]:
