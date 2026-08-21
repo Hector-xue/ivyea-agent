@@ -10,6 +10,76 @@
 
 ---
 
+## [v1.15.6] - 2026-08-21
+
+### 新增
+
+- **Kimi Code 订阅可以授权登录了**。走标准 RFC 8628 设备码，和 Qwen / Codex 同一套流程
+  （`POST /v1/auth/kimi-code/start` → 显示代码 → `poll`）。契约取自官方 CLI 包
+  `@moonshot-ai/kimi-code` 自己公开的常量：`auth.kimi.com` + `/api/oauth/device_authorization`
+  + `/api/oauth/token`。登录后主脑地址走 `https://api.kimi.com/coding/v1`
+  （实测该端点同时接 `/messages` 和 `/chat/completions`，这里按 OpenAI 兼容用）。
+  token 过期会自动用 refresh_token 续。
+- **GLM Coding Plan 加了两条专用 provider**：`zai-coding`（`https://api.z.ai/api/coding/paas/v4`）
+  和 `glm-coding`（`https://open.bigmodel.cn/api/coding/paas/v4`）。
+
+### 修复
+
+- **GLM 订阅此前根本接不上**。Coding Plan 官方明确要求用 coding 专用端点
+  `/api/coding/paas/v4`，而内置的 `zai` / `glm-legacy` 两条用的是通用端点 `/api/paas/v4`
+  —— 拿订阅的 key 填进去不通，报错还完全指不到"地址填错了"上。原来那两条保持不动
+  （普通 API key 仍然用它们），订阅走新加的两条。
+
+---
+
+## [v1.15.5] - 2026-08-21
+
+### 新增
+
+- **订阅制 provider 可以从外部调用方登录了**（Claude 订阅 / OpenAI Codex / Gemini
+  Code Assist / Qwen / GitHub Copilot）。这几家不是填 API key 而是要走 OAuth，
+  此前只有 CLI 的 `ivyea model auth <id> --login` 一条路，不会用命令行的人就被挡在门外。
+  新增 `GET /v1/auth` 与 `POST /v1/auth/{id}/start|poll|complete|logout`，
+  IvyeaOps 的网页据此把同一套流程做成引导式界面。
+  凭据（PKCE verifier / state / device_code / token）**一律不出服务端**，
+  返回的只有用户需要看到的东西：授权链接、user_code、验证地址。
+- 设备码登录拆出了 `qwen_device_start/poll`、`codex_device_start/poll`，粘码登录拆出了
+  `anthropic_login_start/complete`、`google_login_start/complete`。原来的登录函数在
+  函数内部轮询到成功为止（最长十几分钟），HTTP 请求挂不住；拆开之后 start 立刻返回，
+  中间态由调用方保管。**CLI 的四条登录路径在这些函数之上重新拼起来，行为逐字不变。**
+
+### 变更
+
+- Copilot 的 GitHub Token 现在写进 `COPILOT_GITHUB_TOKEN`，不再往 `GH_TOKEN` /
+  `GITHUB_TOKEN` 里塞 —— 那两个是 gh CLI、CI 脚本在用的通用变量，被顺手改掉时
+  完全看不出是谁干的。解析顺序上 `COPILOT_GITHUB_TOKEN` 本来就排第一，读取端无感。
+
+---
+
+## [v1.15.4] - 2026-08-21
+
+### 新增
+
+- **一轮对话可以指定用哪个主脑模型**。`chat` / `chat/stream` 认 `model` 字段
+  （`<provider_id>:<model>`，如 `openrouter:x-ai/grok-4.6`），只对这一轮生效。
+  在此之前主脑是纯全局设置，调用方（IvyeaOps 任务台）想让用户"点一下就换模型"，
+  唯一的办法是改全局 —— 那会把别的用户和正在跑的定时任务一起换掉。
+  不传 `model` 时行为与此前逐字一致。
+  指定的模型没配密钥 / 没有接口地址 / id 不认识时**当场报错**
+  （`model_key_missing` / `base_url_required` / `unknown_model`），
+  绝不回落到主脑跑完一轮 —— 那样用户选了 A 跑的是 B，还没有任何提示。
+- **`POST /v1/model/catalog`**：给 `base_url` + `api_key` 就能列出任意 OpenAI 兼容
+  端点的模型清单。原有的 `/v1/model/providers/{id}/models` 只认内置 provider 表里
+  那几家、密钥也只从 agent 自己的 .env 取，而中转商（apimart、硅基流动）常常两样
+  都不满足。拉不到时（余额不足这类）退回内置清单并带上原因，不让调用方的面板卡死。
+
+### 变更
+
+- `chat` 的返回与 `chat/stream` 的 `start` 事件里，`model` 字段现在报**这一轮真正
+  用的模型**而不是全局主脑。不指定 `model` 时两者本来就是同一个，老调用方无感。
+
+---
+
 ## [v1.15.3] - 2026-08-21
 
 ### 修复

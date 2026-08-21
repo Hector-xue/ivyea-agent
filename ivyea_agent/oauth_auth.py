@@ -29,6 +29,13 @@ class OAuthAuthError(Exception):
     pass
 
 
+# 出网请求统一带上的 User-Agent。
+# **不是可有可无的礼貌**：chat.qwen.ai 挂在阿里云 WAF 后面，httpx 默认的
+# `python-httpx/x.y` 会被拦下来，返回的是一个 **HTTP 200 的 HTML 挑战页** ——
+# 状态码正常、内容不是 JSON，于是报错长成"returned invalid JSON"，完全指不到
+# 真正的原因（实测：curl 同样的请求好好的，httpx 就是不行）。
+HTTP_USER_AGENT = "ivyea-agent"
+
 QWEN_OAUTH_CLIENT_ID = "f0304373b74a44d2b584a3fb70ca9e56"
 QWEN_OAUTH_DEVICE_CODE_URL = "https://chat.qwen.ai/api/v1/oauth2/device/code"
 QWEN_OAUTH_TOKEN_URL = "https://chat.qwen.ai/api/v1/oauth2/token"
@@ -48,6 +55,14 @@ ANTHROPIC_OAUTH_REDIRECT_URI = os.getenv("IVYEA_ANTHROPIC_OAUTH_REDIRECT_URI", "
 ANTHROPIC_OAUTH_SCOPE = os.getenv("IVYEA_ANTHROPIC_OAUTH_SCOPE", "org:create_api_key user:profile user:inference")
 ANTHROPIC_OAUTH_BETA = os.getenv("IVYEA_ANTHROPIC_OAUTH_BETA", "oauth-2025-04-20")
 ANTHROPIC_REFRESH_SKEW_SECONDS = 120
+# Kimi Code 订阅（Kimi 会员的编程套餐）。标准 RFC 8628 设备码流程。
+# 这几个常量取自官方 CLI 包 @moonshot-ai/kimi-code 的 KIMI_CODE_FLOW_CONFIG ——
+# 和 Qwen / Codex 那几家的来源是同一类（客户端自己公开的常量）。
+KIMI_CODE_OAUTH_HOST = os.getenv("KIMI_CODE_OAUTH_HOST", "https://auth.kimi.com")
+KIMI_CODE_CLIENT_ID = os.getenv("KIMI_CODE_CLIENT_ID", "17e5f671-d194-4dfb-9706-5516cb48c098")
+KIMI_CODE_DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+KIMI_REFRESH_SKEW_SECONDS = 120
+
 COPILOT_ENV_VARS = ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
 COPILOT_TOKEN_EXCHANGE_URL = "https://api.github.com/copilot_internal/v2/token"
 COPILOT_UNSUPPORTED_PREFIX = "ghp_"
@@ -398,6 +413,63 @@ def _bind_google_oauth_server(port: int = GOOGLE_REDIRECT_PORT) -> tuple[http.se
         return server, int(server.server_address[1])
 
 
+def google_login_start(*, redirect_uri: str = "") -> dict[str, Any]:
+    """Gemini Code Assist 登录第一步：给出授权链接。
+
+    ⚠️ 这一家默认要在**本机**起一个 127.0.0.1:8085 的回调服务。远程用（IvyeaOps 网页）
+    时那条路走不通：浏览器在用户自己的机器上，127.0.0.1 指的是用户那台，不是服务器。
+    但回调失败没关系 —— 浏览器地址栏里带着 ?code=…，把整条 URL 粘回来即可，
+    只要换 token 时用的 redirect_uri 和授权时**逐字一致**（所以它进 ctx 一起带走）。
+    """
+    verifier, challenge = _pkce_pair()
+    state = secrets.token_urlsafe(16)
+    uri = redirect_uri or f"http://{GOOGLE_REDIRECT_HOST}:{GOOGLE_REDIRECT_PORT}{GOOGLE_REDIRECT_PATH}"
+    return {
+        "provider": "google-gemini-cli",
+        "url": google_oauth_url(redirect_uri=uri, state=state, code_challenge=challenge),
+        "verifier": verifier,
+        "state": state,
+        "redirect_uri": uri,
+    }
+
+
+def google_login_complete(ctx: dict[str, Any], raw: str, *, timeout: float = 20.0) -> None:
+    """第二步：从用户粘回来的整条回调 URL（或纯 code）里取 code 换 token。"""
+    code = _extract_oauth_code(str(raw))
+    if not code:
+        raise OAuthAuthError("Google Gemini OAuth did not receive an authorization code.")
+    exchange_google_code(code, str(ctx.get("verifier") or ""),
+                         str(ctx.get("redirect_uri") or ""), timeout=timeout)
+
+
+def copilot_login(token: str) -> dict[str, Any]:
+    """GitHub Copilot 不是 OAuth，就是一个 GitHub token。校验后写进 ~/.ivyea/.env。
+
+    **写 COPILOT_GITHUB_TOKEN，不写 GH_TOKEN / GITHUB_TOKEN**：后两个是 gh CLI、
+    CI 脚本在用的通用变量，往里面塞一个 Copilot 专用 token 会连带影响它们，
+    而且出问题时完全看不出是谁改的。解析顺序上 COPILOT_GITHUB_TOKEN 本来就排第一。
+    """
+    from . import config
+    cleaned = (token or "").strip()
+    valid, reason = validate_copilot_github_token(cleaned)
+    if not valid:
+        raise OAuthAuthError(reason)
+    config.set_env_key("COPILOT_GITHUB_TOKEN", cleaned)
+    os.environ["COPILOT_GITHUB_TOKEN"] = cleaned
+    # 真去换一次 Copilot API token：token 存下来却根本换不出东西，等于没登录。
+    api_token, expires_at = exchange_copilot_token(cleaned)
+    set_auth_token("copilot", api_token, expires_at=int(expires_at), source="github-token")
+    return {"ok": True, "expires_at": int(expires_at)}
+
+
+def copilot_logout() -> bool:
+    """只清 COPILOT_GITHUB_TOKEN 和本地缓存的 Copilot token，绝不动 GH_TOKEN。"""
+    from . import config
+    config.set_env_key("COPILOT_GITHUB_TOKEN", "")
+    os.environ.pop("COPILOT_GITHUB_TOKEN", None)
+    return clear_auth("copilot")
+
+
 def google_oauth_login(*, open_browser: bool = True, callback_wait: float = 300.0,
                        notify: Any = None, prompt: Any = None) -> None:
     emit = notify or print
@@ -470,6 +542,7 @@ def refresh_qwen_token(timeout: float = 20.0) -> str:
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Accept": "application/json",
+                "User-Agent": HTTP_USER_AGENT,
             },
             data={
                 "grant_type": "refresh_token",
@@ -503,9 +576,13 @@ def refresh_qwen_token(timeout: float = 20.0) -> str:
     return access_token
 
 
-def qwen_device_code_login(*, timeout: float = 15.0, max_wait: float | None = None,
-                           open_browser: bool = True, notify: Any = None) -> None:
-    emit = notify or print
+def qwen_device_start(*, timeout: float = 15.0) -> dict[str, Any]:
+    """要一个 Qwen 设备码，**立刻返回**，不在这里等用户。
+
+    拆出 start/poll 是为了让网页也能走这条流程：原来的实现在函数里轮询到成功为止
+    （最长十几分钟），HTTP 请求挂不住那么久。返回的 ctx 由调用方保管，poll 时传回来。
+    ctx 里有 device_code 和 PKCE verifier，**都是凭据，不许发给浏览器**。
+    """
     verifier, challenge = _pkce_pair()
     try:
         response = httpx.post(
@@ -513,6 +590,7 @@ def qwen_device_code_login(*, timeout: float = 15.0, max_wait: float | None = No
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Accept": "application/json",
+                "User-Agent": HTTP_USER_AGENT,
                 "x-request-id": secrets.token_hex(16),
             },
             data={
@@ -532,11 +610,113 @@ def qwen_device_code_login(*, timeout: float = 15.0, max_wait: float | None = No
     try:
         device = response.json()
     except ValueError as exc:
-        raise OAuthAuthError(f"Qwen OAuth device authorization returned invalid JSON: {exc}") from exc
+        # 走到这里状态码是 2xx 却不是 JSON —— 十有八九是被中间的 WAF/网关拦了，
+        # 拿到的是一张 HTML 挑战页。把 content-type 带出来，别让人对着
+        # "invalid JSON" 干猜。
+        ctype = response.headers.get("content-type", "")
+        raise OAuthAuthError(
+            f"Qwen OAuth device authorization returned {ctype or 'non-JSON'} instead of JSON"
+            f"（HTTP {response.status_code}，可能被网关/WAF 拦截）: {exc}") from exc
     if not isinstance(device, dict) or not device.get("device_code"):
         raise OAuthAuthError("Qwen OAuth device authorization returned invalid payload.")
     url = str(device.get("verification_uri_complete") or device.get("verification_uri") or "").strip()
     user_code = str(device.get("user_code") or "").strip()
+    if not url and not user_code:
+        raise OAuthAuthError("Qwen OAuth device authorization missing verification URL/user code.")
+    try:
+        expires_in = int(float(device.get("expires_in") or 600))
+    except (TypeError, ValueError):
+        expires_in = 600
+    return {
+        "provider": "qwen-oauth",
+        "device_code": str(device.get("device_code") or ""),
+        "verifier": verifier,
+        "user_code": user_code,
+        "verification_uri": url,
+        "expires_in": expires_in,
+        "interval": 2.0,
+    }
+
+
+def _poll_retry(ctx: dict[str, Any], reason: str) -> str:
+    """把这一次轮询判为"再等等"，并把原因记在 ctx 里供界面显示。
+
+    连着失败太多次才认输 —— 一直转圈却不说为什么，比报错更让人没底。
+    """
+    ctx["last_error"] = reason
+    ctx["fails"] = int(ctx.get("fails") or 0) + 1
+    if ctx["fails"] >= _POLL_MAX_CONSECUTIVE_FAILS:
+        raise OAuthAuthError(f"连续 {ctx['fails']} 次轮询都没成功，最后一次：{reason}")
+    # 退避：对面正忙的时候别贴着打。
+    ctx["interval"] = min(float(ctx.get("interval") or 2.0) * 1.5, 10.0)
+    return "pending"
+
+
+_POLL_MAX_CONSECUTIVE_FAILS = 8
+
+
+def qwen_device_poll(ctx: dict[str, Any], *, timeout: float = 15.0) -> str:
+    """轮询一次。返回 "ok"（已存好 token）或 "pending"；硬失败抛 OAuthAuthError。
+
+    "slow_down" 时把 ctx["interval"] 调大 —— 调用方下次该等更久，这个决定属于
+    协议本身，不该让每个调用方各猜一套。
+    """
+    try:
+        token_resp = httpx.post(
+            QWEN_OAUTH_TOKEN_URL,
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json",
+                     "User-Agent": HTTP_USER_AGENT},
+            data={
+                "grant_type": QWEN_OAUTH_DEVICE_GRANT_TYPE,
+                "client_id": QWEN_OAUTH_CLIENT_ID,
+                "device_code": str(ctx.get("device_code") or ""),
+                "code_verifier": str(ctx.get("verifier") or ""),
+            },
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        # 网络抖一下不该把整个登录判死：用户正站在授权页面前面，会话一销毁就得从头再来。
+        return _poll_retry(ctx, f"网络错误：{exc}")
+    payload: dict[str, Any]
+    try:
+        parsed = token_resp.json()
+        payload = parsed if isinstance(parsed, dict) else {}
+    except ValueError:
+        payload = {}
+    if token_resp.status_code == 400 and payload.get("error") == "authorization_pending":
+        ctx["interval"] = 2.0
+        ctx["fails"] = 0          # 对面答得好好的，之前那点抖动不算数
+        ctx.pop("last_error", None)
+        return "pending"
+    if token_resp.status_code == 429 and payload.get("error") == "slow_down":
+        ctx["interval"] = min(float(ctx.get("interval") or 2.0) * 1.5, 10.0)
+        return "pending"
+    if token_resp.status_code >= 500:
+        # 网关 5xx 是**暂时**的（实测撞到过 alibaba-ga 的 504）。当成硬失败会让用户
+        # 在授权页面前面看到一句"登录失败"，而其实什么都没坏。
+        return _poll_retry(ctx, f"HTTP {token_resp.status_code}（网关暂时不可用）")
+    if token_resp.status_code >= 400:
+        detail = payload.get("error_description") or payload.get("error") or token_resp.text[:200]
+        raise OAuthAuthError(f"Qwen OAuth device token poll failed with HTTP {token_resp.status_code}: {detail}")
+    access_token = str(payload.get("access_token") or "").strip()
+    if not access_token:
+        return "pending"
+    set_auth_token(
+        "qwen-oauth",
+        access_token,
+        refresh_token=str(payload.get("refresh_token") or "").strip(),
+        expires_at=_expires_at_from_payload(payload),
+        source="qwen-device-code",
+    )
+    return "ok"
+
+
+def qwen_device_code_login(*, timeout: float = 15.0, max_wait: float | None = None,
+                           open_browser: bool = True, notify: Any = None) -> None:
+    """终端里的设备码登录：start 一次，然后就地轮询到好为止。"""
+    emit = notify or print
+    ctx = qwen_device_start(timeout=timeout)
+    url = str(ctx.get("verification_uri") or "")
     if url:
         emit(f"打开浏览器完成 Qwen OAuth：{url}")
         if open_browser:
@@ -544,57 +724,13 @@ def qwen_device_code_login(*, timeout: float = 15.0, max_wait: float | None = No
                 webbrowser.open(url, new=1, autoraise=True)
             except (OSError, RuntimeError):
                 pass
-    elif user_code:
-        emit(f"打开 Qwen OAuth 页面并输入代码：{user_code}")
     else:
-        raise OAuthAuthError("Qwen OAuth device authorization missing verification URL/user code.")
-    try:
-        expires_in = int(float(device.get("expires_in") or 600))
-    except (TypeError, ValueError):
-        expires_in = 600
-    wait_budget = max_wait if max_wait is not None else float(expires_in)
+        emit(f"打开 Qwen OAuth 页面并输入代码：{ctx.get('user_code')}")
+    wait_budget = max_wait if max_wait is not None else float(ctx.get("expires_in") or 600)
     start = time.monotonic()
-    poll_interval = 2.0
     while time.monotonic() - start < max(1.0, wait_budget):
-        time.sleep(poll_interval)
-        try:
-            token_resp = httpx.post(
-                QWEN_OAUTH_TOKEN_URL,
-                headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
-                data={
-                    "grant_type": QWEN_OAUTH_DEVICE_GRANT_TYPE,
-                    "client_id": QWEN_OAUTH_CLIENT_ID,
-                    "device_code": str(device.get("device_code") or ""),
-                    "code_verifier": verifier,
-                },
-                timeout=timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise OAuthAuthError(f"Qwen OAuth device token poll failed: {exc}") from exc
-        payload: dict[str, Any]
-        try:
-            parsed = token_resp.json()
-            payload = parsed if isinstance(parsed, dict) else {}
-        except ValueError:
-            payload = {}
-        if token_resp.status_code == 400 and payload.get("error") == "authorization_pending":
-            poll_interval = 2.0
-            continue
-        if token_resp.status_code == 429 and payload.get("error") == "slow_down":
-            poll_interval = min(poll_interval * 1.5, 10.0)
-            continue
-        if token_resp.status_code >= 400:
-            detail = payload.get("error_description") or payload.get("error") or token_resp.text[:200]
-            raise OAuthAuthError(f"Qwen OAuth device token poll failed with HTTP {token_resp.status_code}: {detail}")
-        access_token = str(payload.get("access_token") or "").strip()
-        if access_token:
-            set_auth_token(
-                "qwen-oauth",
-                access_token,
-                refresh_token=str(payload.get("refresh_token") or "").strip(),
-                expires_at=_expires_at_from_payload(payload),
-                source="qwen-device-code",
-            )
+        time.sleep(float(ctx.get("interval") or 2.0))
+        if qwen_device_poll(ctx, timeout=timeout) == "ok":
             return
     raise OAuthAuthError("Qwen OAuth device-code login timed out.")
 
@@ -771,12 +907,136 @@ def resolve_copilot_api_token(*, exchange: bool = True, strict: bool = False) ->
     return api_token
 
 
-def codex_device_code_login(*, timeout: float = 15.0, max_wait: float = 15 * 60,
-                            notify: Any = None) -> None:
-    def emit(text: str) -> None:
-        if notify:
-            notify(text)
+def _kimi_url(path: str) -> str:
+    return KIMI_CODE_OAUTH_HOST.rstrip("/") + path
 
+
+def kimi_device_start(*, timeout: float = 15.0) -> dict[str, Any]:
+    """要一个 Kimi Code 设备码，立刻返回。理由同 qwen_device_start。"""
+    try:
+        response = httpx.post(
+            _kimi_url("/api/oauth/device_authorization"),
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "Accept": "application/json", "User-Agent": HTTP_USER_AGENT},
+            data={"client_id": KIMI_CODE_CLIENT_ID},
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        raise OAuthAuthError(f"Kimi Code 设备授权请求失败：{exc}") from exc
+    if response.status_code >= 400:
+        raise OAuthAuthError(
+            f"Kimi Code 设备授权返回 HTTP {response.status_code}：{response.text[:200]}")
+    try:
+        data = response.json()
+    except ValueError as exc:
+        ctype = response.headers.get("content-type", "")
+        raise OAuthAuthError(
+            f"Kimi Code 设备授权返回 {ctype or '非 JSON'} 而不是 JSON"
+            f"（HTTP {response.status_code}，可能被网关拦截）：{exc}") from exc
+    if not isinstance(data, dict):
+        raise OAuthAuthError("Kimi Code 设备授权返回了无法解析的内容。")
+    device_code = str(data.get("device_code") or "").strip()
+    user_code = str(data.get("user_code") or "").strip()
+    if not device_code or not user_code:
+        raise OAuthAuthError("Kimi Code 设备授权响应缺少 device_code 或 user_code。")
+    try:
+        expires_in = int(float(data.get("expires_in") or 900))
+    except (TypeError, ValueError):
+        expires_in = 900
+    try:
+        interval = float(data.get("interval") or 5)
+    except (TypeError, ValueError):
+        interval = 5.0
+    return {
+        "provider": "kimi-code",
+        "device_code": device_code,
+        "user_code": user_code,
+        "verification_uri": str(data.get("verification_uri_complete")
+                                or data.get("verification_uri") or "").strip(),
+        "expires_in": expires_in,
+        "interval": interval,
+    }
+
+
+def kimi_device_poll(ctx: dict[str, Any], *, timeout: float = 15.0) -> str:
+    """轮询一次。返回 "ok"（已存好 token）或 "pending"；硬失败抛 OAuthAuthError。"""
+    try:
+        resp = httpx.post(
+            _kimi_url("/api/oauth/token"),
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "Accept": "application/json", "User-Agent": HTTP_USER_AGENT},
+            data={
+                "client_id": KIMI_CODE_CLIENT_ID,
+                "device_code": str(ctx.get("device_code") or ""),
+                "grant_type": KIMI_CODE_DEVICE_GRANT_TYPE,
+            },
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        return _poll_retry(ctx, f"网络错误：{exc}")
+    if resp.status_code >= 500:
+        return _poll_retry(ctx, f"HTTP {resp.status_code}（网关暂时不可用）")
+    payload: dict[str, Any]
+    try:
+        parsed = resp.json()
+        payload = parsed if isinstance(parsed, dict) else {}
+    except ValueError:
+        payload = {}
+    if resp.status_code == 200 and payload.get("access_token"):
+        set_auth_token(
+            "kimi-code",
+            str(payload.get("access_token") or "").strip(),
+            refresh_token=str(payload.get("refresh_token") or "").strip(),
+            expires_at=_expires_at_from_payload(payload),
+            source="kimi-device-code",
+        )
+        return "ok"
+    error = str(payload.get("error") or "")
+    if error in ("authorization_pending", "slow_down"):
+        if error == "slow_down":
+            ctx["interval"] = min(float(ctx.get("interval") or 5.0) * 1.5, 10.0)
+        ctx["fails"] = 0
+        ctx.pop("last_error", None)
+        return "pending"
+    if error == "expired_token":
+        raise OAuthAuthError("这个代码已经过期了，请重新开始登录。")
+    if error == "access_denied":
+        raise OAuthAuthError("授权被拒绝。")
+    detail = payload.get("error_description") or error or resp.text[:200]
+    raise OAuthAuthError(f"Kimi Code 设备码轮询失败（HTTP {resp.status_code}）：{detail}")
+
+
+def refresh_kimi_token(timeout: float = 20.0) -> str:
+    item = get_auth("kimi-code")
+    refresh_token = str(item.get("refresh_token") or "").strip()
+    if not refresh_token:
+        raise OAuthAuthError("Kimi Code 的 refresh_token 缺失，请重新登录。")
+    try:
+        resp = httpx.post(
+            _kimi_url("/api/oauth/token"),
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "Accept": "application/json", "User-Agent": HTTP_USER_AGENT},
+            data={"client_id": KIMI_CODE_CLIENT_ID, "grant_type": "refresh_token",
+                  "refresh_token": refresh_token},
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        raise OAuthAuthError(f"Kimi Code 刷新失败：{exc}") from exc
+    if resp.status_code >= 400:
+        raise OAuthAuthError(f"Kimi Code 刷新返回 HTTP {resp.status_code}：{resp.text[:200]}")
+    payload = resp.json() if resp.text else {}
+    access = str((payload or {}).get("access_token") or "").strip()
+    if not access:
+        raise OAuthAuthError("Kimi Code 刷新未返回 access_token。")
+    set_auth_token("kimi-code", access,
+                   refresh_token=str(payload.get("refresh_token") or refresh_token).strip(),
+                   expires_at=_expires_at_from_payload(payload),
+                   source=str(item.get("source") or "kimi-device-code"))
+    return access
+
+
+def codex_device_start(*, timeout: float = 15.0) -> dict[str, Any]:
+    """要一个 Codex 设备码，立刻返回。理由同 qwen_device_start。"""
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
             resp = client.post(
@@ -800,31 +1060,50 @@ def codex_device_code_login(*, timeout: float = 15.0, max_wait: float = 15 * 60,
         poll_interval = 5
     if not user_code or not device_auth_id:
         raise OAuthAuthError("Codex device code response missing user_code or device_auth_id.")
-    emit(f"打开 {CODEX_AUTH_ISSUER}/codex/device 并输入代码：{user_code}")
-    start = time.monotonic()
-    code_resp: dict[str, Any] | None = None
+    return {
+        "provider": "openai-codex",
+        "device_auth_id": device_auth_id,
+        "user_code": user_code,
+        "verification_uri": f"{CODEX_AUTH_ISSUER}/codex/device",
+        "interval": float(poll_interval),
+        "expires_in": 15 * 60,
+    }
+
+
+def codex_device_poll(ctx: dict[str, Any], *, timeout: float = 15.0) -> str:
+    """轮询一次。返回 "ok"（已存好 token）或 "pending"；硬失败抛 OAuthAuthError。"""
+    device_auth_id = str(ctx.get("device_auth_id") or "")
+    user_code = str(ctx.get("user_code") or "")
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
-            while time.monotonic() - start < max_wait:
-                time.sleep(poll_interval)
-                poll = client.post(
-                    f"{CODEX_AUTH_ISSUER}/api/accounts/deviceauth/token",
-                    json={"device_auth_id": device_auth_id, "user_code": user_code},
-                    headers={"Content-Type": "application/json"},
-                )
-                if poll.status_code == 200:
-                    try:
-                        code_resp = poll.json()
-                    except ValueError as exc:
-                        raise OAuthAuthError(f"Codex device polling returned invalid JSON: {exc}") from exc
-                    break
-                if poll.status_code in {403, 404}:
-                    continue
-                raise OAuthAuthError(f"Codex device polling returned HTTP {poll.status_code}.")
-    except KeyboardInterrupt as exc:
-        raise OAuthAuthError("Codex device-code login cancelled.") from exc
-    if code_resp is None:
-        raise OAuthAuthError("Codex device-code login timed out.")
+            poll = client.post(
+                f"{CODEX_AUTH_ISSUER}/api/accounts/deviceauth/token",
+                json={"device_auth_id": device_auth_id, "user_code": user_code},
+                headers={"Content-Type": "application/json"},
+            )
+    except httpx.HTTPError as exc:
+        return _poll_retry(ctx, f"网络错误：{exc}")
+    # 403/404 = 用户还没在浏览器里确认，不是错误。
+    if poll.status_code in {403, 404}:
+        ctx["fails"] = 0
+        ctx.pop("last_error", None)
+        return "pending"
+    if poll.status_code >= 500:
+        return _poll_retry(ctx, f"HTTP {poll.status_code}（网关暂时不可用）")
+    if poll.status_code != 200:
+        raise OAuthAuthError(f"Codex device polling returned HTTP {poll.status_code}.")
+    try:
+        code_resp = poll.json()
+    except ValueError as exc:
+        raise OAuthAuthError(f"Codex device polling returned invalid JSON: {exc}") from exc
+    if not isinstance(code_resp, dict):
+        raise OAuthAuthError("Codex device polling returned invalid payload.")
+    _codex_exchange_device_code(code_resp, timeout=timeout)
+    return "ok"
+
+
+def _codex_exchange_device_code(code_resp: dict[str, Any], *, timeout: float = 15.0) -> None:
+    """拿设备授权换出来的 authorization_code 去换 token 并落盘。"""
     authorization_code = str(code_resp.get("authorization_code") or "").strip()
     code_verifier = str(code_resp.get("code_verifier") or "").strip()
     if not authorization_code or not code_verifier:
@@ -864,6 +1143,26 @@ def codex_device_code_login(*, timeout: float = 15.0, max_wait: float = 15 * 60,
     )
 
 
+def codex_device_code_login(*, timeout: float = 15.0, max_wait: float = 15 * 60,
+                            notify: Any = None) -> None:
+    """终端里的设备码登录：start 一次，然后就地轮询到好为止。"""
+    def emit(text: str) -> None:
+        if notify:
+            notify(text)
+
+    ctx = codex_device_start(timeout=timeout)
+    emit(f"打开 {CODEX_AUTH_ISSUER}/codex/device 并输入代码：{ctx.get('user_code')}")
+    start = time.monotonic()
+    try:
+        while time.monotonic() - start < max_wait:
+            time.sleep(float(ctx.get("interval") or 5))
+            if codex_device_poll(ctx, timeout=timeout) == "ok":
+                return
+    except KeyboardInterrupt as exc:
+        raise OAuthAuthError("Codex device-code login cancelled.") from exc
+    raise OAuthAuthError("Codex device-code login timed out.")
+
+
 def anthropic_oauth_url(*, code_challenge: str, state: str) -> str:
     params = {
         "code": "true",
@@ -896,22 +1195,27 @@ def _parse_anthropic_callback(raw: str) -> tuple[str, str]:
     return _extract_oauth_code(value), ""
 
 
-def anthropic_oauth_login(*, notify: Any = None, prompt: Any = None, timeout: float = 30.0) -> None:
-    """Claude 订阅版 OAuth 登录（授权码 + PKCE + 手动粘码，网页终端也能用）。"""
-    def emit(text: str) -> None:
-        if notify:
-            notify(text)
-    ask = prompt or (lambda p: input(p))
+def anthropic_login_start() -> dict[str, Any]:
+    """Claude 订阅登录第一步：给出授权链接。
+
+    Anthropic 的回调页会把 `code#state` 显示出来让人复制 —— 没有本地回调服务这一说，
+    所以这个流程天然适合网页：给链接、等粘码。ctx 里的 verifier/state 是凭据，
+    **不许发给浏览器**。
+    """
     verifier, challenge = _pkce_pair()
     state = secrets.token_urlsafe(24)
-    url = anthropic_oauth_url(code_challenge=challenge, state=state)
-    emit("用浏览器打开下面链接，登录并授权 Claude：")
-    emit(f"  {url}")
-    emit("授权后页面会显示一段 `code#state`，整段复制后粘回这里：")
-    try:
-        raw = ask("粘贴 code：")
-    except (EOFError, KeyboardInterrupt) as exc:
-        raise OAuthAuthError("Claude OAuth 登录已取消。") from exc
+    return {
+        "provider": "anthropic-oauth",
+        "url": anthropic_oauth_url(code_challenge=challenge, state=state),
+        "verifier": verifier,
+        "state": state,
+    }
+
+
+def anthropic_login_complete(ctx: dict[str, Any], raw: str, *, timeout: float = 30.0) -> None:
+    """第二步：拿用户粘回来的 `code#state` 换 token。"""
+    verifier = str(ctx.get("verifier") or "")
+    state = str(ctx.get("state") or "")
     code, got_state = _parse_anthropic_callback(str(raw))
     if not code:
         raise OAuthAuthError("没有解析到授权码，请重试（复制整段 code#state）。")
@@ -948,6 +1252,23 @@ def anthropic_oauth_login(*, notify: Any = None, prompt: Any = None, timeout: fl
         expires_at=_expires_at_from_payload(payload, _jwt_expires_at(access)),
         source="oauth",
     )
+
+
+def anthropic_oauth_login(*, notify: Any = None, prompt: Any = None, timeout: float = 30.0) -> None:
+    """终端里的 Claude 订阅登录：给链接 → 等粘码 → 换 token。"""
+    def emit(text: str) -> None:
+        if notify:
+            notify(text)
+    ask = prompt or (lambda p: input(p))
+    ctx = anthropic_login_start()
+    emit("用浏览器打开下面链接，登录并授权 Claude：")
+    emit(f"  {ctx['url']}")
+    emit("授权后页面会显示一段 `code#state`，整段复制后粘回这里：")
+    try:
+        raw = ask("粘贴 code：")
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise OAuthAuthError("Claude OAuth 登录已取消。") from exc
+    anthropic_login_complete(ctx, str(raw), timeout=timeout)
 
 
 def refresh_anthropic_token(timeout: float = 20.0) -> str:
@@ -1025,6 +1346,10 @@ def resolve_provider_token(provider_id: str, env_name: str = "", *, refresh: boo
         item = get_auth(provider_id)
         if refresh and item.get("access_token") and item.get("refresh_token") and _is_expiring(item.get("expires_at"), GOOGLE_REFRESH_SKEW_SECONDS):
             return refresh_google_token()
+    if provider_id == "kimi-code":
+        item = get_auth(provider_id)
+        if refresh and item.get("access_token") and item.get("refresh_token") and _is_expiring(item.get("expires_at"), KIMI_REFRESH_SKEW_SECONDS):
+            return refresh_kimi_token()
     if provider_id == "copilot":
         return resolve_copilot_api_token()
     return get_token(provider_id)

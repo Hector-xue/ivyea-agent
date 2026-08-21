@@ -137,28 +137,38 @@ class RemoteApproval:
                 _PENDING_APPROVALS.pop(request_id, None)
 
 
-def health() -> dict[str, Any]:
-    model_cfg = config.get_model_config()
+def _model_snapshot(model_cfg: dict[str, Any]) -> dict[str, Any]:
+    """一份模型配置的对外描述（不含密钥）。
+
+    /health 的主脑信息与"这一轮实际用的模型"共用它。两处各拼一份必然长出差异，
+    而调用方（IvyeaOps 任务台的模型芯片）恰恰是拿这两处的数据往同一个位置显示 ——
+    少一个字段就会出现"切了模型之后徽标没了"这种只在切换后复现的怪事。
+    """
     provider = (
         models.provider_by_id(str(model_cfg.get("provider_id") or ""))
         or models.provider_by_id(str(model_cfg.get("provider") or ""))
         or model_cfg
     )
     return {
+        "provider": model_cfg.get("provider", ""),
+        "label": model_cfg.get("label", ""),
+        "model": model_cfg.get("model", ""),
+        "api_mode": model_cfg.get("api_mode", ""),
+        "auth_type": model_cfg.get("auth_type", ""),
+        "key_status": models.key_status(provider),
+        "capabilities": models.provider_capabilities(provider),
+        "badges": models.capability_badges(provider),
+    }
+
+
+def health() -> dict[str, Any]:
+    model_cfg = config.get_model_config()
+    return {
         "ok": True,
         "name": "ivyea-agent",
         "version": __version__,
         "data_dir": str(config.IVYEA_DIR),
-        "model": {
-            "provider": model_cfg.get("provider", ""),
-            "label": model_cfg.get("label", ""),
-            "model": model_cfg.get("model", ""),
-            "api_mode": model_cfg.get("api_mode", ""),
-            "auth_type": model_cfg.get("auth_type", ""),
-            "key_status": models.key_status(provider),
-            "capabilities": models.provider_capabilities(provider),
-            "badges": models.capability_badges(provider),
-        },
+        "model": _model_snapshot(model_cfg),
         "knowledge": {
             "cards": len(knowledge.list_cards()),
             "user_cards": len(knowledge.list_user_cards()),
@@ -234,6 +244,12 @@ def manifest() -> dict[str, Any]:
             {"method": "GET", "path": "/v1/model", "description": "current model status without secrets"},
             {"method": "GET", "path": "/v1/model/providers", "description": "provider capability matrix without secrets"},
             {"method": "GET", "path": "/v1/model/providers/{id}/models", "description": "live/cache/builtin model catalog for one provider"},
+            {"method": "POST", "path": "/v1/model/catalog", "description": "model catalog for any OpenAI-compatible endpoint (caller supplies base_url/api_key)"},
+            {"method": "GET", "path": "/v1/auth", "description": "subscription provider login status without secrets"},
+            {"method": "POST", "path": "/v1/auth/{id}/start", "description": "begin an OAuth/device-code/token login"},
+            {"method": "POST", "path": "/v1/auth/{id}/poll", "description": "poll a device-code login"},
+            {"method": "POST", "path": "/v1/auth/{id}/complete", "description": "finish a paste-code or token login"},
+            {"method": "POST", "path": "/v1/auth/{id}/logout", "description": "clear stored credentials for one provider"},
             {"method": "POST", "path": "/v1/model/providers/{id}/probe", "description": "minimal provider connectivity probe without returning secrets"},
             {"method": "POST", "path": "/v1/model/configure", "description": "configure the active IvyeaAgent model without returning secrets"},
             {"method": "GET", "path": "/v1/config/vision", "description": "vision fallback chain status (tier 1 main brain / 2 sidecar / 3 local CV)"},
@@ -356,6 +372,213 @@ def openapi_spec() -> dict[str, Any]:
     }
 
 
+# ── 订阅制 provider 的登录（Claude / Codex / Gemini / Qwen / Copilot）────────
+#
+# 这几家不是填 API key，而是要走一遍 OAuth。原来只有 CLI 能做（`ivyea model auth
+# <pid> --login`），不会用命令行的人就被挡在门外。这里把同一套流程开成 HTTP，
+# 让 IvyeaOps 的网页也能引导着走完。
+#
+# 三条铁律：
+#   ① verifier / state / device_code / token **一律不出服务端**。返回给调用方的
+#      只有"用户需要看到的东西"：授权链接、user_code、验证地址。
+#   ② 登录流程是**有状态的两步**，但 HTTP 请求不能挂十几分钟等用户 —— 所以
+#      start 立刻返回，中间态存在这个进程内的会话池里，由 poll/complete 接上。
+#   ③ 会话池带 TTL 和上限：它装的是凭据，不该无限期躺在内存里。
+
+_AUTH_SESSIONS: dict[str, dict[str, Any]] = {}
+_AUTH_SESSIONS_LOCK = threading.Lock()
+_AUTH_SESSION_TTL = 20 * 60.0
+_AUTH_SESSIONS_MAX = 20
+
+# 每家用哪种流程。device = 显示 user_code 让用户去输、服务端轮询；
+# paste = 给授权链接、用户把回调里的东西粘回来；token = 直接填一个已有的 token。
+_AUTH_KINDS = {
+    "qwen-oauth": "device",
+    "openai-codex": "device",
+    "kimi-code": "device",
+    "anthropic-oauth": "paste",
+    "google-gemini-cli": "paste",
+    "copilot": "token",
+}
+
+_AUTH_HINTS = {
+    "qwen-oauth": "在打开的页面上确认授权即可，这里会自动完成。",
+    "kimi-code": "用 Kimi 会员账号在打开的页面上确认授权即可，这里会自动完成。",
+    "openai-codex": "打开页面后输入下面的代码并确认授权，这里会自动完成。",
+    "anthropic-oauth": "授权后页面会显示一段 `code#state`，整段复制粘回来。",
+    "google-gemini-cli": "授权后浏览器会跳到一个打不开的 127.0.0.1 地址（正常现象，"
+                         "那台机器是你自己的电脑不是服务器）—— 把地址栏里那条完整 URL 复制粘回来。",
+    "copilot": "填一个有 Copilot 权限的 GitHub Token（gho_ / ghu_ / github_pat_ 开头；"
+               "经典 ghp_ 不被 Copilot API 支持）。",
+}
+
+
+def _auth_sweep(now: float) -> None:
+    """清掉过期会话。调用方必须已持锁。"""
+    for sid in [k for k, v in _AUTH_SESSIONS.items() if now - float(v.get("created") or 0) > _AUTH_SESSION_TTL]:
+        _AUTH_SESSIONS.pop(sid, None)
+
+
+def _auth_put(provider_id: str, ctx: dict[str, Any]) -> str:
+    session_id = uuid.uuid4().hex
+    now = time.time()
+    with _AUTH_SESSIONS_LOCK:
+        _auth_sweep(now)
+        # 满了就丢最旧的那条：这里是登录中转站，不是存档。
+        while len(_AUTH_SESSIONS) >= _AUTH_SESSIONS_MAX:
+            oldest = min(_AUTH_SESSIONS.items(), key=lambda kv: float(kv[1].get("created") or 0))[0]
+            _AUTH_SESSIONS.pop(oldest, None)
+        _AUTH_SESSIONS[session_id] = {"provider": provider_id, "created": now, "ctx": ctx}
+    return session_id
+
+
+def _auth_get(provider_id: str, session_id: str) -> dict[str, Any]:
+    now = time.time()
+    with _AUTH_SESSIONS_LOCK:
+        _auth_sweep(now)
+        row = _AUTH_SESSIONS.get(str(session_id or ""))
+    if not row or row.get("provider") != provider_id:
+        raise ValueError("登录会话已过期或不存在，请重新开始。")
+    return row["ctx"]
+
+
+def _auth_drop(session_id: str) -> None:
+    with _AUTH_SESSIONS_LOCK:
+        _AUTH_SESSIONS.pop(str(session_id or ""), None)
+
+
+def _auth_provider(provider_id: str) -> dict[str, Any]:
+    provider = models.provider_by_id(provider_id)
+    if not provider or provider_id not in _AUTH_KINDS:
+        raise ValueError(f"这个 provider 不需要登录（或不认识）：{provider_id}")
+    return provider
+
+
+def auth_status() -> dict[str, Any]:
+    """五家订阅 provider 的登录状态。不含任何凭据。"""
+    from . import oauth_auth
+
+    rows = []
+    for pid, kind in _AUTH_KINDS.items():
+        provider = models.provider_by_id(pid)
+        if not provider:
+            continue
+        item = oauth_auth.get_auth(pid)
+        status = oauth_auth.token_status(pid)
+        if pid == "copilot" and status == "not-authenticated":
+            # Copilot 的凭据也可能来自环境变量（gh CLI 装的那些），不只是 auth.json。
+            raw, env_name = oauth_auth.resolve_copilot_github_token()
+            if raw:
+                status = f"configured:{env_name}"
+        rows.append({
+            "id": pid,
+            "label": provider.get("label", pid),
+            "kind": kind,
+            "auth_type": provider.get("auth_type", ""),
+            "status": status,
+            "ready": status not in ("not-authenticated", "expired"),
+            "expires_at": int(item.get("expires_at") or 0),
+            "source": str(item.get("source") or ""),
+            "hint": _AUTH_HINTS.get(pid, ""),
+            "models": list(provider.get("models") or []),
+        })
+    return {"ok": True, "providers": rows}
+
+
+def auth_start(provider_id: str) -> dict[str, Any]:
+    """开一次登录。**返回里只有用户需要看到的东西**，凭据留在会话池里。"""
+    from . import oauth_auth
+
+    _auth_provider(provider_id)
+    kind = _AUTH_KINDS[provider_id]
+    if provider_id == "qwen-oauth":
+        ctx = oauth_auth.qwen_device_start()
+    elif provider_id == "openai-codex":
+        ctx = oauth_auth.codex_device_start()
+    elif provider_id == "kimi-code":
+        ctx = oauth_auth.kimi_device_start()
+    elif provider_id == "anthropic-oauth":
+        ctx = oauth_auth.anthropic_login_start()
+    elif provider_id == "google-gemini-cli":
+        ctx = oauth_auth.google_login_start()
+    else:
+        ctx = {"provider": provider_id}
+    session_id = _auth_put(provider_id, ctx)
+    out: dict[str, Any] = {
+        "ok": True,
+        "provider": provider_id,
+        "kind": kind,
+        "session": session_id,
+        "hint": _AUTH_HINTS.get(provider_id, ""),
+    }
+    for field in ("url", "user_code", "verification_uri", "interval", "expires_in"):
+        if ctx.get(field):
+            out[field] = ctx[field]
+    return out
+
+
+def auth_poll(provider_id: str, session_id: str) -> dict[str, Any]:
+    """设备码流程轮询一次。"""
+    from . import oauth_auth
+
+    _auth_provider(provider_id)
+    if _AUTH_KINDS[provider_id] != "device":
+        raise ValueError(f"{provider_id} 不是设备码流程，不用轮询。")
+    ctx = _auth_get(provider_id, session_id)
+    pollers = {
+        "qwen-oauth": oauth_auth.qwen_device_poll,
+        "openai-codex": oauth_auth.codex_device_poll,
+        "kimi-code": oauth_auth.kimi_device_poll,
+    }
+    try:
+        state = pollers[provider_id](ctx)
+    except oauth_auth.OAuthAuthError as exc:
+        _auth_drop(session_id)
+        return {"ok": False, "status": "error", "error": str(exc)}
+    if state == "ok":
+        _auth_drop(session_id)
+        return {"ok": True, "status": "ok", "auth": auth_status()}
+    out = {"ok": True, "status": "pending", "interval": float(ctx.get("interval") or 2.0)}
+    # 上一次轮询遇到的暂时性问题（网关 5xx、网络抖动）。不是失败，但要让界面能说一句
+    # "正在重试"，而不是一直转圈不解释。
+    if ctx.get("last_error"):
+        out["note"] = str(ctx["last_error"])
+    return out
+
+
+def auth_complete(provider_id: str, session_id: str, value: str) -> dict[str, Any]:
+    """粘码 / 填 token 流程的第二步。"""
+    from . import oauth_auth
+
+    _auth_provider(provider_id)
+    kind = _AUTH_KINDS[provider_id]
+    if kind == "device":
+        raise ValueError(f"{provider_id} 是设备码流程，请用 poll。")
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("内容是空的。")
+    try:
+        if provider_id == "anthropic-oauth":
+            oauth_auth.anthropic_login_complete(_auth_get(provider_id, session_id), raw)
+        elif provider_id == "google-gemini-cli":
+            oauth_auth.google_login_complete(_auth_get(provider_id, session_id), raw)
+        else:
+            oauth_auth.copilot_login(raw)
+    except oauth_auth.OAuthAuthError as exc:
+        return {"ok": False, "error": str(exc)}
+    _auth_drop(session_id)
+    return {"ok": True, "auth": auth_status()}
+
+
+def auth_logout(provider_id: str) -> dict[str, Any]:
+    from . import oauth_auth
+
+    _auth_provider(provider_id)
+    cleared = (oauth_auth.copilot_logout() if provider_id == "copilot"
+               else oauth_auth.clear_auth(provider_id))
+    return {"ok": True, "cleared": bool(cleared), "auth": auth_status()}
+
+
 def task_list(limit: int = 20, status: str = "") -> dict[str, Any]:
     return {"ok": True, "tasks": task_runner.list_tasks(limit=limit, status=status or "")}
 
@@ -390,6 +613,135 @@ def _provider_secret(provider: dict[str, Any], payload_key: str = "") -> str:
             return ""
     key_env = str(provider.get("key_env") or "")
     return os.environ.get(key_env, "") if key_env else ""
+
+
+class ModelOverrideError(ValueError):
+    """按轮次指定的模型用不了。带 code 供上层转成结构化错误。"""
+
+    def __init__(self, code: str, detail: str):
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+
+
+def _turn_model_config(payload: dict[str, Any], *,
+                       allow_keyless: bool = False) -> tuple[dict[str, Any], str, bool]:
+    """这一轮要用的主脑配置 + 密钥 + 是否发生了覆盖。
+
+    `payload["model"]` 为空 → 全局配置，行为与改动前逐字一致（老调用方零影响）。
+    非空 → 按 ``<provider_id>:<model>`` 或内置模型 id 解析出**只对这一轮生效**的配置。
+
+    为什么做成按轮次而不是直接改全局：agent 的模型本来就是全局设置，真按全局切，
+    IvyeaOps 的其他用户、正在跑的定时任务会跟着一起换掉主脑 —— 一个人在输入框里
+    随手换个模型不该有这种连带。想改全局有另一条明路（写 ops 的系统配置再下推）。
+
+    解析失败一律抛错，**绝不静默回落到主脑**：那样用户在界面上选了 A、跑的还是 B，
+    还没有任何提示，等于给了个假开关。
+
+    allow_keyless：调用方自带 provider 实例（测试桩、内部复用）时不校验密钥 ——
+    那种情况下密钥根本不会被用到。
+    """
+    raw = str(payload.get("model") or "").strip()
+    if not raw:
+        return config.get_model_config(), config.get_active_key(), False
+
+    entry = models.by_id(raw)
+    if not entry:
+        raise ModelOverrideError("unknown_model", f"未知的模型 id：{raw}")
+
+    provider_id = str(entry.get("provider_id") or entry.get("id") or "")
+    active = config.get_model_config()
+    base_url = str(entry.get("base") or "").strip()
+    if not base_url:
+        # custom / ollama 这类内置表里没写死地址的：只有当前主脑就是同一个 provider
+        # 时才谈得上"沿用它的地址"。否则 providers.from_settings 会悄悄回落到
+        # DeepSeek 的地址 —— 拿着 A 家的 key 打 B 家的接口，报错还看不出所以然。
+        same_provider = str(active.get("provider_id") or active.get("provider") or "") == provider_id
+        base_url = str(active.get("base_url") or "").strip() if same_provider else ""
+
+    kind = str(entry.get("kind") or "openai").lower()
+    api_mode = str(entry.get("api_mode") or "")
+    if not base_url and (kind == "openai" or api_mode == "chat_completions"):
+        raise ModelOverrideError(
+            "base_url_required",
+            f"{entry.get('label') or raw} 没有可用的接口地址，请先在系统配置里填 Base URL。")
+
+    model_cfg = {
+        "provider": provider_id,
+        "provider_id": provider_id,
+        "label": str(entry.get("label") or raw),
+        "kind": kind,
+        "api_mode": api_mode,
+        "auth_type": str(entry.get("auth_type") or "api_key"),
+        "model": str(entry.get("model") or ""),
+        "base_url": base_url,
+        "key_env": str(entry.get("key_env") or ""),
+    }
+    provider_entry = models.provider_by_id(provider_id) or {
+        "id": provider_id,
+        "auth_type": model_cfg["auth_type"],
+        "key_env": model_cfg["key_env"],
+    }
+    api_key = _provider_secret(provider_entry)
+    if not allow_keyless and _model_requires_key(model_cfg) and not api_key:
+        raise ModelOverrideError(
+            "model_key_missing",
+            f"{model_cfg['label']} 还没配密钥（{model_cfg['key_env'] or '需要先完成登录授权'}）。")
+    return model_cfg, api_key, True
+
+
+def model_catalog(payload: dict[str, Any]) -> dict[str, Any]:
+    """任意 OpenAI 兼容端点的模型清单。
+
+    ``/v1/model/providers/{id}/models`` 只认内置 provider 表里那几家，密钥也只从
+    agent 自己的 .env 取。而 IvyeaOps 的视觉槽/生图槽常指向内置表里**没有**的中转商
+    （apimart、硅基流动），密钥又存在 ops 那边 —— 所以这里接受调用方现给的
+    base_url + api_key。
+
+    密钥只用于这一次取清单，不落盘、不回显。
+    """
+    provider_id = str(payload.get("provider") or payload.get("provider_id") or "").strip().lower()
+    base_url = str(payload.get("base_url") or "").strip()
+    api_key = str(payload.get("api_key") or "")
+    refresh = bool(payload.get("refresh"))
+    entry = models.provider_by_id(_OPS_PROVIDER_ALIASES.get(provider_id, provider_id)) if provider_id else None
+
+    if entry and not base_url:
+        # 内置 provider 且没另给地址：走带缓存那条路，顺带拿到 builtin 兜底清单。
+        return {"ok": True, "catalog": models.provider_model_catalog(
+            entry, api_key=api_key or _provider_secret(entry), refresh=refresh)}
+
+    if not base_url:
+        base_url = str(_OPENAI_COMPAT_BASES.get(provider_id, "") or "").strip()
+    if not base_url:
+        return {"ok": False, "error": "base_url_required", "catalog": {
+            "ok": False, "provider_id": provider_id, "label": provider_id,
+            "models": [], "default_model": "", "source": "none",
+            "error": "没有可用的接口地址：请先填 Base URL。"}}
+    # 地址是调用方现给的，而下面这一步会让**服务端**去访问它。urllib 认 file://、
+    # ftp:// 这些 scheme，放过去就等于给了一个任意读本机文件的口子。
+    if not base_url.lower().startswith(("http://", "https://")):
+        return {"ok": False, "error": "base_url_invalid", "catalog": {
+            "ok": False, "provider_id": provider_id, "label": provider_id,
+            "models": [], "default_model": "", "source": "none",
+            "error": "接口地址必须是 http:// 或 https:// 开头。"}}
+
+    # 调用方明确给了地址 = 这是个 OpenAI 兼容的中转商，按 `{base}/models` 取。
+    ad_hoc = {
+        "id": provider_id or "custom",
+        "label": str((entry or {}).get("label") or provider_id or "自定义端点"),
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "base": base_url,
+        "models": list((entry or {}).get("models") or []),
+        "default_model": str((entry or {}).get("default_model") or ""),
+        "auth_type": "api_key",
+        "key_env": str((entry or {}).get("key_env") or ""),
+    }
+    if not api_key and ad_hoc["key_env"]:
+        api_key = _provider_secret(ad_hoc)
+    return {"ok": True, "catalog": models.provider_model_catalog(
+        ad_hoc, api_key=api_key, refresh=refresh)}
 
 
 def model_provider_catalog(provider_id: str, refresh: bool = False) -> dict[str, Any]:
@@ -1190,8 +1542,11 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
     message = str(payload.get("message") or payload.get("input") or "").strip()
     if not message:
         raise ValueError("message is required")
-    model_cfg = config.get_model_config()
-    api_key = config.get_active_key()
+    try:
+        model_cfg, api_key, _model_overridden = _turn_model_config(
+            payload, allow_keyless=provider is not None)
+    except ModelOverrideError as exc:
+        return {"ok": False, "error": exc.code, "detail": exc.detail, "model": health()["model"]}
     if _model_requires_key(model_cfg) and not api_key and provider is None:
         return {"ok": False, "error": "model_not_configured", "model": health()["model"]}
 
@@ -1243,7 +1598,9 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
         "text": text,
         "events": events,
         "messages": _public_messages(messages),
-        "model": health()["model"],
+        # 本轮真正用的模型（可能被 payload.model 覆盖过），不是全局那个 ——
+        # 前端拿它刷新模型芯片，报全局的会让"切了却显示没切"。
+        "model": _model_snapshot(model_cfg),
         "read_only": bool(plan_mode),
         "todos": list(ctx.todos or []),
         "progress": progress_reporting.public_state(ctx),
@@ -1277,8 +1634,13 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         data = {"ok": False, "error": "message is required"}
         send("error", data)
         return data
-    model_cfg = config.get_model_config()
-    api_key = config.get_active_key()
+    try:
+        model_cfg, api_key, _model_overridden = _turn_model_config(
+            payload, allow_keyless=provider is not None)
+    except ModelOverrideError as exc:
+        data = {"ok": False, "error": exc.code, "detail": exc.detail, "model": health()["model"]}
+        send("error", data)
+        return data
     if _model_requires_key(model_cfg) and not api_key and provider is None:
         data = {"ok": False, "error": "model_not_configured", "model": health()["model"]}
         send("error", data)
@@ -1353,7 +1715,7 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
     send("start", {"ok": True, "session_id": ctx.session_id, "read_only": bool(plan_mode),
                    "approval": approval_mode,
                    "lane": route.lane, "lane_reason": route.reason,
-                   "model": health()["model"]})
+                   "model": _model_snapshot(model_cfg)})
 
     # 上下文占用：**在第一个 token 之前就发**。进度条要回答"这轮带了多少东西进去"，
     # 等收尾再说就晚了 —— 那时候用户已经在等回答，看不看进度条都无所谓了。
@@ -1625,6 +1987,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/model":
             self._json(200, {"ok": True, "model": health()["model"]})
+            return
+        if parsed.path == "/v1/auth":
+            self._json(200, auth_status())
             return
         if parsed.path == "/v1/model/providers":
             self._json(200, model_providers())
@@ -1992,6 +2357,31 @@ class _Handler(BaseHTTPRequestHandler):
             parts = parsed.path.strip("/").split("/")
             provider_id = parts[3] if len(parts) >= 5 else ""
             self._json(200, model_provider_probe(provider_id, body))
+            return
+        if parsed.path.startswith("/v1/auth/"):
+            parts = parsed.path.strip("/").split("/")
+            provider_id = parts[2] if len(parts) >= 4 else ""
+            action = parts[3] if len(parts) >= 4 else ""
+            try:
+                if action == "start":
+                    self._json(200, auth_start(provider_id))
+                elif action == "poll":
+                    self._json(200, auth_poll(provider_id, str(body.get("session") or "")))
+                elif action == "complete":
+                    self._json(200, auth_complete(provider_id, str(body.get("session") or ""),
+                                                  str(body.get("value") or "")))
+                elif action == "logout":
+                    self._json(200, auth_logout(provider_id))
+                else:
+                    self._json(404, {"ok": False, "error": "unknown_auth_action"})
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:  # noqa: BLE001 — 登录要发外网请求，什么都可能炸；
+                # 但绝不能让它变成 500 空响应，那样用户只看到"登录失败"三个字。
+                self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+            return
+        if parsed.path == "/v1/model/catalog":
+            self._json(200, model_catalog(body))
             return
         if parsed.path == "/v1/model/configure":
             self._json(200, model_configure(body))
