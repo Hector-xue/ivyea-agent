@@ -1332,7 +1332,8 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
     route = routing.classify(
         message,
         ops_bridge=bool(ctx.ops_bridge),
-        has_attachments=bool(payload.get("images") or payload.get("references")),
+        has_attachments=bool(payload.get("images") or payload.get("attachments")
+                             or payload.get("references")),
     )
     if route.is_chat or route.is_board:
         # 闲聊没有阶段可汇报；板块工具本身就是一次长任务、自己会回报进度 ——
@@ -2343,11 +2344,66 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext,
         ctx.knowledge_retrieval_expected = False
         ctx.knowledge_risk = "none"
         ctx.knowledge_query = message
+    user_content += _attachments_note(payload)
     # 本轮起点：这之前都是历史，这之后（含这条 user 和后续工具/回答）才是本轮新增。
     # 落盘时只写这一段，见 sessions.append_turn —— 整份覆盖会吃掉并发的另一轮。
     base = len(messages)
     messages.append({"role": "user", "content": _with_payload_images(user_content, payload, ctx)})
     return messages, created_at, base
+
+
+ATTACHMENT_MARKER = "\n\n[用户附图 —— 视觉模型代读的内容]"
+_ATTACHMENTS_MAX = 4
+_ATTACHMENT_TEXT_MAX = 6000
+
+
+def _attachments_note(payload: dict[str, Any]) -> str:
+    """把调用方读出来的附图内容并进**这一轮的 user 消息**，而不是 system。
+
+    IvyeaOps 任务台的图不进模型：ops 那边用它自己配好的视觉模型先把图读成文字，
+    再随这一轮带下来。此前那段文字走的是 `payload["system"]` —— 而 system 每轮
+    重建，落盘时又被本轮这份整个覆盖（见 sessions.append_turn），于是：
+
+      · 「图里是什么」只在贴图那一轮存在；
+      · 下一轮用户问"你刚才是怎么看到那张图的"，模型手里一个字都没有，只能否认
+        自己看过图、并把上一轮如实的描述说成是自己编的（真实投诉就是这条）；
+      · 会话存档里也完全看不出用户发过图。
+
+    并进 user 消息之后，它跟着历史走、跟着落盘走，三件事一起解决。展示端按
+    ATTACHMENT_MARKER 截断（同 `[Ivyea Skill：…]` 那批后缀注入），气泡里不会看到
+    这段文字，取而代之的是原图缩略图。
+
+    payload["attachments"]：[{kind,name,ref,by,text}]，text 是视觉模型读出的正文，
+    ref 是 ops 侧的 `ivyea-ref://` 原图句柄（可直接喂 image_generate 做图生图），
+    by 是代读的那个视觉模型 —— 用户问"你怎么看到的图"时要答得出具体是谁读的。
+    """
+    rows = payload.get("attachments")
+    if not isinstance(rows, list):
+        return ""
+    picked: list[tuple[str, str, str, str]] = []
+    for row in rows[:_ATTACHMENTS_MAX]:
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("text") or "").strip()[:_ATTACHMENT_TEXT_MAX]
+        if not text:
+            continue          # 没读出内容的附图不写进去：宁可没有，也不摆一条空壳
+        picked.append((str(row.get("name") or "").strip(),
+                       str(row.get("ref") or "").strip(),
+                       str(row.get("by") or "").strip()[:120], text))
+    if not picked:
+        return ""
+    head = (
+        f"{ATTACHMENT_MARKER}\n本轮用户上传了 {len(picked)} 张图。图片本体不在你的上下文里，"
+        "下面是视觉模型逐张读出的内容 —— 这就是用户看到的那张图，可以据此作答。"
+        "用户问你是怎么看到图的，如实说「图由视觉模型代读成文字后交给我」，"
+        "**不要否认收到过图，也不要把这段描述说成是自己编的**。"
+    )
+    lines = [head]
+    for idx, (name, ref, by, text) in enumerate(picked, 1):
+        tag = "、".join(x for x in (name, (f"代读模型 {by}" if by else ""),
+                                   (f"原图句柄 {ref}" if ref else "")) if x)
+        lines.append(f"第 {idx} 张{f'（{tag}）' if tag else ''}：\n{text}")
+    return "\n".join(lines)
 
 
 def _auto_skill_context(message: str, messages: list) -> list[dict[str, Any]]:
