@@ -167,6 +167,23 @@ PROVIDERS: list[dict[str, Any]] = [
         "note": "可用 QWEN_API_KEY，或用 Qwen CLI 登录导入/手动 token 存本地 Bearer token；支持 refresh token 自动刷新。",
     },
     {
+        # Kimi 会员的编程套餐。走 RFC 8628 设备码登录（见 oauth_auth.kimi_device_*），
+        # 和 Qwen / Codex 是同一套流程。base 用 /coding/v1 —— 实测它同时接
+        # /messages 和 /chat/completions 两种协议，这里按 OpenAI 兼容走。
+        "id": "kimi-code",
+        "label": "Kimi Code 订阅",
+        "group": "OAuth / 订阅",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "oauth_external",
+        "base": "https://api.kimi.com/coding/v1",
+        "key_env": "",
+        "models": ["kimi-k2.7-code", "kimi-k2.6", "kimi-k2-thinking"],
+        "default_model": "kimi-k2.7-code",
+        "status": "usable",
+        "note": "用 Kimi 会员账号授权登录（设备码），不需要 API key。",
+    },
+    {
         "id": "kimi",
         "label": "Kimi / Moonshot",
         "group": "国内 API",
@@ -205,6 +222,38 @@ PROVIDERS: list[dict[str, Any]] = [
         "models": ["glm-5.1", "glm-5", "glm-4.7", "glm-4.5"],
         "default_model": "glm-5",
         "status": "usable",
+    },
+    {
+        # GLM Coding Plan（订阅）。**地址和普通 API 不是一个** —— 官方文档明确要求
+        # 用 coding 专用端点 `/api/coding/paas/v4`，填成通用的 `/api/paas/v4` 会不通，
+        # 而报错完全指不到"地址错了"上。上面那条 `zai` 是给普通 API key 用的，两者
+        # 并存、各走各的。
+        "id": "zai-coding",
+        "label": "Z.AI GLM Coding Plan（订阅）",
+        "group": "国内 API",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "https://api.z.ai/api/coding/paas/v4",
+        "key_env": "ZAI_API_KEY",
+        "models": ["glm-5.3", "glm-5.2", "glm-4.7"],
+        "default_model": "glm-5.3",
+        "status": "usable",
+        "note": "订阅制 Coding Plan 专用地址；普通 API key 请用上面的 Z.AI / 智谱 GLM。",
+    },
+    {
+        "id": "glm-coding",
+        "label": "BigModel GLM Coding Plan（订阅）",
+        "group": "国内 API",
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "auth_type": "api_key",
+        "base": "https://open.bigmodel.cn/api/coding/paas/v4",
+        "key_env": "ZHIPU_API_KEY",
+        "models": ["glm-5.3", "glm-5.2", "glm-4.7"],
+        "default_model": "glm-5.3",
+        "status": "usable",
+        "note": "订阅制 Coding Plan 专用地址（国内站）；普通 API key 请用下面的智谱 GLM legacy。",
     },
     {
         "id": "glm-legacy",

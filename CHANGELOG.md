@@ -10,6 +10,28 @@
 
 ---
 
+## [v1.15.6] - 2026-08-21
+
+### 新增
+
+- **Kimi Code 订阅可以授权登录了**。走标准 RFC 8628 设备码，和 Qwen / Codex 同一套流程
+  （`POST /v1/auth/kimi-code/start` → 显示代码 → `poll`）。契约取自官方 CLI 包
+  `@moonshot-ai/kimi-code` 自己公开的常量：`auth.kimi.com` + `/api/oauth/device_authorization`
+  + `/api/oauth/token`。登录后主脑地址走 `https://api.kimi.com/coding/v1`
+  （实测该端点同时接 `/messages` 和 `/chat/completions`，这里按 OpenAI 兼容用）。
+  token 过期会自动用 refresh_token 续。
+- **GLM Coding Plan 加了两条专用 provider**：`zai-coding`（`https://api.z.ai/api/coding/paas/v4`）
+  和 `glm-coding`（`https://open.bigmodel.cn/api/coding/paas/v4`）。
+
+### 修复
+
+- **GLM 订阅此前根本接不上**。Coding Plan 官方明确要求用 coding 专用端点
+  `/api/coding/paas/v4`，而内置的 `zai` / `glm-legacy` 两条用的是通用端点 `/api/paas/v4`
+  —— 拿订阅的 key 填进去不通，报错还完全指不到"地址填错了"上。原来那两条保持不动
+  （普通 API key 仍然用它们），订阅走新加的两条。
+
+---
+
 ## [v1.15.5] - 2026-08-21
 
 ### 新增

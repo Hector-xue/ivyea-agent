@@ -395,6 +395,7 @@ _AUTH_SESSIONS_MAX = 20
 _AUTH_KINDS = {
     "qwen-oauth": "device",
     "openai-codex": "device",
+    "kimi-code": "device",
     "anthropic-oauth": "paste",
     "google-gemini-cli": "paste",
     "copilot": "token",
@@ -402,6 +403,7 @@ _AUTH_KINDS = {
 
 _AUTH_HINTS = {
     "qwen-oauth": "在打开的页面上确认授权即可，这里会自动完成。",
+    "kimi-code": "用 Kimi 会员账号在打开的页面上确认授权即可，这里会自动完成。",
     "openai-codex": "打开页面后输入下面的代码并确认授权，这里会自动完成。",
     "anthropic-oauth": "授权后页面会显示一段 `code#state`，整段复制粘回来。",
     "google-gemini-cli": "授权后浏览器会跳到一个打不开的 127.0.0.1 地址（正常现象，"
@@ -493,6 +495,8 @@ def auth_start(provider_id: str) -> dict[str, Any]:
         ctx = oauth_auth.qwen_device_start()
     elif provider_id == "openai-codex":
         ctx = oauth_auth.codex_device_start()
+    elif provider_id == "kimi-code":
+        ctx = oauth_auth.kimi_device_start()
     elif provider_id == "anthropic-oauth":
         ctx = oauth_auth.anthropic_login_start()
     elif provider_id == "google-gemini-cli":
@@ -521,9 +525,13 @@ def auth_poll(provider_id: str, session_id: str) -> dict[str, Any]:
     if _AUTH_KINDS[provider_id] != "device":
         raise ValueError(f"{provider_id} 不是设备码流程，不用轮询。")
     ctx = _auth_get(provider_id, session_id)
+    pollers = {
+        "qwen-oauth": oauth_auth.qwen_device_poll,
+        "openai-codex": oauth_auth.codex_device_poll,
+        "kimi-code": oauth_auth.kimi_device_poll,
+    }
     try:
-        state = (oauth_auth.qwen_device_poll(ctx) if provider_id == "qwen-oauth"
-                 else oauth_auth.codex_device_poll(ctx))
+        state = pollers[provider_id](ctx)
     except oauth_auth.OAuthAuthError as exc:
         _auth_drop(session_id)
         return {"ok": False, "status": "error", "error": str(exc)}

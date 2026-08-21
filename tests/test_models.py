@@ -231,9 +231,15 @@ def test_model_picker_lists_providers_first(ivyea_home, monkeypatch, capsys):
 
 
 def test_model_picker_codex_runs_login_before_switch(ivyea_home, monkeypatch, capsys):
-    from ivyea_agent import cli, oauth_auth, config
+    from ivyea_agent import cli, models, oauth_auth, config
     calls = []
-    answers = iter(["16", "4"])
+    # 编号是**按分组顺序现算的**，加一家 provider 就会整体后移。写死数字的话，
+    # 这个用例下一次加 provider 时会莫名其妙地去登录另一家（实测踩过：
+    # 插了 kimi-code 之后 "16" 变成了 Nous Portal，报错停在 getpass 上，
+    # 看起来跟 codex 毫无关系）。按 id 现查。
+    codex_no = str([p["id"] for _g, items in models.grouped_providers()
+                    for p in items].index("openai-codex") + 1)
+    answers = iter([codex_no, "4"])
     monkeypatch.setattr(cli, "_ask", lambda prompt, default="": next(answers, default))
 
     def fake_login(notify=None):

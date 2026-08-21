@@ -55,6 +55,14 @@ ANTHROPIC_OAUTH_REDIRECT_URI = os.getenv("IVYEA_ANTHROPIC_OAUTH_REDIRECT_URI", "
 ANTHROPIC_OAUTH_SCOPE = os.getenv("IVYEA_ANTHROPIC_OAUTH_SCOPE", "org:create_api_key user:profile user:inference")
 ANTHROPIC_OAUTH_BETA = os.getenv("IVYEA_ANTHROPIC_OAUTH_BETA", "oauth-2025-04-20")
 ANTHROPIC_REFRESH_SKEW_SECONDS = 120
+# Kimi Code 订阅（Kimi 会员的编程套餐）。标准 RFC 8628 设备码流程。
+# 这几个常量取自官方 CLI 包 @moonshot-ai/kimi-code 的 KIMI_CODE_FLOW_CONFIG ——
+# 和 Qwen / Codex 那几家的来源是同一类（客户端自己公开的常量）。
+KIMI_CODE_OAUTH_HOST = os.getenv("KIMI_CODE_OAUTH_HOST", "https://auth.kimi.com")
+KIMI_CODE_CLIENT_ID = os.getenv("KIMI_CODE_CLIENT_ID", "17e5f671-d194-4dfb-9706-5516cb48c098")
+KIMI_CODE_DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+KIMI_REFRESH_SKEW_SECONDS = 120
+
 COPILOT_ENV_VARS = ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
 COPILOT_TOKEN_EXCHANGE_URL = "https://api.github.com/copilot_internal/v2/token"
 COPILOT_UNSUPPORTED_PREFIX = "ghp_"
@@ -899,6 +907,134 @@ def resolve_copilot_api_token(*, exchange: bool = True, strict: bool = False) ->
     return api_token
 
 
+def _kimi_url(path: str) -> str:
+    return KIMI_CODE_OAUTH_HOST.rstrip("/") + path
+
+
+def kimi_device_start(*, timeout: float = 15.0) -> dict[str, Any]:
+    """要一个 Kimi Code 设备码，立刻返回。理由同 qwen_device_start。"""
+    try:
+        response = httpx.post(
+            _kimi_url("/api/oauth/device_authorization"),
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "Accept": "application/json", "User-Agent": HTTP_USER_AGENT},
+            data={"client_id": KIMI_CODE_CLIENT_ID},
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        raise OAuthAuthError(f"Kimi Code 设备授权请求失败：{exc}") from exc
+    if response.status_code >= 400:
+        raise OAuthAuthError(
+            f"Kimi Code 设备授权返回 HTTP {response.status_code}：{response.text[:200]}")
+    try:
+        data = response.json()
+    except ValueError as exc:
+        ctype = response.headers.get("content-type", "")
+        raise OAuthAuthError(
+            f"Kimi Code 设备授权返回 {ctype or '非 JSON'} 而不是 JSON"
+            f"（HTTP {response.status_code}，可能被网关拦截）：{exc}") from exc
+    if not isinstance(data, dict):
+        raise OAuthAuthError("Kimi Code 设备授权返回了无法解析的内容。")
+    device_code = str(data.get("device_code") or "").strip()
+    user_code = str(data.get("user_code") or "").strip()
+    if not device_code or not user_code:
+        raise OAuthAuthError("Kimi Code 设备授权响应缺少 device_code 或 user_code。")
+    try:
+        expires_in = int(float(data.get("expires_in") or 900))
+    except (TypeError, ValueError):
+        expires_in = 900
+    try:
+        interval = float(data.get("interval") or 5)
+    except (TypeError, ValueError):
+        interval = 5.0
+    return {
+        "provider": "kimi-code",
+        "device_code": device_code,
+        "user_code": user_code,
+        "verification_uri": str(data.get("verification_uri_complete")
+                                or data.get("verification_uri") or "").strip(),
+        "expires_in": expires_in,
+        "interval": interval,
+    }
+
+
+def kimi_device_poll(ctx: dict[str, Any], *, timeout: float = 15.0) -> str:
+    """轮询一次。返回 "ok"（已存好 token）或 "pending"；硬失败抛 OAuthAuthError。"""
+    try:
+        resp = httpx.post(
+            _kimi_url("/api/oauth/token"),
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "Accept": "application/json", "User-Agent": HTTP_USER_AGENT},
+            data={
+                "client_id": KIMI_CODE_CLIENT_ID,
+                "device_code": str(ctx.get("device_code") or ""),
+                "grant_type": KIMI_CODE_DEVICE_GRANT_TYPE,
+            },
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        return _poll_retry(ctx, f"网络错误：{exc}")
+    if resp.status_code >= 500:
+        return _poll_retry(ctx, f"HTTP {resp.status_code}（网关暂时不可用）")
+    payload: dict[str, Any]
+    try:
+        parsed = resp.json()
+        payload = parsed if isinstance(parsed, dict) else {}
+    except ValueError:
+        payload = {}
+    if resp.status_code == 200 and payload.get("access_token"):
+        set_auth_token(
+            "kimi-code",
+            str(payload.get("access_token") or "").strip(),
+            refresh_token=str(payload.get("refresh_token") or "").strip(),
+            expires_at=_expires_at_from_payload(payload),
+            source="kimi-device-code",
+        )
+        return "ok"
+    error = str(payload.get("error") or "")
+    if error in ("authorization_pending", "slow_down"):
+        if error == "slow_down":
+            ctx["interval"] = min(float(ctx.get("interval") or 5.0) * 1.5, 10.0)
+        ctx["fails"] = 0
+        ctx.pop("last_error", None)
+        return "pending"
+    if error == "expired_token":
+        raise OAuthAuthError("这个代码已经过期了，请重新开始登录。")
+    if error == "access_denied":
+        raise OAuthAuthError("授权被拒绝。")
+    detail = payload.get("error_description") or error or resp.text[:200]
+    raise OAuthAuthError(f"Kimi Code 设备码轮询失败（HTTP {resp.status_code}）：{detail}")
+
+
+def refresh_kimi_token(timeout: float = 20.0) -> str:
+    item = get_auth("kimi-code")
+    refresh_token = str(item.get("refresh_token") or "").strip()
+    if not refresh_token:
+        raise OAuthAuthError("Kimi Code 的 refresh_token 缺失，请重新登录。")
+    try:
+        resp = httpx.post(
+            _kimi_url("/api/oauth/token"),
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "Accept": "application/json", "User-Agent": HTTP_USER_AGENT},
+            data={"client_id": KIMI_CODE_CLIENT_ID, "grant_type": "refresh_token",
+                  "refresh_token": refresh_token},
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        raise OAuthAuthError(f"Kimi Code 刷新失败：{exc}") from exc
+    if resp.status_code >= 400:
+        raise OAuthAuthError(f"Kimi Code 刷新返回 HTTP {resp.status_code}：{resp.text[:200]}")
+    payload = resp.json() if resp.text else {}
+    access = str((payload or {}).get("access_token") or "").strip()
+    if not access:
+        raise OAuthAuthError("Kimi Code 刷新未返回 access_token。")
+    set_auth_token("kimi-code", access,
+                   refresh_token=str(payload.get("refresh_token") or refresh_token).strip(),
+                   expires_at=_expires_at_from_payload(payload),
+                   source=str(item.get("source") or "kimi-device-code"))
+    return access
+
+
 def codex_device_start(*, timeout: float = 15.0) -> dict[str, Any]:
     """要一个 Codex 设备码，立刻返回。理由同 qwen_device_start。"""
     try:
@@ -1210,6 +1346,10 @@ def resolve_provider_token(provider_id: str, env_name: str = "", *, refresh: boo
         item = get_auth(provider_id)
         if refresh and item.get("access_token") and item.get("refresh_token") and _is_expiring(item.get("expires_at"), GOOGLE_REFRESH_SKEW_SECONDS):
             return refresh_google_token()
+    if provider_id == "kimi-code":
+        item = get_auth(provider_id)
+        if refresh and item.get("access_token") and item.get("refresh_token") and _is_expiring(item.get("expires_at"), KIMI_REFRESH_SKEW_SECONDS):
+            return refresh_kimi_token()
     if provider_id == "copilot":
         return resolve_copilot_api_token()
     return get_token(provider_id)

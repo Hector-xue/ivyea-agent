@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import json
 import os as _os
 import time
 
@@ -17,10 +18,18 @@ import pytest
 
 
 class _Resp:
-    def __init__(self, status_code=200, payload=None, text=""):
+    """够真的假响应：**有 payload 就有 text**。
+
+    真实的 httpx 响应不可能"有 JSON 体但 text 为空"，而生产代码里确实有
+    `resp.json() if resp.text else {}` 这种判空写法 —— 假响应不还原这一点，
+    测出来的就是假的。
+    """
+
+    def __init__(self, status_code=200, payload=None, text=None, headers=None):
         self.status_code = status_code
         self._payload = payload or {}
-        self.text = text
+        self.text = text if text is not None else (json.dumps(self._payload) if payload else "")
+        self.headers = headers or {}
 
     def json(self):
         return self._payload
@@ -72,14 +81,15 @@ def svc(ivyea_home):
 
 # ── 状态 ────────────────────────────────────────────────────────────────────
 
-def test_status_lists_five_providers_without_secrets(svc):
+def test_status_lists_every_subscription_provider_without_secrets(svc):
     from ivyea_agent import oauth_auth
 
     oauth_auth.set_auth_token("qwen-oauth", "super-secret-token",
                               refresh_token="secret-refresh", expires_at=time.time() + 3600)
     out = svc.auth_status()
     ids = {p["id"] for p in out["providers"]}
-    assert ids == {"qwen-oauth", "openai-codex", "anthropic-oauth", "google-gemini-cli", "copilot"}
+    assert ids == {"qwen-oauth", "openai-codex", "kimi-code",
+                   "anthropic-oauth", "google-gemini-cli", "copilot"}
     qwen = next(p for p in out["providers"] if p["id"] == "qwen-oauth")
     assert qwen["ready"] is True and qwen["kind"] == "device"
     # 整个响应里不许出现 token
@@ -342,3 +352,88 @@ def test_transient_failure_counter_resets_on_a_normal_answer(svc, monkeypatch):
                         _Resp(status_code=400, payload={"error": "authorization_pending"}))
     out = svc.auth_poll("qwen-oauth", started["session"])
     assert ctx["fails"] == 0 and "note" not in out
+
+
+# ── Kimi Code 订阅（设备码）────────────────────────────────────────────────
+
+def test_kimi_device_flow(svc, monkeypatch):
+    """契约取自官方 CLI 包 @moonshot-ai/kimi-code：标准 RFC 8628。
+    这里钉住三件事 —— 端点、client_id、grant_type，任何一个写错都只会在真机上炸。"""
+    from ivyea_agent import oauth_auth
+
+    seen: list = []
+
+    def fake_post(url, headers=None, data=None, timeout=None):
+        seen.append((url, dict(data or {})))
+        if url.endswith("/device_authorization"):
+            return _Resp(payload={"device_code": "SECRET-DEV", "user_code": "KIMI-1234",
+                                  "verification_uri_complete": "https://auth.kimi.com/device?code=KIMI-1234",
+                                  "expires_in": 900, "interval": 5})
+        return _Resp(payload={"access_token": "kimi-token", "refresh_token": "kimi-refresh",
+                              "expires_in": 3600})
+
+    monkeypatch.setattr(oauth_auth.httpx, "post", fake_post)
+    started = svc.auth_start("kimi-code")
+    assert started["kind"] == "device"
+    assert started["user_code"] == "KIMI-1234"
+    assert "SECRET-DEV" not in repr(started)          # device_code 是凭据，不出服务端
+    assert seen[0][0] == "https://auth.kimi.com/api/oauth/device_authorization"
+    assert seen[0][1]["client_id"] == oauth_auth.KIMI_CODE_CLIENT_ID
+
+    assert svc.auth_poll("kimi-code", started["session"])["status"] == "ok"
+    assert seen[1][0] == "https://auth.kimi.com/api/oauth/token"
+    assert seen[1][1]["grant_type"] == "urn:ietf:params:oauth:grant-type:device_code"
+    assert oauth_auth.get_token("kimi-code") == "kimi-token"
+
+
+def test_kimi_pending_and_expired_are_told_apart(svc, monkeypatch):
+    """authorization_pending 要继续等，expired_token 要当场说"过期了，重来"——
+    混成一句"登录失败"，用户根本不知道该不该再点一次。"""
+    from ivyea_agent import oauth_auth
+
+    monkeypatch.setattr(oauth_auth.httpx, "post", lambda *a, **k: _Resp(payload={
+        "device_code": "d", "user_code": "u", "verification_uri_complete": "x",
+        "expires_in": 900, "interval": 5}))
+    started = svc.auth_start("kimi-code")
+
+    monkeypatch.setattr(oauth_auth.httpx, "post", lambda *a, **k:
+                        _Resp(status_code=400, payload={"error": "authorization_pending"}))
+    assert svc.auth_poll("kimi-code", started["session"])["status"] == "pending"
+
+    monkeypatch.setattr(oauth_auth.httpx, "post", lambda *a, **k:
+                        _Resp(status_code=400, payload={"error": "expired_token"}))
+    out = svc.auth_poll("kimi-code", started["session"])
+    assert out["status"] == "error" and "过期" in out["error"]
+
+
+def test_kimi_token_refreshes_when_expiring(ivyea_home, monkeypatch):
+    from ivyea_agent import oauth_auth
+    import time as _t
+
+    oauth_auth.set_auth_token("kimi-code", "old", refresh_token="ref", expires_at=_t.time() - 1)
+    monkeypatch.setattr(oauth_auth.httpx, "post", lambda *a, **k: _Resp(payload={
+        "access_token": "kimi-new", "refresh_token": "ref", "expires_in": 3600}))
+    assert oauth_auth.resolve_provider_token("kimi-code") == "kimi-new"
+
+
+# ── GLM Coding Plan 的地址 ──────────────────────────────────────────────────
+
+def test_glm_coding_plan_uses_the_coding_only_endpoint():
+    """官方明确要求 Coding Plan 用 `/api/coding/paas/v4`，填成通用的 `/api/paas/v4`
+    会不通，而报错完全指不到"地址错了"上。两种条目并存、各走各的。"""
+    from ivyea_agent import models
+
+    assert models.provider_by_id("zai-coding")["base"] == "https://api.z.ai/api/coding/paas/v4"
+    assert models.provider_by_id("glm-coding")["base"] == "https://open.bigmodel.cn/api/coding/paas/v4"
+    # 普通 API key 那两条不许被改成 coding 端点
+    assert models.provider_by_id("zai")["base"] == "https://api.z.ai/api/paas/v4"
+    assert models.provider_by_id("glm-legacy")["base"] == "https://open.bigmodel.cn/api/paas/v4"
+
+
+def test_kimi_code_provider_is_oauth_and_needs_no_key():
+    from ivyea_agent import models
+
+    p = models.provider_by_id("kimi-code")
+    assert p["auth_type"] == "oauth_external"
+    assert p["base"] == "https://api.kimi.com/coding/v1"
+    assert not p["key_env"]          # 订阅登录，不该再要一个 API key
