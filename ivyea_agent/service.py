@@ -137,28 +137,38 @@ class RemoteApproval:
                 _PENDING_APPROVALS.pop(request_id, None)
 
 
-def health() -> dict[str, Any]:
-    model_cfg = config.get_model_config()
+def _model_snapshot(model_cfg: dict[str, Any]) -> dict[str, Any]:
+    """一份模型配置的对外描述（不含密钥）。
+
+    /health 的主脑信息与"这一轮实际用的模型"共用它。两处各拼一份必然长出差异，
+    而调用方（IvyeaOps 任务台的模型芯片）恰恰是拿这两处的数据往同一个位置显示 ——
+    少一个字段就会出现"切了模型之后徽标没了"这种只在切换后复现的怪事。
+    """
     provider = (
         models.provider_by_id(str(model_cfg.get("provider_id") or ""))
         or models.provider_by_id(str(model_cfg.get("provider") or ""))
         or model_cfg
     )
     return {
+        "provider": model_cfg.get("provider", ""),
+        "label": model_cfg.get("label", ""),
+        "model": model_cfg.get("model", ""),
+        "api_mode": model_cfg.get("api_mode", ""),
+        "auth_type": model_cfg.get("auth_type", ""),
+        "key_status": models.key_status(provider),
+        "capabilities": models.provider_capabilities(provider),
+        "badges": models.capability_badges(provider),
+    }
+
+
+def health() -> dict[str, Any]:
+    model_cfg = config.get_model_config()
+    return {
         "ok": True,
         "name": "ivyea-agent",
         "version": __version__,
         "data_dir": str(config.IVYEA_DIR),
-        "model": {
-            "provider": model_cfg.get("provider", ""),
-            "label": model_cfg.get("label", ""),
-            "model": model_cfg.get("model", ""),
-            "api_mode": model_cfg.get("api_mode", ""),
-            "auth_type": model_cfg.get("auth_type", ""),
-            "key_status": models.key_status(provider),
-            "capabilities": models.provider_capabilities(provider),
-            "badges": models.capability_badges(provider),
-        },
+        "model": _model_snapshot(model_cfg),
         "knowledge": {
             "cards": len(knowledge.list_cards()),
             "user_cards": len(knowledge.list_user_cards()),
@@ -234,6 +244,7 @@ def manifest() -> dict[str, Any]:
             {"method": "GET", "path": "/v1/model", "description": "current model status without secrets"},
             {"method": "GET", "path": "/v1/model/providers", "description": "provider capability matrix without secrets"},
             {"method": "GET", "path": "/v1/model/providers/{id}/models", "description": "live/cache/builtin model catalog for one provider"},
+            {"method": "POST", "path": "/v1/model/catalog", "description": "model catalog for any OpenAI-compatible endpoint (caller supplies base_url/api_key)"},
             {"method": "POST", "path": "/v1/model/providers/{id}/probe", "description": "minimal provider connectivity probe without returning secrets"},
             {"method": "POST", "path": "/v1/model/configure", "description": "configure the active IvyeaAgent model without returning secrets"},
             {"method": "GET", "path": "/v1/config/vision", "description": "vision fallback chain status (tier 1 main brain / 2 sidecar / 3 local CV)"},
@@ -390,6 +401,135 @@ def _provider_secret(provider: dict[str, Any], payload_key: str = "") -> str:
             return ""
     key_env = str(provider.get("key_env") or "")
     return os.environ.get(key_env, "") if key_env else ""
+
+
+class ModelOverrideError(ValueError):
+    """按轮次指定的模型用不了。带 code 供上层转成结构化错误。"""
+
+    def __init__(self, code: str, detail: str):
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+
+
+def _turn_model_config(payload: dict[str, Any], *,
+                       allow_keyless: bool = False) -> tuple[dict[str, Any], str, bool]:
+    """这一轮要用的主脑配置 + 密钥 + 是否发生了覆盖。
+
+    `payload["model"]` 为空 → 全局配置，行为与改动前逐字一致（老调用方零影响）。
+    非空 → 按 ``<provider_id>:<model>`` 或内置模型 id 解析出**只对这一轮生效**的配置。
+
+    为什么做成按轮次而不是直接改全局：agent 的模型本来就是全局设置，真按全局切，
+    IvyeaOps 的其他用户、正在跑的定时任务会跟着一起换掉主脑 —— 一个人在输入框里
+    随手换个模型不该有这种连带。想改全局有另一条明路（写 ops 的系统配置再下推）。
+
+    解析失败一律抛错，**绝不静默回落到主脑**：那样用户在界面上选了 A、跑的还是 B，
+    还没有任何提示，等于给了个假开关。
+
+    allow_keyless：调用方自带 provider 实例（测试桩、内部复用）时不校验密钥 ——
+    那种情况下密钥根本不会被用到。
+    """
+    raw = str(payload.get("model") or "").strip()
+    if not raw:
+        return config.get_model_config(), config.get_active_key(), False
+
+    entry = models.by_id(raw)
+    if not entry:
+        raise ModelOverrideError("unknown_model", f"未知的模型 id：{raw}")
+
+    provider_id = str(entry.get("provider_id") or entry.get("id") or "")
+    active = config.get_model_config()
+    base_url = str(entry.get("base") or "").strip()
+    if not base_url:
+        # custom / ollama 这类内置表里没写死地址的：只有当前主脑就是同一个 provider
+        # 时才谈得上"沿用它的地址"。否则 providers.from_settings 会悄悄回落到
+        # DeepSeek 的地址 —— 拿着 A 家的 key 打 B 家的接口，报错还看不出所以然。
+        same_provider = str(active.get("provider_id") or active.get("provider") or "") == provider_id
+        base_url = str(active.get("base_url") or "").strip() if same_provider else ""
+
+    kind = str(entry.get("kind") or "openai").lower()
+    api_mode = str(entry.get("api_mode") or "")
+    if not base_url and (kind == "openai" or api_mode == "chat_completions"):
+        raise ModelOverrideError(
+            "base_url_required",
+            f"{entry.get('label') or raw} 没有可用的接口地址，请先在系统配置里填 Base URL。")
+
+    model_cfg = {
+        "provider": provider_id,
+        "provider_id": provider_id,
+        "label": str(entry.get("label") or raw),
+        "kind": kind,
+        "api_mode": api_mode,
+        "auth_type": str(entry.get("auth_type") or "api_key"),
+        "model": str(entry.get("model") or ""),
+        "base_url": base_url,
+        "key_env": str(entry.get("key_env") or ""),
+    }
+    provider_entry = models.provider_by_id(provider_id) or {
+        "id": provider_id,
+        "auth_type": model_cfg["auth_type"],
+        "key_env": model_cfg["key_env"],
+    }
+    api_key = _provider_secret(provider_entry)
+    if not allow_keyless and _model_requires_key(model_cfg) and not api_key:
+        raise ModelOverrideError(
+            "model_key_missing",
+            f"{model_cfg['label']} 还没配密钥（{model_cfg['key_env'] or '需要先完成登录授权'}）。")
+    return model_cfg, api_key, True
+
+
+def model_catalog(payload: dict[str, Any]) -> dict[str, Any]:
+    """任意 OpenAI 兼容端点的模型清单。
+
+    ``/v1/model/providers/{id}/models`` 只认内置 provider 表里那几家，密钥也只从
+    agent 自己的 .env 取。而 IvyeaOps 的视觉槽/生图槽常指向内置表里**没有**的中转商
+    （apimart、硅基流动），密钥又存在 ops 那边 —— 所以这里接受调用方现给的
+    base_url + api_key。
+
+    密钥只用于这一次取清单，不落盘、不回显。
+    """
+    provider_id = str(payload.get("provider") or payload.get("provider_id") or "").strip().lower()
+    base_url = str(payload.get("base_url") or "").strip()
+    api_key = str(payload.get("api_key") or "")
+    refresh = bool(payload.get("refresh"))
+    entry = models.provider_by_id(_OPS_PROVIDER_ALIASES.get(provider_id, provider_id)) if provider_id else None
+
+    if entry and not base_url:
+        # 内置 provider 且没另给地址：走带缓存那条路，顺带拿到 builtin 兜底清单。
+        return {"ok": True, "catalog": models.provider_model_catalog(
+            entry, api_key=api_key or _provider_secret(entry), refresh=refresh)}
+
+    if not base_url:
+        base_url = str(_OPENAI_COMPAT_BASES.get(provider_id, "") or "").strip()
+    if not base_url:
+        return {"ok": False, "error": "base_url_required", "catalog": {
+            "ok": False, "provider_id": provider_id, "label": provider_id,
+            "models": [], "default_model": "", "source": "none",
+            "error": "没有可用的接口地址：请先填 Base URL。"}}
+    # 地址是调用方现给的，而下面这一步会让**服务端**去访问它。urllib 认 file://、
+    # ftp:// 这些 scheme，放过去就等于给了一个任意读本机文件的口子。
+    if not base_url.lower().startswith(("http://", "https://")):
+        return {"ok": False, "error": "base_url_invalid", "catalog": {
+            "ok": False, "provider_id": provider_id, "label": provider_id,
+            "models": [], "default_model": "", "source": "none",
+            "error": "接口地址必须是 http:// 或 https:// 开头。"}}
+
+    # 调用方明确给了地址 = 这是个 OpenAI 兼容的中转商，按 `{base}/models` 取。
+    ad_hoc = {
+        "id": provider_id or "custom",
+        "label": str((entry or {}).get("label") or provider_id or "自定义端点"),
+        "kind": "openai",
+        "api_mode": "chat_completions",
+        "base": base_url,
+        "models": list((entry or {}).get("models") or []),
+        "default_model": str((entry or {}).get("default_model") or ""),
+        "auth_type": "api_key",
+        "key_env": str((entry or {}).get("key_env") or ""),
+    }
+    if not api_key and ad_hoc["key_env"]:
+        api_key = _provider_secret(ad_hoc)
+    return {"ok": True, "catalog": models.provider_model_catalog(
+        ad_hoc, api_key=api_key, refresh=refresh)}
 
 
 def model_provider_catalog(provider_id: str, refresh: bool = False) -> dict[str, Any]:
@@ -1190,8 +1330,11 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
     message = str(payload.get("message") or payload.get("input") or "").strip()
     if not message:
         raise ValueError("message is required")
-    model_cfg = config.get_model_config()
-    api_key = config.get_active_key()
+    try:
+        model_cfg, api_key, _model_overridden = _turn_model_config(
+            payload, allow_keyless=provider is not None)
+    except ModelOverrideError as exc:
+        return {"ok": False, "error": exc.code, "detail": exc.detail, "model": health()["model"]}
     if _model_requires_key(model_cfg) and not api_key and provider is None:
         return {"ok": False, "error": "model_not_configured", "model": health()["model"]}
 
@@ -1243,7 +1386,9 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
         "text": text,
         "events": events,
         "messages": _public_messages(messages),
-        "model": health()["model"],
+        # 本轮真正用的模型（可能被 payload.model 覆盖过），不是全局那个 ——
+        # 前端拿它刷新模型芯片，报全局的会让"切了却显示没切"。
+        "model": _model_snapshot(model_cfg),
         "read_only": bool(plan_mode),
         "todos": list(ctx.todos or []),
         "progress": progress_reporting.public_state(ctx),
@@ -1277,8 +1422,13 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         data = {"ok": False, "error": "message is required"}
         send("error", data)
         return data
-    model_cfg = config.get_model_config()
-    api_key = config.get_active_key()
+    try:
+        model_cfg, api_key, _model_overridden = _turn_model_config(
+            payload, allow_keyless=provider is not None)
+    except ModelOverrideError as exc:
+        data = {"ok": False, "error": exc.code, "detail": exc.detail, "model": health()["model"]}
+        send("error", data)
+        return data
     if _model_requires_key(model_cfg) and not api_key and provider is None:
         data = {"ok": False, "error": "model_not_configured", "model": health()["model"]}
         send("error", data)
@@ -1353,7 +1503,7 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
     send("start", {"ok": True, "session_id": ctx.session_id, "read_only": bool(plan_mode),
                    "approval": approval_mode,
                    "lane": route.lane, "lane_reason": route.reason,
-                   "model": health()["model"]})
+                   "model": _model_snapshot(model_cfg)})
 
     # 上下文占用：**在第一个 token 之前就发**。进度条要回答"这轮带了多少东西进去"，
     # 等收尾再说就晚了 —— 那时候用户已经在等回答，看不看进度条都无所谓了。
@@ -1992,6 +2142,9 @@ class _Handler(BaseHTTPRequestHandler):
             parts = parsed.path.strip("/").split("/")
             provider_id = parts[3] if len(parts) >= 5 else ""
             self._json(200, model_provider_probe(provider_id, body))
+            return
+        if parsed.path == "/v1/model/catalog":
+            self._json(200, model_catalog(body))
             return
         if parsed.path == "/v1/model/configure":
             self._json(200, model_configure(body))

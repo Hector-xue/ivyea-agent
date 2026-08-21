@@ -10,6 +10,30 @@
 
 ---
 
+## [v1.15.4] - 2026-08-21
+
+### 新增
+
+- **一轮对话可以指定用哪个主脑模型**。`chat` / `chat/stream` 认 `model` 字段
+  （`<provider_id>:<model>`，如 `openrouter:x-ai/grok-4.6`），只对这一轮生效。
+  在此之前主脑是纯全局设置，调用方（IvyeaOps 任务台）想让用户"点一下就换模型"，
+  唯一的办法是改全局 —— 那会把别的用户和正在跑的定时任务一起换掉。
+  不传 `model` 时行为与此前逐字一致。
+  指定的模型没配密钥 / 没有接口地址 / id 不认识时**当场报错**
+  （`model_key_missing` / `base_url_required` / `unknown_model`），
+  绝不回落到主脑跑完一轮 —— 那样用户选了 A 跑的是 B，还没有任何提示。
+- **`POST /v1/model/catalog`**：给 `base_url` + `api_key` 就能列出任意 OpenAI 兼容
+  端点的模型清单。原有的 `/v1/model/providers/{id}/models` 只认内置 provider 表里
+  那几家、密钥也只从 agent 自己的 .env 取，而中转商（apimart、硅基流动）常常两样
+  都不满足。拉不到时（余额不足这类）退回内置清单并带上原因，不让调用方的面板卡死。
+
+### 变更
+
+- `chat` 的返回与 `chat/stream` 的 `start` 事件里，`model` 字段现在报**这一轮真正
+  用的模型**而不是全局主脑。不指定 `model` 时两者本来就是同一个，老调用方无感。
+
+---
+
 ## [v1.15.3] - 2026-08-21
 
 ### 修复
