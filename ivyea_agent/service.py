@@ -245,6 +245,11 @@ def manifest() -> dict[str, Any]:
             {"method": "GET", "path": "/v1/model/providers", "description": "provider capability matrix without secrets"},
             {"method": "GET", "path": "/v1/model/providers/{id}/models", "description": "live/cache/builtin model catalog for one provider"},
             {"method": "POST", "path": "/v1/model/catalog", "description": "model catalog for any OpenAI-compatible endpoint (caller supplies base_url/api_key)"},
+            {"method": "GET", "path": "/v1/auth", "description": "subscription provider login status without secrets"},
+            {"method": "POST", "path": "/v1/auth/{id}/start", "description": "begin an OAuth/device-code/token login"},
+            {"method": "POST", "path": "/v1/auth/{id}/poll", "description": "poll a device-code login"},
+            {"method": "POST", "path": "/v1/auth/{id}/complete", "description": "finish a paste-code or token login"},
+            {"method": "POST", "path": "/v1/auth/{id}/logout", "description": "clear stored credentials for one provider"},
             {"method": "POST", "path": "/v1/model/providers/{id}/probe", "description": "minimal provider connectivity probe without returning secrets"},
             {"method": "POST", "path": "/v1/model/configure", "description": "configure the active IvyeaAgent model without returning secrets"},
             {"method": "GET", "path": "/v1/config/vision", "description": "vision fallback chain status (tier 1 main brain / 2 sidecar / 3 local CV)"},
@@ -365,6 +370,205 @@ def openapi_spec() -> dict[str, Any]:
         },
         "paths": paths,
     }
+
+
+# ── 订阅制 provider 的登录（Claude / Codex / Gemini / Qwen / Copilot）────────
+#
+# 这几家不是填 API key，而是要走一遍 OAuth。原来只有 CLI 能做（`ivyea model auth
+# <pid> --login`），不会用命令行的人就被挡在门外。这里把同一套流程开成 HTTP，
+# 让 IvyeaOps 的网页也能引导着走完。
+#
+# 三条铁律：
+#   ① verifier / state / device_code / token **一律不出服务端**。返回给调用方的
+#      只有"用户需要看到的东西"：授权链接、user_code、验证地址。
+#   ② 登录流程是**有状态的两步**，但 HTTP 请求不能挂十几分钟等用户 —— 所以
+#      start 立刻返回，中间态存在这个进程内的会话池里，由 poll/complete 接上。
+#   ③ 会话池带 TTL 和上限：它装的是凭据，不该无限期躺在内存里。
+
+_AUTH_SESSIONS: dict[str, dict[str, Any]] = {}
+_AUTH_SESSIONS_LOCK = threading.Lock()
+_AUTH_SESSION_TTL = 20 * 60.0
+_AUTH_SESSIONS_MAX = 20
+
+# 每家用哪种流程。device = 显示 user_code 让用户去输、服务端轮询；
+# paste = 给授权链接、用户把回调里的东西粘回来；token = 直接填一个已有的 token。
+_AUTH_KINDS = {
+    "qwen-oauth": "device",
+    "openai-codex": "device",
+    "anthropic-oauth": "paste",
+    "google-gemini-cli": "paste",
+    "copilot": "token",
+}
+
+_AUTH_HINTS = {
+    "qwen-oauth": "在打开的页面上确认授权即可，这里会自动完成。",
+    "openai-codex": "打开页面后输入下面的代码并确认授权，这里会自动完成。",
+    "anthropic-oauth": "授权后页面会显示一段 `code#state`，整段复制粘回来。",
+    "google-gemini-cli": "授权后浏览器会跳到一个打不开的 127.0.0.1 地址（正常现象，"
+                         "那台机器是你自己的电脑不是服务器）—— 把地址栏里那条完整 URL 复制粘回来。",
+    "copilot": "填一个有 Copilot 权限的 GitHub Token（gho_ / ghu_ / github_pat_ 开头；"
+               "经典 ghp_ 不被 Copilot API 支持）。",
+}
+
+
+def _auth_sweep(now: float) -> None:
+    """清掉过期会话。调用方必须已持锁。"""
+    for sid in [k for k, v in _AUTH_SESSIONS.items() if now - float(v.get("created") or 0) > _AUTH_SESSION_TTL]:
+        _AUTH_SESSIONS.pop(sid, None)
+
+
+def _auth_put(provider_id: str, ctx: dict[str, Any]) -> str:
+    session_id = uuid.uuid4().hex
+    now = time.time()
+    with _AUTH_SESSIONS_LOCK:
+        _auth_sweep(now)
+        # 满了就丢最旧的那条：这里是登录中转站，不是存档。
+        while len(_AUTH_SESSIONS) >= _AUTH_SESSIONS_MAX:
+            oldest = min(_AUTH_SESSIONS.items(), key=lambda kv: float(kv[1].get("created") or 0))[0]
+            _AUTH_SESSIONS.pop(oldest, None)
+        _AUTH_SESSIONS[session_id] = {"provider": provider_id, "created": now, "ctx": ctx}
+    return session_id
+
+
+def _auth_get(provider_id: str, session_id: str) -> dict[str, Any]:
+    now = time.time()
+    with _AUTH_SESSIONS_LOCK:
+        _auth_sweep(now)
+        row = _AUTH_SESSIONS.get(str(session_id or ""))
+    if not row or row.get("provider") != provider_id:
+        raise ValueError("登录会话已过期或不存在，请重新开始。")
+    return row["ctx"]
+
+
+def _auth_drop(session_id: str) -> None:
+    with _AUTH_SESSIONS_LOCK:
+        _AUTH_SESSIONS.pop(str(session_id or ""), None)
+
+
+def _auth_provider(provider_id: str) -> dict[str, Any]:
+    provider = models.provider_by_id(provider_id)
+    if not provider or provider_id not in _AUTH_KINDS:
+        raise ValueError(f"这个 provider 不需要登录（或不认识）：{provider_id}")
+    return provider
+
+
+def auth_status() -> dict[str, Any]:
+    """五家订阅 provider 的登录状态。不含任何凭据。"""
+    from . import oauth_auth
+
+    rows = []
+    for pid, kind in _AUTH_KINDS.items():
+        provider = models.provider_by_id(pid)
+        if not provider:
+            continue
+        item = oauth_auth.get_auth(pid)
+        status = oauth_auth.token_status(pid)
+        if pid == "copilot" and status == "not-authenticated":
+            # Copilot 的凭据也可能来自环境变量（gh CLI 装的那些），不只是 auth.json。
+            raw, env_name = oauth_auth.resolve_copilot_github_token()
+            if raw:
+                status = f"configured:{env_name}"
+        rows.append({
+            "id": pid,
+            "label": provider.get("label", pid),
+            "kind": kind,
+            "auth_type": provider.get("auth_type", ""),
+            "status": status,
+            "ready": status not in ("not-authenticated", "expired"),
+            "expires_at": int(item.get("expires_at") or 0),
+            "source": str(item.get("source") or ""),
+            "hint": _AUTH_HINTS.get(pid, ""),
+            "models": list(provider.get("models") or []),
+        })
+    return {"ok": True, "providers": rows}
+
+
+def auth_start(provider_id: str) -> dict[str, Any]:
+    """开一次登录。**返回里只有用户需要看到的东西**，凭据留在会话池里。"""
+    from . import oauth_auth
+
+    _auth_provider(provider_id)
+    kind = _AUTH_KINDS[provider_id]
+    if provider_id == "qwen-oauth":
+        ctx = oauth_auth.qwen_device_start()
+    elif provider_id == "openai-codex":
+        ctx = oauth_auth.codex_device_start()
+    elif provider_id == "anthropic-oauth":
+        ctx = oauth_auth.anthropic_login_start()
+    elif provider_id == "google-gemini-cli":
+        ctx = oauth_auth.google_login_start()
+    else:
+        ctx = {"provider": provider_id}
+    session_id = _auth_put(provider_id, ctx)
+    out: dict[str, Any] = {
+        "ok": True,
+        "provider": provider_id,
+        "kind": kind,
+        "session": session_id,
+        "hint": _AUTH_HINTS.get(provider_id, ""),
+    }
+    for field in ("url", "user_code", "verification_uri", "interval", "expires_in"):
+        if ctx.get(field):
+            out[field] = ctx[field]
+    return out
+
+
+def auth_poll(provider_id: str, session_id: str) -> dict[str, Any]:
+    """设备码流程轮询一次。"""
+    from . import oauth_auth
+
+    _auth_provider(provider_id)
+    if _AUTH_KINDS[provider_id] != "device":
+        raise ValueError(f"{provider_id} 不是设备码流程，不用轮询。")
+    ctx = _auth_get(provider_id, session_id)
+    try:
+        state = (oauth_auth.qwen_device_poll(ctx) if provider_id == "qwen-oauth"
+                 else oauth_auth.codex_device_poll(ctx))
+    except oauth_auth.OAuthAuthError as exc:
+        _auth_drop(session_id)
+        return {"ok": False, "status": "error", "error": str(exc)}
+    if state == "ok":
+        _auth_drop(session_id)
+        return {"ok": True, "status": "ok", "auth": auth_status()}
+    out = {"ok": True, "status": "pending", "interval": float(ctx.get("interval") or 2.0)}
+    # 上一次轮询遇到的暂时性问题（网关 5xx、网络抖动）。不是失败，但要让界面能说一句
+    # "正在重试"，而不是一直转圈不解释。
+    if ctx.get("last_error"):
+        out["note"] = str(ctx["last_error"])
+    return out
+
+
+def auth_complete(provider_id: str, session_id: str, value: str) -> dict[str, Any]:
+    """粘码 / 填 token 流程的第二步。"""
+    from . import oauth_auth
+
+    _auth_provider(provider_id)
+    kind = _AUTH_KINDS[provider_id]
+    if kind == "device":
+        raise ValueError(f"{provider_id} 是设备码流程，请用 poll。")
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("内容是空的。")
+    try:
+        if provider_id == "anthropic-oauth":
+            oauth_auth.anthropic_login_complete(_auth_get(provider_id, session_id), raw)
+        elif provider_id == "google-gemini-cli":
+            oauth_auth.google_login_complete(_auth_get(provider_id, session_id), raw)
+        else:
+            oauth_auth.copilot_login(raw)
+    except oauth_auth.OAuthAuthError as exc:
+        return {"ok": False, "error": str(exc)}
+    _auth_drop(session_id)
+    return {"ok": True, "auth": auth_status()}
+
+
+def auth_logout(provider_id: str) -> dict[str, Any]:
+    from . import oauth_auth
+
+    _auth_provider(provider_id)
+    cleared = (oauth_auth.copilot_logout() if provider_id == "copilot"
+               else oauth_auth.clear_auth(provider_id))
+    return {"ok": True, "cleared": bool(cleared), "auth": auth_status()}
 
 
 def task_list(limit: int = 20, status: str = "") -> dict[str, Any]:
@@ -1776,6 +1980,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/model":
             self._json(200, {"ok": True, "model": health()["model"]})
             return
+        if parsed.path == "/v1/auth":
+            self._json(200, auth_status())
+            return
         if parsed.path == "/v1/model/providers":
             self._json(200, model_providers())
             return
@@ -2142,6 +2349,28 @@ class _Handler(BaseHTTPRequestHandler):
             parts = parsed.path.strip("/").split("/")
             provider_id = parts[3] if len(parts) >= 5 else ""
             self._json(200, model_provider_probe(provider_id, body))
+            return
+        if parsed.path.startswith("/v1/auth/"):
+            parts = parsed.path.strip("/").split("/")
+            provider_id = parts[2] if len(parts) >= 4 else ""
+            action = parts[3] if len(parts) >= 4 else ""
+            try:
+                if action == "start":
+                    self._json(200, auth_start(provider_id))
+                elif action == "poll":
+                    self._json(200, auth_poll(provider_id, str(body.get("session") or "")))
+                elif action == "complete":
+                    self._json(200, auth_complete(provider_id, str(body.get("session") or ""),
+                                                  str(body.get("value") or "")))
+                elif action == "logout":
+                    self._json(200, auth_logout(provider_id))
+                else:
+                    self._json(404, {"ok": False, "error": "unknown_auth_action"})
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:  # noqa: BLE001 — 登录要发外网请求，什么都可能炸；
+                # 但绝不能让它变成 500 空响应，那样用户只看到"登录失败"三个字。
+                self._json(200, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
             return
         if parsed.path == "/v1/model/catalog":
             self._json(200, model_catalog(body))

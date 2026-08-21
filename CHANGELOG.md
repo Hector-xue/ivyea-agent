@@ -10,6 +10,30 @@
 
 ---
 
+## [v1.15.5] - 2026-08-21
+
+### 新增
+
+- **订阅制 provider 可以从外部调用方登录了**（Claude 订阅 / OpenAI Codex / Gemini
+  Code Assist / Qwen / GitHub Copilot）。这几家不是填 API key 而是要走 OAuth，
+  此前只有 CLI 的 `ivyea model auth <id> --login` 一条路，不会用命令行的人就被挡在门外。
+  新增 `GET /v1/auth` 与 `POST /v1/auth/{id}/start|poll|complete|logout`，
+  IvyeaOps 的网页据此把同一套流程做成引导式界面。
+  凭据（PKCE verifier / state / device_code / token）**一律不出服务端**，
+  返回的只有用户需要看到的东西：授权链接、user_code、验证地址。
+- 设备码登录拆出了 `qwen_device_start/poll`、`codex_device_start/poll`，粘码登录拆出了
+  `anthropic_login_start/complete`、`google_login_start/complete`。原来的登录函数在
+  函数内部轮询到成功为止（最长十几分钟），HTTP 请求挂不住；拆开之后 start 立刻返回，
+  中间态由调用方保管。**CLI 的四条登录路径在这些函数之上重新拼起来，行为逐字不变。**
+
+### 变更
+
+- Copilot 的 GitHub Token 现在写进 `COPILOT_GITHUB_TOKEN`，不再往 `GH_TOKEN` /
+  `GITHUB_TOKEN` 里塞 —— 那两个是 gh CLI、CI 脚本在用的通用变量，被顺手改掉时
+  完全看不出是谁干的。解析顺序上 `COPILOT_GITHUB_TOKEN` 本来就排第一，读取端无感。
+
+---
+
 ## [v1.15.4] - 2026-08-21
 
 ### 新增

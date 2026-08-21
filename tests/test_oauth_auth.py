@@ -326,3 +326,21 @@ def test_oauth_file_permissions(ivyea_home):
     oauth_auth.set_auth_token("qwen-oauth", "tok")
     mode = oauth_auth.auth_path().stat().st_mode
     assert stat.S_IMODE(mode) == 0o600
+
+
+def test_qwen_requests_carry_a_user_agent(ivyea_home, monkeypatch):
+    """chat.qwen.ai 挂在阿里云 WAF 后面：不带 User-Agent（httpx 默认那个）会拿到一张
+    **HTTP 200 的 HTML 挑战页**，报错长成"invalid JSON"，完全指不到真正的原因。
+    实测过：同样的请求 curl 好好的、httpx 就是不行。"""
+    from ivyea_agent import oauth_auth
+
+    seen = {}
+
+    def fake_post(url, headers=None, data=None, timeout=None):
+        seen[url] = dict(headers or {})
+        return _Resp(payload={"device_code": "dev", "user_code": "A",
+                              "verification_uri_complete": "x", "expires_in": 60})
+
+    monkeypatch.setattr(oauth_auth.httpx, "post", fake_post)
+    oauth_auth.qwen_device_start()
+    assert seen[oauth_auth.QWEN_OAUTH_DEVICE_CODE_URL]["User-Agent"] == oauth_auth.HTTP_USER_AGENT
