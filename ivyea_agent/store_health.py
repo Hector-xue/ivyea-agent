@@ -49,6 +49,15 @@ THRESHOLDS: dict[str, Any] = {
     "sales.drop.ratio": 0.5,              # 销售额跌破基线的比例
     "sales.drop.min_baseline": 100.0,     # 基线太小不报（新品/长尾噪音）
     "profit.margin_erosion.pp": 0.05,     # 毛利率下降的百分点
+    # —— L2 日内层 ——
+    "ads.spend_burst.factor": 2.5,        # 小时花费速率 / 基线速率
+    "ads.spend_burst.min_spend": 20.0,    # 本段增量花费门槛
+    "ads.spend_burst.order_tolerance": 1.5,  # 订单同步增长到此倍数即视为「花得值」
+    "ads.impression_zero.min_yesterday": 1000.0,
+    "ads.click_no_order.factor": 2.0,     # 当日点击 / 历史日均点击
+    "ads.click_no_order.min_clicks": 20.0,
+    "l2.min_gap_minutes": 20.0,           # 采样间隔下限，太短则增量全是噪声
+    "l2.baseline_min_days": 3,            # 同时段基线所需的最少历史天数
 }
 
 #: 视为「投放受阻」的 serving_status 关键字（大写匹配）。
@@ -629,3 +638,174 @@ def check_l3(sid: Any, days: int = 7, *, include_optimizer: bool = True) -> Chec
         _rule_optimizer(res, sid)
 
     return res
+
+
+# ── L2 日内层 ───────────────────────────────────────────────────────────────
+def _budget_intent(sid: Any, cid: str, name: str, budget: float,
+                   direction: int = -1) -> Optional[dict[str, Any]]:
+    if budget <= 0:
+        return None
+    pct = THRESHOLDS["stanch.max_change_pct"] * direction
+    return {"op_type": "campaign_budget", "sid": sid, "target_id": cid,
+            "target_name": name,
+            "change": {"daily_budget": round(budget * (1 + pct), 2)},
+            "before": {"daily_budget": budget}}
+
+
+def check_l2(sid: Any) -> CheckResult:
+    """L2 日内层巡检。领星只有天粒度，靠当日累计值的多次采样做差分得到小时增量。
+
+    接入 Amazon Marketing Stream 后这一层改由推送承载（它直接给小时数据），
+    规则不变——规则读的是「小时增量」这个概念，不是采样实现。
+    """
+    import datetime
+
+    from . import datasources, intraday
+    datasources.install_defaults()
+
+    res = CheckResult(sid=sid, layer="L2")
+    today = datetime.date.today().isoformat()
+    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+    base_days = [(datetime.date.today() - datetime.timedelta(days=d)).isoformat()
+                 for d in range(1, 8)]
+
+    rep = metrics.get_metric(metrics.ADS_CAMPAIGN_REPORT.key, {"sid": sid},
+                            metrics.Window((today,)))
+    if not rep.ok:
+        res.gaps.append(rep.gap.describe())
+        return res
+    res.provenance.append(f"{metrics.ADS_CAMPAIGN_REPORT.key}（当日）：{_prov(rep)}")
+
+    cfg = metrics.get_metric(metrics.ADS_CAMPAIGN_CONFIG.key, {"sid": sid})
+    conf = {str(r.get("campaign_id")): r for r in cfg.rows} if cfg.ok else {}
+
+    sample = intraday.record_and_diff(sid, "campaign", today, rep.rows, "campaign_id")
+
+    hist = metrics.get_metric(metrics.ADS_CAMPAIGN_REPORT.key, {"sid": sid},
+                              metrics.Window(tuple(sorted(base_days))))
+    hist_by_day = _agg_rows(hist.rows, "campaign_id", set(base_days)) if hist.ok else {}
+    yest = _agg_rows(hist.rows, "campaign_id", {yesterday}) if hist.ok else {}
+
+    # 规则 2：当日曝光归零（不需要增量，当日累计即可判）
+    for r in rep.rows:
+        cid = str(r.get("campaign_id") or "")
+        y = yest.get(cid)
+        if not y:
+            continue
+        if float(r.get("impressions") or 0) <= 0 \
+                and y["impressions"] >= THRESHOLDS["ads.impression_zero.min_yesterday"]:
+            name = str((conf.get(cid) or {}).get("name") or cid)
+            res.findings.append(Finding(
+                code="ads.impression_zero", layer="L2", severity=CRIT,
+                action_class=ADVISORY, sid=sid, scope="campaign",
+                target_id=cid, target_name=name, metric="impressions",
+                current=0.0, baseline=y["impressions"], window=f"{today} 至今",
+                message=f"活动「{name}」当日曝光归零（昨日 {y['impressions']:.0f}），"
+                        f"请检查投放状态或竞价",
+                evidence={"impressions_today": 0,
+                          "impressions_yesterday": y["impressions"],
+                          "serving_status": (conf.get(cid) or {}).get("serving_status")},
+                provenance=_prov(rep)))
+
+    # 规则 3：当日点击暴涨零转化
+    for r in rep.rows:
+        cid = str(r.get("campaign_id") or "")
+        clicks, orders = float(r.get("clicks") or 0), float(r.get("orders") or 0)
+        h = hist_by_day.get(cid)
+        if not h or not h.get("days"):
+            continue
+        avg_clicks = h["clicks"] / h["days"]
+        if clicks >= THRESHOLDS["ads.click_no_order.min_clicks"] and orders <= 0 \
+                and avg_clicks > 0 and clicks >= avg_clicks * THRESHOLDS["ads.click_no_order.factor"]:
+            c = conf.get(cid) or {}
+            name = str(c.get("name") or cid)
+            res.findings.append(Finding(
+                code="ads.click_no_order_intraday", layer="L2", severity=WARN,
+                action_class=STANCH, sid=sid, scope="campaign",
+                target_id=cid, target_name=name, metric="clicks",
+                current=clicks, baseline=avg_clicks, window=f"{today} 至今",
+                message=f"活动「{name}」当日 {clicks:.0f} 次点击 0 转化"
+                        f"（历史日均 {avg_clicks:.0f}）",
+                evidence={"clicks_today": clicks, "avg_daily_clicks": round(avg_clicks, 1),
+                          "spend_today": r.get("spend"), "orders_today": orders},
+                provenance=_prov(rep),
+                intent=_budget_intent(sid, cid, name, float(c.get("daily_budget") or 0))))
+
+    # 规则 1：花费突增（需要增量）
+    if sample.first_sample_of_day:
+        res.skipped.append("花费突增规则跳过：本日首次采样，尚无增量（需至少两次采样）")
+    else:
+        _rule_spend_burst(res, sid, sample, conf, hist_by_day, today)
+
+    if not sample.first_sample_of_day and not sample.observed_growth and rep.rows:
+        # U8 的自动验证：当日累计值若始终不动，说明该源不滚动，L2 需改由推送承载
+        res.skipped.append(
+            "本次未观察到当日累计值增长；若持续如此，说明该数据源当日数据不滚动更新，"
+            "L2 需改由推送源（Amazon Marketing Stream）承载")
+    return res
+
+
+def _rule_spend_burst(res: CheckResult, sid: Any, sample: Any,
+                      conf: dict[str, Any], hist_by_day: dict[str, dict[str, float]],
+                      today: str) -> None:
+    """花费突增：优先用同时段历史基线，历史不足时退到日预算配速。
+
+    退化路径必须存在——否则新装的用户前三天完全没有这条规则，
+    而"刚上手那几天"恰恰是最容易配错预算烧钱的时候。
+    """
+    import time as _t
+
+    from . import intraday
+    hour = _t.localtime().tm_hour
+    factor = THRESHOLDS["ads.spend_burst.factor"]
+
+    for d in sample.deltas:
+        if d.seconds < THRESHOLDS["l2.min_gap_minutes"] * 60:
+            continue          # 采样间隔太短，增量全是噪声
+        spend_delta = d.values.get("spend", 0.0)
+        if spend_delta < THRESHOLDS["ads.spend_burst.min_spend"]:
+            continue
+
+        c = conf.get(d.entity_id) or {}
+        name = str(c.get("name") or d.entity_id)
+        budget = float(c.get("daily_budget") or 0)
+        rate = d.per_hour("spend")
+
+        base = intraday.hourly_baseline(
+            sid, "campaign", d.entity_id, hour, exclude_day=today,
+            min_days=int(THRESHOLDS["l2.baseline_min_days"]))
+        if base:
+            baseline_rate = base["spend"]
+            basis = f"同时段历史均值（{hour:02d} 点）"
+        elif budget > 0:
+            baseline_rate = budget / 24.0
+            basis = "日预算配速（历史样本不足，退化基线）"
+        else:
+            continue
+
+        if baseline_rate <= 0 or rate < baseline_rate * factor:
+            continue
+
+        # 订单同步增长则不是"烧钱"，是"卖爆了"
+        order_delta = d.values.get("orders", 0.0)
+        base_orders = base["orders"] if base else 0.0
+        if base_orders > 0 and order_delta >= base_orders * THRESHOLDS["ads.spend_burst.order_tolerance"]:
+            continue
+
+        res.findings.append(Finding(
+            code="ads.spend_burst", layer="L2", severity=CRIT, action_class=STANCH,
+            sid=sid, scope="campaign", target_id=d.entity_id, target_name=name,
+            metric="spend_per_hour", current=rate, baseline=baseline_rate,
+            window=f"近 {d.hours:.1f} 小时",
+            message=f"活动「{name}」花费突增：近 {d.hours:.1f} 小时花 {spend_delta:.2f}"
+                    f"（{rate:.2f}/时，基线 {baseline_rate:.2f}/时），订单未同步增长",
+            evidence={"spend_delta": round(spend_delta, 2),
+                      "hours": round(d.hours, 2),
+                      "rate_per_hour": round(rate, 2),
+                      "baseline_per_hour": round(baseline_rate, 2),
+                      "baseline_basis": basis,
+                      "orders_delta": order_delta,
+                      "daily_budget": budget,
+                      "data_corrected": d.corrected},
+            provenance=f"日内采样 · {basis}",
+            intent=_budget_intent(sid, d.entity_id, name, budget)))

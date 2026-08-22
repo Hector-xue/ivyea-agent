@@ -1220,11 +1220,13 @@ def _cmd_store(args: argparse.Namespace) -> int:
     layer = (args.layer or "l1").lower()
     if layer == "l1":
         result = store_health.check_l1(args.sid)
+    elif layer == "l2":
+        result = store_health.check_l2(args.sid)
     elif layer == "l3":
         result = store_health.check_l3(args.sid, days=int(args.days or 7),
                                        include_optimizer=not args.no_optimizer)
     else:
-        print(f"层 {layer} 尚未实现（L2 日内层见 P1c）。可用：l1 / l3", file=sys.stderr)
+        print(f"未知巡检层 {layer}。可用：l1（快照）/ l2（日内）/ l3（隔日）", file=sys.stderr)
         return 2
     if args.json:
         import dataclasses
@@ -3944,7 +3946,7 @@ def build_parser() -> argparse.ArgumentParser:
     pstore.add_argument("action", choices=["health"])
     pstore.add_argument("--sid", help="店铺 SID；不传则列出可用店铺")
     pstore.add_argument("--layer", default="l1",
-                        help="巡检层：l1 快照层（默认）/ l3 隔日层")
+                        help="巡检层：l1 快照层（默认）/ l2 日内层 / l3 隔日层")
     pstore.add_argument("--days", type=int, default=7, help="l3 的窗口天数（默认 7）")
     pstore.add_argument("--no-optimizer", action="store_true",
                         help="l3 时跳过优化器候选（只跑检测规则，快）")
