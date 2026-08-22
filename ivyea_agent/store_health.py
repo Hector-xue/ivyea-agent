@@ -809,3 +809,94 @@ def _rule_spend_burst(res: CheckResult, sid: Any, sample: Any,
                       "data_corrected": d.corrected},
             provenance=f"日内采样 · {basis}",
             intent=_budget_intent(sid, d.entity_id, name, budget)))
+
+
+# ── 早报汇总（方案 §5.5）────────────────────────────────────────────────────
+def daily_summary(sid: Any, *, days: int = 1) -> dict[str, Any]:
+    """昨日关键指标 + 环比。返回 {lines, metrics, gaps}。
+
+    环比对照的是"再往前推同样长度的窗口"，不是"前一天"——单日波动太大，
+    拿单日比单日会天天报警。
+    """
+    from . import datasources
+    datasources.install_defaults()
+
+    recent, base = _window_days(days)
+    gaps: list[str] = []
+    lines: list[str] = []
+    out: dict[str, Any] = {}
+
+    rep = metrics.get_metric(metrics.ADS_CAMPAIGN_REPORT.key, {"sid": sid},
+                             metrics.Window(tuple(base + recent)))
+    if rep.ok and rep.rows:
+        cur = _agg_rows(rep.rows, "campaign_id", set(recent))
+        old = _agg_rows(rep.rows, "campaign_id", set(base))
+
+        def _tot(agg: dict[str, dict[str, float]], field: str) -> float:
+            return sum(b.get(field, 0.0) for b in agg.values())
+
+        spend, sales = _tot(cur, "spend"), _tot(cur, "sales")
+        orders, clicks = _tot(cur, "orders"), _tot(cur, "clicks")
+        p_spend, p_sales = _tot(old, "spend"), _tot(old, "sales")
+        p_orders = _tot(old, "orders")
+        acos = (spend / sales) if sales else 0.0
+        p_acos = (p_spend / p_sales) if p_sales else 0.0
+        out.update({"ad_spend": spend, "ad_sales": sales, "ad_orders": orders,
+                    "clicks": clicks, "acos": acos})
+        lines.append(f"**广告**　花费 {spend:,.2f}（{_delta(spend, p_spend)}）"
+                     f"　销售额 {sales:,.2f}（{_delta(sales, p_sales)}）")
+        lines.append(f"　　　　订单 {orders:,.0f}（{_delta(orders, p_orders)}）"
+                     f"　ACOS {acos:.1%}（{_delta_pp(acos, p_acos)}）")
+    else:
+        gaps.append(rep.gap.describe() if not rep.ok else "窗口内无广告报表数据")
+
+    cur_p = metrics.get_metric(metrics.PROFIT_ASIN.key, {"sid": sid},
+                               metrics.Window(tuple(recent)))
+    old_p = metrics.get_metric(metrics.PROFIT_ASIN.key, {"sid": sid},
+                               metrics.Window(tuple(base)))
+    if cur_p.ok and cur_p.rows:
+        total = sum(float(r.get("sales_amount") or 0) for r in cur_p.rows)
+        profit = sum(float(r.get("gross_profit") or 0) for r in cur_p.rows)
+        p_total = sum(float(r.get("sales_amount") or 0)
+                      for r in (old_p.rows if old_p.ok else []))
+        out.update({"sales_amount": total, "gross_profit": profit})
+        rate = (profit / total) if total else 0.0
+        lines.append(f"**店铺**　销售额 {total:,.2f}（{_delta(total, p_total)}）"
+                     f"　毛利 {profit:,.2f}（{rate:.1%}）")
+    else:
+        gaps.append(cur_p.gap.describe() if not cur_p.ok else "窗口内无 ASIN 利润数据")
+
+    inv = metrics.get_metric(metrics.INVENTORY_FBA.key, {"sid": sid})
+    if inv.ok:
+        fba = [r for r in inv.rows if r.get("channel") == "FBA"]
+        if fba:
+            oos = sum(1 for r in fba if float(r.get("fulfillable") or 0) <= 0)
+            low = sum(1 for r in fba
+                      if 0 < float(r.get("days_of_supply") or 0)
+                      < THRESHOLDS["stock.days_low.days"])
+            out.update({"fba_skus": len(fba), "oos": oos, "low": low})
+            lines.append(f"**库存**　FBA {len(fba)} 个 MSKU　断货 {oos}　"
+                         f"可供 <{THRESHOLDS['stock.days_low.days']:.0f} 天 {low}")
+        else:
+            gaps.append(f"库存汇总跳过：{len(inv.rows)} 行均非 FBA 渠道")
+    else:
+        gaps.append(inv.gap.describe())
+
+    out["window"] = f"{recent[0]}~{recent[-1]}" if recent else ""
+    return {"lines": lines, "metrics": out, "gaps": gaps}
+
+
+def _delta(now: float, before: float) -> str:
+    if not before:
+        return "无对照"
+    pct = (now - before) / abs(before)
+    arrow = "▲" if pct > 0 else ("▼" if pct < 0 else "—")
+    return f"{arrow}{abs(pct):.0%}"
+
+
+def _delta_pp(now: float, before: float) -> str:
+    if not before:
+        return "无对照"
+    pp = (now - before) * 100
+    arrow = "▲" if pp > 0 else ("▼" if pp < 0 else "—")
+    return f"{arrow}{abs(pp):.1f}pp"

@@ -117,6 +117,26 @@ def run_task(task: str, args: dict[str, Any] | None = None) -> tuple[bool, str]:
             result = store_health.check_l3(sid, days=int(args.get("days") or 7),
                                            include_optimizer=bool(
                                                args.get("include_optimizer", True)))
+        # 早报走卡片装配（方案 §5.5）：指标 + 异常 + 待决定 + 数据缺口
+        if task == "store_daily" and str(args.get("channel") or "") == "feishu_app":
+            import datetime
+
+            from . import patrol_push
+            summary = store_health.daily_summary(sid, days=int(args.get("summary_days") or 1))
+            result.gaps.extend(summary["gaps"])
+            pushed = patrol_push.push_daily(
+                result,
+                date=datetime.date.today().isoformat(),
+                store_name=str(args.get("store_name") or f"sid {sid}"),
+                metrics_lines=summary["lines"],
+                chat_id=str(args.get("chat_id") or ""),
+                report_url=str(args.get("report_url") or ""))
+            text = store_health.render(result)
+            if not pushed.get("ok"):
+                return False, f"{text}早报推送失败：{pushed.get('error')}\n"
+            return True, (f"{text}早报已推送：message_id={pushed['message_id']} "
+                          f"待决定 {len(pushed['approvals'])} 条\n")
+
         text = store_health.render(result)
         # 静默规则：无异常且无数据缺口时不推送，避免每 20 分钟刷屏。
         # 早报例外——用户要的就是"每天确认一眼"。
@@ -176,8 +196,10 @@ def render_jobs() -> str:
         last = "-"
         if job.get("last_run"):
             last = time.strftime("%Y-%m-%d %H:%M", time.localtime(job["last_run"]))
+        every = (f"{job['every_minutes']:g}m" if job.get("every_minutes")
+                 else f"{float(job.get('every_hours', 24)):g}h")
         lines.append(
-            f"{job['name']:<18} task={job['task']:<7} every={job.get('every_hours', 24)}h "
+            f"{job['name']:<18} task={job['task']:<16} every={every:<6} "
             f"enabled={job.get('enabled', True)} last={last}"
         )
     return "\n".join(lines)
