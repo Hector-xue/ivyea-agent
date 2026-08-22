@@ -1228,6 +1228,17 @@ def _cmd_store(args: argparse.Namespace) -> int:
     else:
         print(f"未知巡检层 {layer}。可用：l1（快照）/ l2（日内）/ l3（隔日）", file=sys.stderr)
         return 2
+    if args.push:
+        from . import patrol_push
+        pushed = patrol_push.push_result(result, chat_id=args.chat_id or "",
+                                         store_name=args.store_name or "",
+                                         channel=args.channel)
+        if pushed.get("ok"):
+            print(f"已推送：message_id={pushed['message_id']} "
+                  f"审批项={len(pushed['approvals'])} 条")
+        else:
+            print(f"推送失败：{pushed.get('error')}", file=sys.stderr)
+
     if args.json:
         import dataclasses
         print(json.dumps({
@@ -3420,6 +3431,7 @@ def _cmd_notify(args: argparse.Namespace) -> int:
         title=args.title or "Ivyea Agent",
         channel=args.channel,
         webhook_url=args.webhook_url or "",
+        chat_id=getattr(args, "chat_id", "") or "",
     )
     print(notify.render_result(result))
     return 0 if result.get("ok") else 1
@@ -3962,6 +3974,11 @@ def build_parser() -> argparse.ArgumentParser:
     pstore.add_argument("--no-optimizer", action="store_true",
                         help="l3 时跳过优化器候选（只跑检测规则，快）")
     pstore.add_argument("--json", action="store_true", help="输出 JSON")
+    pstore.add_argument("--push", action="store_true", help="把结果推成飞书卡片，并为可执行项建审批")
+    pstore.add_argument("--chat-id", default="", help="推送目标会话；默认用 settings 的 feishu_default_chat_id")
+    pstore.add_argument("--store-name", default="", help="卡片标题里显示的店铺名")
+    pstore.add_argument("--channel", default="feishu_app",
+                        choices=["feishu_app", "feishu", "webhook", "stdout"])
     pstore.set_defaults(func=_cmd_store)
 
     ptr = sub.add_parser("trace", help="运行时间线：recent / stats")
@@ -4033,7 +4050,7 @@ def build_parser() -> argparse.ArgumentParser:
     palert.add_argument("action", choices=["check"])
     palert.add_argument("--limit", type=int, default=500)
     palert.add_argument("--notify", action="store_true", help="将预警发送到通知通道")
-    palert.add_argument("--channel", choices=["stdout", "webhook", "feishu"], default="stdout")
+    palert.add_argument("--channel", choices=["stdout", "webhook", "feishu", "feishu_app"], default="stdout")
     palert.add_argument("--webhook-url", help="覆盖 settings/env 中的 webhook URL")
     palert.add_argument("--title", help="通知标题")
     palert.set_defaults(func=_cmd_alert)
@@ -4042,7 +4059,8 @@ def build_parser() -> argparse.ArgumentParser:
     pnot.add_argument("action", choices=["test"])
     pnot.add_argument("--message", help="测试消息")
     pnot.add_argument("--title", help="通知标题")
-    pnot.add_argument("--channel", choices=["stdout", "webhook", "feishu"], default="stdout")
+    pnot.add_argument("--channel", choices=["stdout", "webhook", "feishu", "feishu_app"], default="stdout")
+    pnot.add_argument("--chat-id", default="", help="feishu_app 通道的目标会话；默认用 settings 里的 feishu_default_chat_id")
     pnot.add_argument("--webhook-url", help="覆盖 settings/env 中的 webhook URL")
     pnot.set_defaults(func=_cmd_notify)
 
@@ -4056,7 +4074,7 @@ def build_parser() -> argparse.ArgumentParser:
     psch.add_argument("--sid", help="store_l1 / store_l2 / store_daily 的店铺 SID")
     psch.add_argument("--limit", type=int, default=500)
     psch.add_argument("--notify", action="store_true", help="alert 任务完成后发送通知")
-    psch.add_argument("--channel", choices=["stdout", "webhook", "feishu"], default="stdout")
+    psch.add_argument("--channel", choices=["stdout", "webhook", "feishu", "feishu_app"], default="stdout")
     psch.add_argument("--webhook-url", help="覆盖 settings/env 中的 webhook URL")
     psch.add_argument("--title", help="通知标题")
     psch.add_argument("--force", action="store_true", help="knowledge_sync 时忽略来源检查周期")
