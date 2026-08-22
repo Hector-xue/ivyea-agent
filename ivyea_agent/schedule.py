@@ -137,6 +137,27 @@ def run_task(task: str, args: dict[str, Any] | None = None) -> tuple[bool, str]:
             return True, (f"{text}早报已推送：message_id={pushed['message_id']} "
                           f"待决定 {len(pushed['approvals'])} 条\n")
 
+        # 数据源健康：只有**连续**失败才告警。巡检每 20 分钟一次，
+        # 偶发一次超时是常态，累计计数迟早触发，会变成狼来了（方案 §8.2 / §8.8）。
+        from . import reliability
+        health_key = f"patrol.{task}.{sid}"
+        gap_threshold = 2 if task == "store_daily" else 3
+        if result.gaps:
+            n = reliability.record_failure(health_key, "；".join(result.gaps)[:300])
+            if reliability.should_alert(health_key, gap_threshold):
+                from . import feishu_card
+                notify.send_alert(
+                    "数据源连续取数失败：\n" + "\n".join(f"- {g}" for g in result.gaps),
+                    card=feishu_card.build_text_card(
+                        f"🚨 数据源异常（连续 {n} 次）",
+                        f"**{task}** 连续 {n} 次取不到数据，巡检形同虚设。\n\n"
+                        + "\n".join(f"- {g}" for g in result.gaps)
+                        + "\n\n恢复后会自动清零，不再重复轰炸。",
+                        template="red"),
+                    chat_id=str(args.get("chat_id") or ""), title="数据源异常")
+        else:
+            reliability.record_success(health_key)
+
         text = store_health.render(result)
         # 静默规则：无异常且无数据缺口时不推送，避免每 20 分钟刷屏。
         # 早报例外——用户要的就是"每天确认一眼"。

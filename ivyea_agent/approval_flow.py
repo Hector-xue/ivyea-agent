@@ -15,9 +15,19 @@
 """
 from __future__ import annotations
 
+import logging
+import threading
+import time
 from typing import Any, Optional
 
 from . import approvals, feishu_card
+
+log = logging.getLogger("ivyea.approval_flow")
+
+#: 方案 §8.4 预案：飞书卡片回调约 3 秒超时，而领星写入是同步做的。
+#: 默认**同步**（方案明确说异步是预案非默认）；实测超时后把
+#: settings 的 ``feishu_async_execute`` 置 true 即可切换，无需改代码。
+_ASYNC_SETTING = "feishu_async_execute"
 
 
 def _card_sender():
@@ -36,9 +46,14 @@ def _update_card(approval: Any, card: dict[str, Any]) -> bool:
         return False
 
 
+def _async_enabled() -> bool:
+    from . import config
+    return bool(config.load_settings().get(_ASYNC_SETTING, False))
+
+
 def resolve(approval_id: str, choice: str, *, operator: str = "",
             chat_id: str = "", update_card: bool = True,
-            execute: bool = True) -> dict[str, Any]:
+            execute: bool = True, async_execute: Optional[bool] = None) -> dict[str, Any]:
     """消费一个审批。approve 时默认立刻执行。
 
     返回 {ok, state, detail, reason, audit_id, card}。``card`` 是**建议回填的卡片**，
@@ -65,6 +80,20 @@ def resolve(approval_id: str, choice: str, *, operator: str = "",
             _update_card(appr, card)
         return {"ok": True, "state": approvals.APPROVED, "detail": "已批准，待执行",
                 "card": card}
+
+    if async_execute is None:
+        async_execute = _async_enabled()
+    if async_execute:
+        # 先秒回「执行中」，写入放后台，完事再原地改卡（方案 §8.4）
+        appr_now = approvals.get(approval_id)
+        threading.Thread(
+            target=lambda: execute_approved(approval_id, operator=operator,
+                                            update_card=True),
+            daemon=True).start()
+        card = feishu_card.build_resolved_card(choice="approve", operator=operator,
+                                               preview=appr_now.preview if appr_now else "")
+        return {"ok": True, "state": approvals.APPROVED, "detail": "已批准，执行中…",
+                "async": True, "card": card}
 
     return execute_approved(approval_id, operator=operator, update_card=update_card)
 
@@ -110,6 +139,7 @@ def execute_approved(approval_id: str, *, operator: str = "",
                 "detail": detail, "card": card}
 
     # 闸 7：真实写入（内部抓快照 + 审计 + 失败熔断）
+    started = time.time()
     try:
         result = lingxing_write.execute(intent, dry_run=False)
     except Exception as exc:                       # noqa: BLE001
@@ -131,6 +161,14 @@ def execute_approved(approval_id: str, *, operator: str = "",
         return {"ok": False, "reason": "write_failed", "detail": detail,
                 "state": approvals.FAILED, "card": card}
 
+    elapsed = time.time() - started
+    # 埋点：飞书卡片回调约 3 秒超时。真实写入耗时逼近这个数就该打开
+    # settings 的 feishu_async_execute（方案 §8.4 的预案）。
+    log.info("领星写入耗时 %.2fs（approval=%s）", elapsed, approval_id)
+    if elapsed > 2.5:
+        log.warning("领星写入 %.2fs 已逼近飞书卡片回调超时（约 3s），"
+                    "建议把 settings.%s 置 true 切到异步执行", elapsed, _ASYNC_SETTING)
+
     audit_id = str(result.get("audit_id") or "")
     approvals.mark_executed(approval_id, audit_id=audit_id,
                             detail=str(result.get("detail") or ""))
@@ -140,7 +178,8 @@ def execute_approved(approval_id: str, *, operator: str = "",
     if update_card:
         _update_card(appr, card)
     return {"ok": True, "state": approvals.EXECUTED, "audit_id": audit_id,
-            "detail": result.get("detail", ""), "card": card}
+            "detail": result.get("detail", ""), "elapsed": round(elapsed, 3),
+            "card": card}
 
 
 def rollback(approval_id: str, *, operator: str = "", chat_id: str = "",

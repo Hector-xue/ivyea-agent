@@ -86,9 +86,28 @@ def test_send_failure_does_not_write_message_id(ivyea_home, monkeypatch):
     monkeypatch.setattr(notify, "send_card",
                         lambda *a, **k: {"ok": False, "error": "bot not in chat"})
     out = patrol_push.push_result(_result(_finding()), chat_id="oc_d")
-    assert not out["ok"] and out["error"] == "bot not in chat"
+    assert not out["ok"]
+    # 降级链失败时把每条通道的原因都带出来，不能只剩一句"发送失败"
+    assert "bot not in chat" in out["error"]
+    assert "无兜底通道" in out["error"]
     a = approvals.get(out["approvals"][0])
     assert a.message_id == ""      # 没发出去就不能记 message_id
+
+
+def test_falls_back_to_webhook_when_card_fails(ivyea_home, monkeypatch):
+    """长连接/应用侧出问题时，告警不能就这么没了。"""
+    from ivyea_agent import notify, patrol_push
+
+    monkeypatch.setattr(notify, "send_card",
+                        lambda *a, **k: {"ok": False, "error": "app down"})
+    monkeypatch.setattr(notify, "_configured_webhook_url",
+                        lambda ch, override="": "https://hook.example/x")
+    sent = []
+    monkeypatch.setattr(notify, "send",
+                        lambda msg, **k: sent.append(k.get("channel")) or
+                        {"ok": True, "channel": "feishu", "status_code": 200})
+    out = patrol_push.push_result(_result(_finding()), chat_id="oc_d")
+    assert out["ok"] and sent == ["feishu"]
 
 
 def test_daily_push_includes_gaps(sink):

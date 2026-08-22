@@ -41,7 +41,10 @@ def push_result(result: Any, *, chat_id: str = "", store_name: str = "",
         layer=getattr(result, "layer", ""), approval_ids=ids, max_items=max_items)
 
     if channel == "feishu_app":
-        sent = notify.send_card(card, chat_id=chat_id)
+        from . import store_health
+        # 走降级链：卡片发不出去时退到群机器人 webhook，告警不能就这么没了
+        sent = notify.send_alert(store_health.render(result), card=card,
+                                 chat_id=chat_id, title="店铺异常")
     else:
         from . import store_health
         sent = notify.send(store_health.render(result),
@@ -78,7 +81,9 @@ def push_daily(result: Any, *, date: str, store_name: str, metrics_lines: Any = 
         date=date, store_name=store_name, metrics_lines=metrics_lines,
         findings=findings, gaps=getattr(result, "gaps", []),
         approval_ids=ids, report_url=report_url)
-    sent = notify.send_card(card, chat_id=chat_id)
+    from . import store_health
+    sent = notify.send_alert("\n".join(metrics_lines) or store_health.render(result),
+                             card=card, chat_id=chat_id, title=f"店铺日报 {date}")
     message_id = str(sent.get("message_id") or "")
     if sent.get("ok") and message_id:
         for aid in created:

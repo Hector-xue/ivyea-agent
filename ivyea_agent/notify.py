@@ -57,6 +57,43 @@ def send_card(card: dict[str, Any], *, chat_id: str = "",
     return {"ok": True, "channel": "feishu_app", "message_id": message_id, "chat_id": target}
 
 
+def send_alert(text: str, *, card: dict[str, Any] | None = None,
+               chat_id: str = "", title: str = "Ivyea 告警") -> dict[str, Any]:
+    """带降级链的告警发送（方案 §8.1）。
+
+    顺序：应用身份卡片 → 群机器人 webhook 纯文本 → 显式失败。
+    长连接/应用侧出问题时，告警**不能就这么没了**；webhook 是独立通道，
+    不依赖应用凭据与长连接，正适合当兜底。
+
+    返回里带 ``degraded``：走了兜底就标出来，调用方要能在日志里看见。
+    """
+    attempts: list[dict[str, Any]] = []
+    if card is not None:
+        primary = send_card(card, chat_id=chat_id, title=title)
+    else:
+        primary = send(text, title=title, channel="feishu_app", chat_id=chat_id)
+    attempts.append({"channel": "feishu_app", "ok": bool(primary.get("ok")),
+                     "error": primary.get("error", "")})
+    if primary.get("ok"):
+        return dict(primary, degraded=False, attempts=attempts)
+
+    fallback_url = _configured_webhook_url("feishu")
+    if fallback_url:
+        second = send(text, title=title, channel="feishu")
+        attempts.append({"channel": "feishu", "ok": bool(second.get("ok")),
+                         "error": second.get("error", "")})
+        if second.get("ok"):
+            return dict(second, degraded=True, attempts=attempts,
+                        degraded_from="feishu_app")
+    else:
+        attempts.append({"channel": "feishu", "ok": False,
+                         "error": "未配置群机器人 webhook，无兜底通道"})
+
+    return {"ok": False, "channel": "none", "degraded": True, "attempts": attempts,
+            "error": "所有通道均失败：" + "；".join(
+                f"{a['channel']}={a['error']}" for a in attempts if a.get("error"))}
+
+
 def send(
     message: str,
     *,
