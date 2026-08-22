@@ -37,12 +37,25 @@ class MCPClient:
         self.url: str = spec.get("url", "")
         self.headers: dict[str, str] = dict(spec.get("headers") or {})
         self.query: dict[str, str] = dict(spec.get("query") or {})
-        # stdio 子进程的环境。此前这三个字段一个都没读 —— mcp.json 里早就写着
+        # stdio 子进程的环境。这三个字段此前一个都没读 —— mcp.json 里早就写着
         # env 的服务器（如 sellersprite）其实一直没拿到密钥，只是因为多数
         # server 到真正调用工具时才校验，list_tools 能过，所以没人发现。
         self.env: dict[str, Any] = dict(spec.get("env") or {})
         self.env_passthrough: list[str] = [str(k) for k in (spec.get("env_passthrough") or [])]
-        self.inherit_env: bool = bool(spec.get("inherit_env"))
+        # 三个字段**一个都没写**时继承全部环境，也就是保持这些字段存在之前的行为。
+        #
+        # 这条不是图省事，是 v1.15.7 的教训：那一版直接把默认切成了白名单，结果
+        # 升级前配好的 server 立刻拿不到它依赖的变量 —— 而报错是**第三方 server
+        # 自己发的**（"XXX_KEY 未设置"），用户去查自己的密钥配置，明明配了，
+        # 根本猜不到是升级导致的。面向运营人员的产品，不能靠"你去改一下 JSON"收场。
+        #
+        # 所以安全是**渐进**拿到的：老配置原样跑；向导新建的 server 一律写显式
+        # 策略（默认收紧）；`ivyea mcp doctor` 报告谁还宽松、`ivyea mcp env` 一条
+        # 命令收紧。写过任何一个字段就视为已表态，按表态走。
+        self.env_policy_declared: bool = any(
+            k in spec for k in ("env", "env_passthrough", "inherit_env"))
+        self.inherit_env: bool = bool(
+            spec.get("inherit_env", not self.env_policy_declared))
         self.timeout = timeout
         self.session_id: Optional[str] = None
         self._id = 0
