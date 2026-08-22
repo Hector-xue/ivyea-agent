@@ -58,6 +58,13 @@ THRESHOLDS: dict[str, Any] = {
     "ads.click_no_order.min_clicks": 20.0,
     "l2.min_gap_minutes": 20.0,           # 采样间隔下限，太短则增量全是噪声
     "l2.baseline_min_days": 3,            # 同时段基线所需的最少历史天数
+    # —— Listing 快照（领星 MCP 源）——
+    "listing.rating_low.stars": 3.5,      # 评分低于此值告警
+    "listing.rating_low.min_reviews": 3.0,  # 评价太少时评分不稳定，不报
+    "review.rating_drop.delta": 0.3,      # 评分下降幅度（星）
+    "rank.drop.pct": 0.30,                # 排名恶化比例（rank 数值越大越差）
+    "price.changed.pct": 0.05,            # 价格变动幅度
+    "stock.fbm_low.days": 14.0,           # FBM 可供天数下限
 }
 
 def threshold(key: str) -> Any:
@@ -406,6 +413,13 @@ def check_l1(sid: Any) -> CheckResult:
         _rule_campaign(res, camp)
     else:
         res.gaps.append(camp.gap.describe())
+
+    snap = metrics.get_metric("listing.snapshot", {"sid": sid})
+    if snap.ok:
+        res.provenance.append(f"listing.snapshot：{_prov(snap)}")
+        _rule_listing(res, snap)
+    else:
+        res.gaps.append(snap.gap.describe())
 
     return res
 
@@ -953,3 +967,151 @@ def _delta_pp(now: float, before: float) -> str:
     pp = (now - before) * 100
     arrow = "▲" if pp > 0 else ("▼" if pp < 0 else "—")
     return f"{arrow}{abs(pp):.1f}pp"
+
+
+# ── Listing 快照规则（领星 MCP 源，OpenAPI 拿不到）─────────────────────────
+def _rule_listing(res: CheckResult, snap: MetricResult) -> None:
+    """评分 / 排名 / 价格 / 状态 / FBM 库存。
+
+    设计要点（都是看了真实分布才定的，不是拍脑袋）：
+    - **状态按跃迁报**：某店 120 条里 4 条常年「停售」，那是常态不是事件；
+      只有「在售 → 停售」才值得惊动人。
+    - **无评分的不报**：120 条里 100 条没有评分（新品/无评价），
+      把 stars=0 当成「差评」会一次刷出 100 条。
+    - **销量为零的不报缺货**：账号里大量长尾 listing 近 7 天零销量，
+      对它们算「可供天数」没有意义。
+    """
+    rows = snap.rows
+    if not rows:
+        res.skipped.append("Listing 规则跳过：未取到 Listing 快照")
+        return
+    prov = _prov(snap)
+
+    diff = snapshots.diff(res.sid, "listing", rows, "msku",
+                          ["status_text", "stars", "rank", "price"],
+                          track_membership=False)
+    changes: dict[str, dict[str, Any]] = {}
+    for c in diff.changes:
+        changes.setdefault(c.entity_id, {})[c.field] = (c.before, c.after)
+    if not diff.has_baseline:
+        res.skipped.append("Listing 变更类规则跳过：本次为首轮，正在建立基线（冷启动保护）")
+
+    for r in rows:
+        msku = r.get("msku") or ""
+        name = r.get("title") or r.get("asin") or msku
+        short = name[:28] + ("…" if len(str(name)) > 28 else "")
+        ch = changes.get(msku, {})
+
+        # 1. 状态跃迁：在售 → 停售
+        if "status_text" in ch:
+            before, after = ch["status_text"]
+            if str(after) != "在售" and str(before) == "在售":
+                res.findings.append(Finding(
+                    code="listing.deactivated", layer="L1", severity=CRIT,
+                    action_class=ADVISORY, sid=res.sid, scope="msku",
+                    target_id=msku, target_name=short, metric="status_text",
+                    message=f"「{short}」({r.get('asin')}) 由「在售」变为「{after}」",
+                    evidence={"status_before": before, "status_after": after,
+                              "asin": r.get("asin"), "price": r.get("price")},
+                    provenance=prov))
+            elif str(after) == "在售" and str(before) != "在售":
+                res.findings.append(Finding(
+                    code="listing.reactivated", layer="L1", severity=INFO,
+                    action_class=ADVISORY, sid=res.sid, scope="msku",
+                    target_id=msku, target_name=short, metric="status_text",
+                    message=f"「{short}」已恢复在售（原「{before}」）",
+                    evidence={"status_before": before, "status_after": after},
+                    provenance=prov))
+
+        # 2. 评分偏低（无评分的不报——大量新品没有评价）
+        stars, reviews = float(r.get("stars") or 0), float(r.get("reviews") or 0)
+        if (stars > 0 and stars < threshold("listing.rating_low.stars")
+                and reviews >= threshold("listing.rating_low.min_reviews")):
+            res.findings.append(Finding(
+                code="listing.rating_low", layer="L1", severity=WARN,
+                action_class=ADVISORY, sid=res.sid, scope="msku",
+                target_id=msku, target_name=short, metric="stars",
+                current=stars, baseline=threshold("listing.rating_low.stars"),
+                message=f"「{short}」({r.get('asin')}) 评分 {stars:.1f} 星"
+                        f"（{reviews:.0f} 条评价），低于 "
+                        f"{threshold('listing.rating_low.stars')} 星",
+                evidence={"stars": stars, "reviews": reviews,
+                          "asin": r.get("asin"), "price": r.get("price")},
+                provenance=prov))
+
+        # 3. 评分下滑
+        if "stars" in ch:
+            before, after = float(ch["stars"][0] or 0), float(ch["stars"][1] or 0)
+            if before > 0 and (before - after) >= threshold("review.rating_drop.delta"):
+                res.findings.append(Finding(
+                    code="review.rating_drop", layer="L1", severity=WARN,
+                    action_class=ADVISORY, sid=res.sid, scope="msku",
+                    target_id=msku, target_name=short, metric="stars",
+                    current=after, baseline=before,
+                    message=f"「{short}」评分 {before:.1f} → {after:.1f} 星，"
+                            f"建议查最近的差评",
+                    evidence={"stars_before": before, "stars_after": after,
+                              "reviews": reviews, "asin": r.get("asin")},
+                    provenance=prov))
+
+        # 4. 排名恶化（rank 数值越大越差）
+        if "rank" in ch:
+            before, after = float(ch["rank"][0] or 0), float(ch["rank"][1] or 0)
+            if before > 0 and after > before \
+                    and _pct_change(after, before) >= threshold("rank.drop.pct"):
+                res.findings.append(Finding(
+                    code="rank.drop", layer="L1", severity=WARN,
+                    action_class=ADVISORY, sid=res.sid, scope="msku",
+                    target_id=msku, target_name=short, metric="rank",
+                    current=after, baseline=before,
+                    message=f"「{short}」大类排名 {before:.0f} → {after:.0f}"
+                            f"（恶化 {_pct_change(after, before):+.0%}）",
+                    evidence={"rank_before": before, "rank_after": after,
+                              "asin": r.get("asin")},
+                    provenance=prov))
+
+        # 5. 价格被外部改动
+        if "price" in ch:
+            before, after = float(ch["price"][0] or 0), float(ch["price"][1] or 0)
+            if before > 0 and abs(_pct_change(after, before)) >= threshold("price.changed.pct"):
+                res.findings.append(Finding(
+                    code="price.changed_externally", layer="L1", severity=WARN,
+                    action_class=ADVISORY, sid=res.sid, scope="msku",
+                    target_id=msku, target_name=short, metric="price",
+                    current=after, baseline=before,
+                    message=f"「{short}」售价 {before:.2f} → {after:.2f}"
+                            f"（{_pct_change(after, before):+.0%}）{r.get('currency') or ''}",
+                    evidence={"price_before": before, "price_after": after,
+                              "currency": r.get("currency"), "asin": r.get("asin")},
+                    provenance=prov))
+
+        # 6. 有销量的突然断单
+        avg7 = float(r.get("avg_volume_7") or 0)
+        if avg7 > 0 and float(r.get("volume_yesterday") or 0) <= 0:
+            res.findings.append(Finding(
+                code="sales.stall", layer="L1", severity=WARN,
+                action_class=ADVISORY, sid=res.sid, scope="msku",
+                target_id=msku, target_name=short, metric="volume_yesterday",
+                current=0.0, baseline=avg7,
+                message=f"「{short}」昨日 0 单（近 7 日均 {avg7:.1f} 单/天）",
+                evidence={"avg_volume_7": avg7, "volume_7": r.get("volume_7"),
+                          "asin": r.get("asin"), "status": r.get("status_text")},
+                provenance=prov))
+
+        # 7. FBM 可供天数不足（长尾零销量的不算）
+        if r.get("channel") == "FBM" and avg7 > 0:
+            days = float(r.get("quantity") or 0) / avg7
+            if days < threshold("stock.fbm_low.days"):
+                res.findings.append(Finding(
+                    code="stock.fbm_low", layer="L1",
+                    severity=CRIT if days < 7 else WARN,
+                    action_class=ADVISORY, sid=res.sid, scope="msku",
+                    target_id=msku, target_name=short, metric="quantity",
+                    current=days, baseline=threshold("stock.fbm_low.days"),
+                    message=f"「{short}」自发货库存 {r.get('quantity'):.0f} 件，"
+                            f"按近 7 日均销 {avg7:.1f}/天只够 {days:.1f} 天",
+                    evidence={"quantity": r.get("quantity"), "avg_volume_7": avg7,
+                              "days_left": round(days, 1), "asin": r.get("asin")},
+                    provenance=prov))
+
+    snapshots.save(res.sid, "listing", rows, "msku")

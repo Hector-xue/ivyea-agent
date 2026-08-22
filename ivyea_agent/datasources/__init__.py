@@ -18,7 +18,13 @@ PRIORITY_LINGXING = 100
 
 def install_defaults() -> None:
     """注册当前可用的数据源。幂等，可重复调用。"""
-    from .. import metrics
+    from .. import config, metrics
     from .lingxing_source import LingxingSource
 
     metrics.register(LingxingSource(), priority=PRIORITY_LINGXING)
+
+    # 领星 MCP 补 OpenAPI 没有的能力面（Listing 快照/跟卖/补货）。
+    # 没配就不注册 —— 缺源时指标层会报「数据缺口」，比注册一个必然失败的源清楚。
+    if (config.load_mcp().get("mcpServers") or {}).get("lingxing"):
+        from .lingxing_mcp_source import LingxingMcpSource
+        metrics.register(LingxingMcpSource(), priority=PRIORITY_LINGXING + 1)

@@ -279,6 +279,7 @@ def test_missing_source_surfaces_as_gap(ivyea_home, monkeypatch):
         metrics.unregister(s.name)
     monkeypatch.setattr(datasources, "install_defaults", lambda: None)
     res = store_health.check_l1(1)
-    assert len(res.gaps) == 2          # 两个指标都没源
+    # L1 现在查三个指标：FBA 库存 / 广告活动配置 / Listing 快照
+    assert len(res.gaps) == 3
     assert res.findings == []
     assert "数据缺口" in store_health.render(res)
