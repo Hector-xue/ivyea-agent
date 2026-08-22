@@ -40,6 +40,15 @@ THRESHOLDS: dict[str, Any] = {
     "stock.excess.min_qty": 1.0,
     "ads.budget_changed_externally.min_pct": 0.05,  # 预算变动小于 5% 不报
     "stanch.max_change_pct": 0.15,        # 止血动作幅度封顶（与 guardrails 一致方向）
+    # —— L3 隔日层 ——
+    "ads.acos_breach.factor": 1.5,        # ACOS 超过目标的倍数
+    "ads.acos_breach.min_spend": 200.0,   # 花费门槛，小花费不值得惊动
+    "ads.cpc_jump.pct": 0.30,             # CPC 环比涨幅
+    "ads.cpc_jump.min_clicks": 30.0,      # 点击太少时 CPC 波动无意义
+    "ads.budget_capped.ratio": 0.95,      # 日均花费 / 日预算 达到此比例视为打满
+    "sales.drop.ratio": 0.5,              # 销售额跌破基线的比例
+    "sales.drop.min_baseline": 100.0,     # 基线太小不报（新品/长尾噪音）
+    "profit.margin_erosion.pp": 0.05,     # 毛利率下降的百分点
 }
 
 #: 视为「投放受阻」的 serving_status 关键字（大写匹配）。
@@ -361,3 +370,262 @@ def render(result: CheckResult) -> str:
     for p in result.provenance:
         lines.append(f"  数据来源：{p}")
     return "\n".join(lines) + "\n"
+
+
+# ── L3 隔日层 ───────────────────────────────────────────────────────────────
+def _window_days(days: int, exclude_recent: int = 1) -> tuple[list[str], list[str]]:
+    """返回 (近期窗口, 对照窗口)，均为升序日期串。
+
+    ``exclude_recent=1`` 是因为报表 T+1：今天拉不到今天的完整数据，
+    把最近 1 天排除掉，避免拿半天数据和整天基线比，得出"销量腰斩"的假告警。
+    """
+    import datetime
+    today = datetime.date.today()
+    def _span(offset: int) -> list[str]:
+        return sorted((today - datetime.timedelta(days=d)).isoformat()
+                      for d in range(offset, offset + days))
+    return _span(exclude_recent), _span(exclude_recent + days)
+
+
+def _agg_rows(rows: list[dict[str, Any]], key: str,
+              dates: set[str]) -> dict[str, dict[str, float]]:
+    """按实体聚合指定日期的报表行。"""
+    out: dict[str, dict[str, float]] = {}
+    for r in rows:
+        if r.get("date") not in dates:
+            continue
+        k = str(r.get(key) or "")
+        if not k:
+            continue
+        b = out.setdefault(k, {"impressions": 0.0, "clicks": 0.0, "spend": 0.0,
+                               "orders": 0.0, "sales": 0.0, "days": 0.0})
+        for f in ("impressions", "clicks", "spend", "orders", "sales"):
+            b[f] += float(r.get(f) or 0)
+        b["days"] += 1
+    return out
+
+
+def _derive(b: dict[str, float]) -> dict[str, float]:
+    clicks, spend, sales = b["clicks"], b["spend"], b["sales"]
+    return {
+        "acos": (spend / sales) if sales else 0.0,
+        "cpc": (spend / clicks) if clicks else 0.0,
+        "cvr": (b["orders"] / clicks) if clicks else 0.0,
+        "has_sales": bool(sales),
+    }
+
+
+def _rule_ads_l3(res: CheckResult, rep: MetricResult, cfg: MetricResult,
+                 recent: list[str], base: list[str], target_acos: float,
+                 acos_note: str) -> None:
+    rows = rep.rows
+    if not rows:
+        res.skipped.append("广告日报表规则跳过：窗口内无报表数据")
+        return
+    prov = _prov(rep)
+    cur = _agg_rows(rows, "campaign_id", set(recent))
+    old = _agg_rows(rows, "campaign_id", set(base))
+    budgets = {str(r.get("campaign_id")): r for r in cfg.rows} if cfg.ok else {}
+    if not budgets:
+        res.skipped.append("预算打满规则跳过：未取到活动配置（拿不到日预算做分母）")
+
+    breach_factor = THRESHOLDS["ads.acos_breach.factor"]
+    for cid, b in cur.items():
+        name = str((budgets.get(cid) or {}).get("name") or cid)
+        d = _derive(b)
+        spend = b["spend"]
+
+        # 1. ACOS 超标
+        if spend >= THRESHOLDS["ads.acos_breach.min_spend"] and d["has_sales"] \
+                and d["acos"] > target_acos * breach_factor:
+            budget = float((budgets.get(cid) or {}).get("daily_budget") or 0)
+            intent = None
+            if budget > 0:
+                new_budget = round(budget * (1 - THRESHOLDS["stanch.max_change_pct"]), 2)
+                intent = {"op_type": "campaign_budget", "sid": res.sid, "target_id": cid,
+                          "target_name": name,
+                          "change": {"daily_budget": new_budget},
+                          "before": {"daily_budget": budget}}
+            res.findings.append(Finding(
+                code="ads.acos_breach", layer="L3", severity=WARN, action_class=STANCH,
+                sid=res.sid, scope="campaign", target_id=cid, target_name=name,
+                metric="acos", current=d["acos"], baseline=target_acos,
+                window=f"{recent[0]}~{recent[-1]}",
+                message=f"活动「{name}」ACOS {d['acos']:.0%}，超目标 {target_acos:.0%} 的 "
+                        f"{breach_factor:g} 倍（花费 {spend:.2f}）",
+                evidence={"spend": spend, "sales": b["sales"], "orders": b["orders"],
+                          "acos": round(d["acos"], 4), "target_acos": round(target_acos, 4),
+                          "target_note": acos_note},
+                provenance=prov, intent=intent))
+
+        # 2. CPC 跳涨且转化未改善 —— 真正的杠杆在关键词 bid，交给优化器，这里只报
+        ob = old.get(cid)
+        if ob and b["clicks"] >= THRESHOLDS["ads.cpc_jump.min_clicks"]:
+            od = _derive(ob)
+            if od["cpc"] > 0 and _pct_change(d["cpc"], od["cpc"]) >= THRESHOLDS["ads.cpc_jump.pct"] \
+                    and d["cvr"] <= od["cvr"]:
+                res.findings.append(Finding(
+                    code="ads.cpc_jump", layer="L3", severity=WARN, action_class=ADVISORY,
+                    sid=res.sid, scope="campaign", target_id=cid, target_name=name,
+                    metric="cpc", current=d["cpc"], baseline=od["cpc"],
+                    window=f"{recent[0]}~{recent[-1]} vs {base[0]}~{base[-1]}",
+                    message=f"活动「{name}」CPC {od['cpc']:.2f} → {d['cpc']:.2f}"
+                            f"（{_pct_change(d['cpc'], od['cpc']):+.0%}）且转化未改善",
+                    evidence={"cpc_now": round(d["cpc"], 4), "cpc_before": round(od["cpc"], 4),
+                              "cvr_now": round(d["cvr"], 4), "cvr_before": round(od["cvr"], 4),
+                              "clicks": b["clicks"]},
+                    provenance=prov))
+
+        # 3. 预算打满且表现健康 → 提预算（止血的反向：别卡住好活动）
+        conf = budgets.get(cid)
+        if conf and b["days"]:
+            budget = float(conf.get("daily_budget") or 0)
+            daily_spend = spend / b["days"]
+            if budget > 0 and daily_spend >= budget * THRESHOLDS["ads.budget_capped.ratio"] \
+                    and d["has_sales"] and d["acos"] < target_acos:
+                new_budget = round(budget * (1 + THRESHOLDS["stanch.max_change_pct"]), 2)
+                res.findings.append(Finding(
+                    code="ads.budget_capped", layer="L3", severity=INFO, action_class=STANCH,
+                    sid=res.sid, scope="campaign", target_id=cid, target_name=name,
+                    metric="daily_budget", current=daily_spend, baseline=budget,
+                    window=f"{recent[0]}~{recent[-1]}",
+                    message=f"活动「{name}」日均花费 {daily_spend:.2f} 已打满预算 {budget:.2f}，"
+                            f"而 ACOS {d['acos']:.0%} 优于目标，建议提到 {new_budget:.2f}",
+                    evidence={"daily_spend": round(daily_spend, 2), "daily_budget": budget,
+                              "acos": round(d["acos"], 4), "target_acos": round(target_acos, 4)},
+                    provenance=prov,
+                    intent={"op_type": "campaign_budget", "sid": res.sid, "target_id": cid,
+                            "target_name": name,
+                            "change": {"daily_budget": new_budget},
+                            "before": {"daily_budget": budget}}))
+
+
+def _rule_profit_l3(res: CheckResult, cur: MetricResult, old: MetricResult,
+                    recent: list[str], base: list[str]) -> None:
+    if not cur.ok or not cur.rows:
+        res.skipped.append("销量/毛利规则跳过：窗口内无 ASIN 利润数据")
+        return
+    prov = _prov(cur)
+    prev = {str(r.get("asin")): r for r in (old.rows if old.ok else [])}
+    if not prev:
+        res.skipped.append("销量断崖规则跳过：无对照期利润数据")
+
+    for r in cur.rows:
+        asin = str(r.get("asin") or "")
+        if not asin:
+            continue
+        p = prev.get(asin)
+        if not p:
+            continue
+        sales, base_sales = float(r.get("sales_amount") or 0), float(p.get("sales_amount") or 0)
+        if base_sales >= THRESHOLDS["sales.drop.min_baseline"] \
+                and sales < base_sales * THRESHOLDS["sales.drop.ratio"]:
+            res.findings.append(Finding(
+                code="sales.drop", layer="L3", severity=CRIT, action_class=ADVISORY,
+                sid=res.sid, scope="asin", target_id=asin, target_name=asin,
+                metric="sales_amount", current=sales, baseline=base_sales,
+                window=f"{recent[0]}~{recent[-1]} vs {base[0]}~{base[-1]}",
+                message=f"ASIN {asin} 销售额 {base_sales:.2f} → {sales:.2f}"
+                        f"（{_pct_change(sales, base_sales):+.0%}）",
+                evidence={"sales_now": sales, "sales_before": base_sales,
+                          "ads_cost": r.get("ads_cost")},
+                provenance=prov))
+
+        rate, base_rate = float(r.get("gross_rate") or 0), float(p.get("gross_rate") or 0)
+        # 领星毛利率可能以百分数返回（如 23.5 表示 23.5%），统一折算成小数再比
+        if rate > 1 or base_rate > 1:
+            rate, base_rate = rate / 100.0, base_rate / 100.0
+        if base_rate and (base_rate - rate) >= THRESHOLDS["profit.margin_erosion.pp"]:
+            res.findings.append(Finding(
+                code="profit.margin_erosion", layer="L3", severity=WARN, action_class=ADVISORY,
+                sid=res.sid, scope="asin", target_id=asin, target_name=asin,
+                metric="gross_rate", current=rate, baseline=base_rate,
+                window=f"{recent[0]}~{recent[-1]} vs {base[0]}~{base[-1]}",
+                message=f"ASIN {asin} 毛利率 {base_rate:.1%} → {rate:.1%}"
+                        f"（下降 {(base_rate - rate) * 100:.1f} 个百分点）",
+                evidence={"gross_rate_now": round(rate, 4),
+                          "gross_rate_before": round(base_rate, 4),
+                          "gross_profit": r.get("gross_profit")},
+                provenance=prov))
+
+
+def _rule_optimizer(res: CheckResult, sid: Any) -> None:
+    """可执行的结构型/止血型动作委托给优化器。
+
+    刻意**不重造**否词/收割/调价逻辑：优化器已内建冷却期、历史否决记忆、
+    毛利率推目标、护栏拦截。重写一套必然与它漂移，出现「巡检说该否、优化器说冷却中」。
+    """
+    from . import lingxing_optimizer, lingxing_write
+
+    try:
+        out = lingxing_optimizer.run_store(int(sid))
+    except Exception as exc:                       # noqa: BLE001
+        res.gaps.append(f"优化器候选不可用：{exc}")
+        return
+
+    blocked = 0
+    for cand in out.get("candidates", []):
+        lever = str(cand.get("lever") or "")
+        if lever == "错误":
+            res.gaps.append(f"优化器数据源报错：{cand.get('block_reason') or cand.get('rationale')}")
+            continue
+        if cand.get("blocked"):
+            blocked += 1
+            continue
+        intent = lingxing_write.candidate_to_intent(cand)
+        op = str(cand.get("op_type") or "")
+        # 否词/加词不可逆 → 结构型，需统计显著性（优化器已保证）；调价可逆 → 止血型
+        action_class = STRUCTURAL if op in ("negate_keyword", "add_keyword") else STANCH
+        res.findings.append(Finding(
+            code=f"ads.opt.{op or lever}", layer="L3", severity=WARN,
+            action_class=action_class, sid=sid, scope="keyword",
+            target_id=str(cand.get("target_id") or cand.get("target_name") or ""),
+            target_name=str(cand.get("target_name") or ""),
+            metric="", message=f"[{lever}] {cand.get('rule') or cand.get('rationale')}",
+            evidence={"metrics": cand.get("metrics"),
+                      "significance": cand.get("significance"),
+                      "rationale": cand.get("rationale"),
+                      "target_acos": cand.get("opt_target")},
+            provenance=f"优化器窗口 {out.get('window_days')} 天 · {out.get('note', '')}",
+            intent=intent))
+    if blocked:
+        res.skipped.append(f"优化器候选有 {blocked} 条被护栏/冷却/历史否决拦截，未纳入建议")
+
+
+def check_l3(sid: Any, days: int = 7, *, include_optimizer: bool = True) -> CheckResult:
+    """L3 隔日层巡检。报表 T+1，所以窗口排除最近 1 天。"""
+    from . import datasources, lingxing_optimizer
+    datasources.install_defaults()
+
+    res = CheckResult(sid=sid, layer="L3")
+    recent, base = _window_days(days)
+
+    try:
+        target_acos, _brk, _margin, acos_note = lingxing_optimizer.resolve_target_acos(int(sid))
+    except Exception as exc:                       # noqa: BLE001
+        target_acos, acos_note = 0.30, f"目标ACOS 推导失败（{exc}），暂用 30%"
+        res.gaps.append(acos_note)
+
+    rep = metrics.get_metric(metrics.ADS_CAMPAIGN_REPORT.key, {"sid": sid},
+                            metrics.Window(tuple(base + recent)))
+    cfg = metrics.get_metric(metrics.ADS_CAMPAIGN_CONFIG.key, {"sid": sid})
+    if rep.ok:
+        res.provenance.append(f"{metrics.ADS_CAMPAIGN_REPORT.key}：{_prov(rep)}")
+        _rule_ads_l3(res, rep, cfg, recent, base, target_acos, acos_note)
+    else:
+        res.gaps.append(rep.gap.describe())
+
+    cur_profit = metrics.get_metric(metrics.PROFIT_ASIN.key, {"sid": sid},
+                                    metrics.Window(tuple(recent)))
+    old_profit = metrics.get_metric(metrics.PROFIT_ASIN.key, {"sid": sid},
+                                    metrics.Window(tuple(base)))
+    if cur_profit.ok:
+        res.provenance.append(f"{metrics.PROFIT_ASIN.key}：{_prov(cur_profit)}")
+        _rule_profit_l3(res, cur_profit, old_profit, recent, base)
+    else:
+        res.gaps.append(cur_profit.gap.describe())
+
+    if include_optimizer:
+        _rule_optimizer(res, sid)
+
+    return res

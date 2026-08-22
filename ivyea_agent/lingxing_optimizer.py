@@ -172,6 +172,31 @@ def aggregate_terms(sid: int, days: int = 14) -> dict[str, dict[str, Any]]:
     return out
 
 
+def resolve_target_acos(sid: int) -> tuple[float, Optional[float], Optional[float], str]:
+    """推导该店铺的目标 ACOS。返回 (target, breakeven, margin, 说明)。
+
+    单一权威：巡检（store_health）与优化器都用这个函数，避免两处各推一套目标值，
+    出现「告警说超标、优化器说没超标」的自相矛盾。
+
+    优先级：手动目标 > 手动毛利率 > 店铺实际毛利率 > 默认 30%。
+    """
+    factor = _f(_cfg("lingxing_target_acos_factor")) or 0.7
+    t_over = _f(_cfg("lingxing_target_acos_override"))
+    m_over = _f(_cfg("lingxing_margin_override"))
+
+    margin = None if t_over > 0 else _store_margin(sid)
+    if t_over > 0:
+        return t_over, None, None, f"目标ACOS=手动设定 {t_over:.0%}"
+    if m_over > 0:
+        return (factor * m_over, m_over, m_over,
+                f"毛利率=手动 {m_over:.0%}，目标ACOS={factor * m_over:.0%}")
+    if margin:
+        return (factor * margin, margin, margin,
+                f"毛利率≈{margin:.0%}(店铺均值)，目标ACOS={factor * margin:.0%}"
+                f"(={factor:g}×毛利)")
+    return 0.30, None, None, "未取到毛利数据，暂用默认目标ACOS 30%"
+
+
 def run_store(sid: int, days: Optional[int] = None, progress: Optional[Callable] = None) -> dict[str, Any]:
     """对一个店铺跑只读规则引擎，返回 {sid, window_days, margin, target_acos, candidates...}。"""
     factor = _f(_cfg("lingxing_target_acos_factor")) or 0.7
@@ -188,19 +213,7 @@ def run_store(sid: int, days: Optional[int] = None, progress: Optional[Callable]
     m_over = _f(_cfg("lingxing_margin_override"))
     dates = _window_dates(win, excl)
 
-    margin = None if t_over > 0 else _store_margin(sid)
-    if t_over > 0:
-        breakeven, target = None, t_over
-        note = f"目标ACOS=手动设定 {t_over:.0%}"
-    elif m_over > 0:
-        margin = m_over; breakeven = margin; target = factor * margin
-        note = f"毛利率=手动 {margin:.0%}，目标ACOS={target:.0%}"
-    elif margin:
-        breakeven = margin; target = factor * margin
-        note = f"毛利率≈{margin:.0%}(店铺均值)，目标ACOS={target:.0%}(={factor:g}×毛利)"
-    else:
-        breakeven = None; target = 0.30
-        note = "未取到毛利数据，暂用默认目标ACOS 30%"
+    target, breakeven, margin, note = resolve_target_acos(sid)
 
     def tgt() -> float:
         return target
