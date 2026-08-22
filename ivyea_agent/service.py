@@ -1884,6 +1884,59 @@ def chat_session_delete(session_id: str) -> dict[str, Any]:
     return {"ok": True, "deleted": session_id}
 
 
+def feishu_approval_resolve(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """飞书卡片按钮回调（批准/忽略）。契约见方案 §4.2。
+
+    relay 已做过发送者白名单、回调 chat 一致性、卡片 token 去重三道校验；
+    这里做二次校验（approval 状态 + TTL），双保险。
+    """
+    from . import approval_flow
+
+    approval_id = str(payload.get("approval_id") or "").strip()
+    choice = str(payload.get("choice") or "").strip()
+    if not approval_id or choice not in ("approve", "deny"):
+        return 400, {"ok": False, "error": "需要 approval_id 与 choice(approve|deny)"}
+    result = approval_flow.resolve(
+        approval_id, choice,
+        operator=str(payload.get("operator_open_id") or ""),
+        chat_id=str(payload.get("chat_id") or ""),
+        update_card=bool(payload.get("update_card", False)),
+    )
+    if not result.get("ok") and result.get("reason") in (
+            "already_resolved", "expired", "unknown", "chat_mismatch"):
+        return 409, {"ok": False, "reason": result["reason"],
+                     "detail": result.get("detail", ""),
+                     "state": result.get("state", "")}
+    return 200, result
+
+
+def feishu_approval_rollback(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    from . import approval_flow
+
+    approval_id = str(payload.get("approval_id") or "").strip()
+    if not approval_id:
+        return 400, {"ok": False, "error": "需要 approval_id"}
+    result = approval_flow.rollback(
+        approval_id,
+        operator=str(payload.get("operator_open_id") or ""),
+        chat_id=str(payload.get("chat_id") or ""),
+        update_card=bool(payload.get("update_card", False)),
+    )
+    if not result.get("ok") and result.get("reason") in ("unknown", "chat_mismatch"):
+        return 409, {"ok": False, "reason": result["reason"],
+                     "detail": result.get("detail", "")}
+    return 200, result
+
+
+def feishu_approval_get(approval_id: str) -> tuple[int, dict[str, Any]]:
+    from . import approval_flow
+
+    data = approval_flow.status(approval_id)
+    if data is None:
+        return 404, {"ok": False, "error": "审批项不存在"}
+    return 200, data
+
+
 def chat_session_create(payload: dict[str, Any]) -> dict[str, Any]:
     session_id = _checked_session_id(payload.get("id"))
     initial = str(payload.get("message") or payload.get("title") or "").strip()
@@ -2025,6 +2078,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/chat/sessions":
             self._json(200, chat_session_list(limit=_int(_first(qs, "limit"), 20)))
+            return
+        if parsed.path.startswith("/v1/feishu/approval/"):
+            code, data = feishu_approval_get(parsed.path.rsplit("/", 1)[-1])
+            self._json(code, data)
             return
         if parsed.path.startswith("/v1/chat/sessions/"):
             session_id = parsed.path.rsplit("/", 1)[-1]
@@ -2245,6 +2302,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(200, chat_run(body))
             except ValueError as exc:
                 self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/v1/feishu/approval/resolve":
+            code, data = feishu_approval_resolve(body)
+            self._json(code, data)
+            return
+        if parsed.path == "/v1/feishu/approval/rollback":
+            code, data = feishu_approval_rollback(body)
+            self._json(code, data)
             return
         if parsed.path == "/v1/chat/sessions/import":
             try:

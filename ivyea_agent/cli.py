@@ -1252,6 +1252,62 @@ def _cmd_store(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_approval(args: argparse.Namespace) -> int:
+    """审批项管理。飞书按钮走的是同一套编排（approval_flow），这里是终端入口。"""
+    from . import approval_flow, approvals
+
+    act = args.action
+    if act == "list":
+        rows = approvals.list_items(state=args.state or "", limit=args.limit)
+        s = approvals.summary()
+        print("状态汇总：" + (" ".join(f"{k}={v}" for k, v in sorted(s.items())) or "（空）"))
+        print(approvals.render(rows), end="")
+        return 0
+    if act == "show":
+        if not args.id:
+            print("用法：ivyea approval show <ID>", file=sys.stderr)
+            return 2
+        data = approval_flow.status(args.id)
+        if data is None:
+            print(f"未找到审批项：{args.id}", file=sys.stderr)
+            return 1
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    if act in ("approve", "deny"):
+        if not args.id:
+            print(f"用法：ivyea approval {act} <ID>", file=sys.stderr)
+            return 2
+        r = approval_flow.resolve(args.id, "approve" if act == "approve" else "deny",
+                                  operator=args.operator or "cli",
+                                  update_card=not args.no_card)
+        print(json.dumps({k: v for k, v in r.items() if k != "card"},
+                         ensure_ascii=False, indent=2))
+        return 0 if r.get("ok") else 1
+    if act == "execute":
+        if not args.id:
+            print("用法：ivyea approval execute <ID>（对已批准但未执行的项重试）", file=sys.stderr)
+            return 2
+        r = approval_flow.execute_approved(args.id, operator=args.operator or "cli",
+                                           update_card=not args.no_card)
+        print(json.dumps({k: v for k, v in r.items() if k != "card"},
+                         ensure_ascii=False, indent=2))
+        return 0 if r.get("ok") else 1
+    if act == "rollback":
+        if not args.id:
+            print("用法：ivyea approval rollback <ID>", file=sys.stderr)
+            return 2
+        r = approval_flow.rollback(args.id, operator=args.operator or "cli",
+                                   update_card=not args.no_card)
+        print(json.dumps({k: v for k, v in r.items() if k != "card"},
+                         ensure_ascii=False, indent=2))
+        return 0 if r.get("ok") else 1
+    if act == "expire":
+        n = approvals.expire_due()
+        print(f"已把 {n} 条超期未处理的审批标记为 expired。")
+        return 0
+    return 2
+
+
 def _cmd_shadow(args: argparse.Namespace) -> int:
     from . import shadow
     if args.action == "on":
@@ -3980,6 +4036,16 @@ def build_parser() -> argparse.ArgumentParser:
     pstore.add_argument("--channel", default="feishu_app",
                         choices=["feishu_app", "feishu", "webhook", "stdout"])
     pstore.set_defaults(func=_cmd_store)
+
+    pappr = sub.add_parser("approval", help="审批项：list/show/approve/deny/execute/rollback/expire")
+    pappr.add_argument("action",
+                       choices=["list", "show", "approve", "deny", "execute", "rollback", "expire"])
+    pappr.add_argument("id", nargs="?", help="审批项 ID")
+    pappr.add_argument("--state", help="list 时按状态过滤")
+    pappr.add_argument("--limit", type=int, default=50)
+    pappr.add_argument("--operator", default="", help="操作人标识，进审计")
+    pappr.add_argument("--no-card", action="store_true", help="不更新飞书卡片")
+    pappr.set_defaults(func=_cmd_approval)
 
     ptr = sub.add_parser("trace", help="运行时间线：recent / stats")
     ptr.add_argument("action", nargs="?", choices=["recent", "stats"], default="recent")
