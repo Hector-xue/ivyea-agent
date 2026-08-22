@@ -38,6 +38,11 @@ def run_checks() -> list[Check]:
         _check("curl", _curl),
         _check("领星 OpenAPI", _lingxing),
         _check("MCP", _mcp),
+        _check("飞书", _feishu),
+        _check("店铺巡检", _patrol),
+        _check("待审批动作", _approvals),
+        _check("领星写开关", _operate_switch),
+        _check("数据源健康", _data_health),
         _check("磁盘空间", _disk),
     ]
 
@@ -140,6 +145,86 @@ def _mcp() -> Check:
     if writable:
         detail += f"，{len(writable)} 个具备写入映射"
     return Check("MCP", "ok", detail)
+
+
+def _feishu() -> Check:
+    from . import feishu_client
+
+    if not feishu_client.is_configured():
+        return Check("飞书", "warn", "未配置应用凭据",
+                     "在 ~/.ivyea/.env 设 IVYEA_FEISHU_APP_ID / IVYEA_FEISHU_APP_SECRET")
+    chat = feishu_client.default_chat_id()
+    if not chat:
+        return Check("飞书", "warn", "已配凭据，但没有默认会话",
+                     "在 settings.json 设 feishu_default_chat_id，否则告警不知道发给谁")
+    return Check("飞书", "ok", f"已配置，默认会话 {chat[:14]}…")
+
+
+def _patrol() -> Check:
+    from . import schedule
+
+    jobs = [j for j in schedule.load().get("jobs", [])
+            if str(j.get("task", "")).startswith("store_")]
+    if not jobs:
+        return Check("店铺巡检", "warn", "未注册任何巡检任务",
+                     "`ivyea schedule set l1 store_l1 --every-minutes 20 --sid <SID>`；"
+                     "只注册不等于会跑，还要装 deploy/systemd/ivyea-schedule.timer")
+    enabled = [j for j in jobs if j.get("enabled", True)]
+    never = [j["name"] for j in enabled if not j.get("last_run")]
+    detail = f"{len(enabled)}/{len(jobs)} 个任务启用"
+    if never:
+        # 注册了却从没跑过，多半是 timer 没装 —— 这种"以为在跑其实没跑"最危险
+        return Check("店铺巡检", "warn", f"{detail}；{len(never)} 个从未执行过",
+                     "检查触发器：`systemctl list-timers ivyea-schedule.timer`；"
+                     f"从未跑过的：{'、'.join(never[:3])}")
+    return Check("店铺巡检", "ok", detail)
+
+
+def _approvals() -> Check:
+    from . import approvals
+
+    summary = approvals.summary()
+    pending = summary.get(approvals.PENDING, 0)
+    stuck = summary.get(approvals.APPROVED, 0)
+    failed = summary.get(approvals.FAILED, 0)
+    if failed:
+        return Check("待审批动作", "warn", f"{failed} 条执行失败",
+                     "`ivyea approval list --state failed` 看原因；"
+                     "写入失败会自动熔断关掉写开关")
+    if stuck:
+        return Check("待审批动作", "warn", f"{stuck} 条已批准但未执行",
+                     "多半是写开关没开：`ivyea lingxing operate on` 后 "
+                     "`ivyea approval execute <ID>`")
+    if pending:
+        return Check("待审批动作", "ok", f"{pending} 条待你处理")
+    return Check("待审批动作", "ok", "无积压")
+
+
+def _operate_switch() -> Check:
+    from . import lingxing_write
+
+    if not lingxing_write.operate_active():
+        return Check("领星写开关", "ok", "关闭（批准的动作会记为待执行）")
+    exp = config.get_setting("lingxing_operate_expires_at", 0)
+    left = ""
+    if exp:
+        import time as _t
+        left = f"，约 {max(0, int((float(exp) - _t.time()) / 60))} 分钟后自动关闭"
+    return Check("领星写开关", "warn", f"开启中{left}",
+                 "开着期间批准的动作会真实写入领星。不用了就 `ivyea lingxing operate off`")
+
+
+def _data_health() -> Check:
+    from . import reliability
+
+    snap = reliability.snapshot()
+    bad = {k: v for k, v in snap.items() if int((v or {}).get("consecutive") or 0) >= 2}
+    if not bad:
+        return Check("数据源健康", "ok", "无连续失败")
+    worst = max(bad.items(), key=lambda kv: kv[1].get("consecutive", 0))
+    return Check("数据源健康", "warn",
+                 f"{len(bad)} 项连续取数失败，最严重 {worst[0]} 连续 {worst[1]['consecutive']} 次",
+                 f"原因：{str(worst[1].get('detail') or '')[:120]}")
 
 
 def _disk() -> Check:

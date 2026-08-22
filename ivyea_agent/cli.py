@@ -1301,6 +1301,14 @@ def _cmd_approval(args: argparse.Namespace) -> int:
         print(json.dumps({k: v for k, v in r.items() if k != "card"},
                          ensure_ascii=False, indent=2))
         return 0 if r.get("ok") else 1
+    if act == "cancel":
+        if not args.id:
+            print("用法：ivyea approval cancel <ID>（撤销尚未执行的批准）", file=sys.stderr)
+            return 2
+        ok = approvals.cancel(args.id, "由 CLI 撤销")
+        print("已撤销。" if ok else "撤销失败：该项不存在，或已执行/已终态（已执行的用 rollback）",
+              file=sys.stderr if not ok else sys.stdout)
+        return 0 if ok else 1
     if act == "expire":
         n = approvals.expire_due()
         print(f"已把 {n} 条超期未处理的审批标记为 expired。")
@@ -4037,9 +4045,11 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=["feishu_app", "feishu", "webhook", "stdout"])
     pstore.set_defaults(func=_cmd_store)
 
-    pappr = sub.add_parser("approval", help="审批项：list/show/approve/deny/execute/rollback/expire")
+    pappr = sub.add_parser("approval",
+                           help="审批项：list/show/approve/deny/execute/rollback/cancel/expire")
     pappr.add_argument("action",
-                       choices=["list", "show", "approve", "deny", "execute", "rollback", "expire"])
+                       choices=["list", "show", "approve", "deny", "execute",
+                                "rollback", "cancel", "expire"])
     pappr.add_argument("id", nargs="?", help="审批项 ID")
     pappr.add_argument("--state", help="list 时按状态过滤")
     pappr.add_argument("--limit", type=int, default=50)

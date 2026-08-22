@@ -252,6 +252,23 @@ def mark_failed(approval_id: str, detail: str = "") -> bool:
     return n == 1
 
 
+def cancel(approval_id: str, detail: str = "") -> bool:
+    """撤销一个尚未执行的审批（pending 或 approved）。
+
+    批准之后、写开关补开之前改主意，是个真实场景 —— 没有这个操作的话，
+    那条 intent 会一直挂着，等哪天开了写开关被 `approval execute` 捞起来执行。
+    已执行的不能撤销，只能回滚。
+    """
+    conn = _conn()
+    try:
+        n = conn.execute(
+            "UPDATE approvals SET state=?, detail=? WHERE id=? AND state IN (?,?)",
+            (DENIED, detail or "已撤销", approval_id, PENDING, APPROVED)).rowcount
+    finally:
+        conn.close()
+    return n == 1
+
+
 def mark_rolled_back(approval_id: str, detail: str = "") -> bool:
     """只有已执行的才谈得上回滚。"""
     conn = _conn()
