@@ -33,6 +33,7 @@ def ivyea_home(monkeypatch):
                 "ivyea_agent.lingxing_cache", "ivyea_agent.pricing",
                 "ivyea_agent.sessions", "ivyea_agent.audit", "ivyea_agent.shadow",
                 "ivyea_agent.action_queue", "ivyea_agent.doctor", "ivyea_agent.profiles",
+                "ivyea_agent.snapshots",
                 "ivyea_agent.traces", "ivyea_agent.policy"):
         if mod in sys.modules:
             importlib.reload(sys.modules[mod])

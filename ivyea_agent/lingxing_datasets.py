@@ -18,6 +18,11 @@ DATASETS: dict[str, dict[str, Any]] = {
     "sp_campaigns":          {"route": "/pb/openapi/newad/spCampaigns", "method": "POST"},
     "sp_product_ads":        {"route": "/pb/openapi/newad/spProductAds", "method": "POST"},
     "asin_profit":           {"route": "/bd/profit/statistics/open/asin/list", "method": "POST"},
+    # 以下路由取自 ivyea-ops `lingxing_data.py`（权威规格），本机已实签核实可调用
+    "sp_ad_groups":          {"route": "/pb/openapi/newad/spAdGroups", "method": "POST"},
+    "sp_targets":            {"route": "/pb/openapi/newad/spTargets", "method": "POST"},
+    "sp_target_report":      {"route": "/pb/openapi/newad/spTargetReports", "method": "POST"},
+    "fba_stock":             {"route": "/erp/sc/routing/fba/fbaStock/fbaList", "method": "POST"},
 }
 
 SELLER_ROUTE = "/erp/sc/data/seller/lists"

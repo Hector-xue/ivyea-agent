@@ -1199,6 +1199,43 @@ def _cmd_lingxing(args: argparse.Namespace) -> int:
     return 2
 
 
+def _cmd_store(args: argparse.Namespace) -> int:
+    """店铺业务巡检（L1 快照层）。只读，不写任何广告配置。"""
+    from . import store_health
+    if args.action != "health":
+        print("用法：ivyea store health --sid <SID> [--layer l1] [--json]", file=sys.stderr)
+        return 2
+    if not args.sid:
+        from . import lingxing_datasets
+        try:
+            sellers = lingxing_datasets.list_sellers()
+        except Exception as exc:  # noqa: BLE001
+            print(f"未指定 --sid，且拉取店铺列表失败：{exc}", file=sys.stderr)
+            return 1
+        print("未指定 --sid。可用店铺：", file=sys.stderr)
+        for x in sellers:
+            print(f"  {x.get('sid')}  {x.get('name')}  {x.get('country')}", file=sys.stderr)
+        return 2
+
+    layer = (args.layer or "l1").lower()
+    if layer != "l1":
+        print(f"层 {layer} 尚未实现（L2 见 P1c、L3 见 P1b）。", file=sys.stderr)
+        return 2
+
+    result = store_health.check_l1(args.sid)
+    if args.json:
+        import dataclasses
+        print(json.dumps({
+            "sid": result.sid, "layer": result.layer,
+            "findings": [dataclasses.asdict(f) for f in result.sorted_findings()],
+            "gaps": result.gaps, "skipped": result.skipped,
+            "provenance": result.provenance,
+        }, ensure_ascii=False, indent=2))
+    else:
+        print(store_health.render(result), end="")
+    return 0
+
+
 def _cmd_shadow(args: argparse.Namespace) -> int:
     from . import shadow
     if args.action == "on":
@@ -3899,6 +3936,13 @@ def build_parser() -> argparse.ArgumentParser:
     pscore.add_argument("--limit", type=int, default=1000)
     pscore.add_argument("--output", help="导出 Markdown 到指定路径")
     pscore.set_defaults(func=_cmd_scorecard)
+
+    pstore = sub.add_parser("store", help="店铺业务巡检：health（L1 库存/广告配置快照层，只读）")
+    pstore.add_argument("action", choices=["health"])
+    pstore.add_argument("--sid", help="店铺 SID；不传则列出可用店铺")
+    pstore.add_argument("--layer", default="l1", help="巡检层：l1（默认）")
+    pstore.add_argument("--json", action="store_true", help="输出 JSON")
+    pstore.set_defaults(func=_cmd_store)
 
     ptr = sub.add_parser("trace", help="运行时间线：recent / stats")
     ptr.add_argument("action", nargs="?", choices=["recent", "stats"], default="recent")
