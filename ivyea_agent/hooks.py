@@ -23,7 +23,7 @@ import re
 import subprocess
 from functools import lru_cache
 
-from . import config
+from . import config, subproc_env
 
 _TIMEOUT = 15
 _TIMEOUT_MAX = 60
@@ -68,7 +68,13 @@ def _normalize(entries) -> list[dict]:
                 t = min(max(1, int(e.get("timeout") or _TIMEOUT)), _TIMEOUT_MAX)
             except (TypeError, ValueError):
                 t = _TIMEOUT
-            out.append({"command": e["command"], "matcher": str(e.get("matcher") or ""), "timeout": t})
+            out.append({"command": e["command"], "matcher": str(e.get("matcher") or ""),
+                        "timeout": t,
+                        # 环境相关三件套跟着条目走：不同 hook 需要的东西不一样，
+                        # 给全局开一个口子等于没清洗。
+                        "env": dict(e.get("env") or {}),
+                        "env_passthrough": [str(k) for k in (e.get("env_passthrough") or [])],
+                        "inherit_env": bool(e.get("inherit_env"))})
     return out
 
 
@@ -93,11 +99,24 @@ def _entries(event: str, tool_name: str = "", readonly: bool = False) -> list[di
             if _matches(e, event, tool_name, readonly)]
 
 
-def _hook_env(event: str, payload: dict | None) -> dict:
-    env = dict(os.environ)
-    env["IVYEA_HOOK_EVENT"] = event
-    env["IVYEA_HOOK_PAYLOAD"] = json.dumps(payload or {}, ensure_ascii=False)
-    return env
+def _hook_env(event: str, payload: dict | None, entry: dict | None = None) -> dict:
+    """hook 子进程的环境：白名单 + 该条目显式声明的，外加 hook 自己的两个约定键。
+
+    以前是 `dict(os.environ)` —— hook 脚本能读到本机全部密钥。hook 是本机作者
+    自己写的，风险低于第三方 MCP server，但没有理由让一个"发个通知"的脚本
+    看得见 DEEPSEEK_API_KEY。要哪个就在 hooks.json 的条目里写哪个。
+    """
+    entry = entry or {}
+    return subproc_env.build_env(
+        entry.get("env"),
+        passthrough=entry.get("env_passthrough"),
+        inherit_all=bool(entry.get("inherit_env")),
+        # IVYEA_HOOK_* 是 hook 的 API，必须盖过配置，不能被覆写掉。
+        extra={
+            "IVYEA_HOOK_EVENT": event,
+            "IVYEA_HOOK_PAYLOAD": json.dumps(payload or {}, ensure_ascii=False),
+        },
+    )
 
 
 def _shell(cmd: str) -> list[str]:
@@ -110,10 +129,10 @@ def fire(event: str, payload: dict | None = None, *,
     entries = _entries(event, tool_name, readonly)
     if not entries:
         return
-    env = _hook_env(event, payload)
     for e in entries:
         try:
-            subprocess.run(_shell(e["command"]), env=env, timeout=e["timeout"],
+            subprocess.run(_shell(e["command"]), env=_hook_env(event, payload, e),
+                           timeout=e["timeout"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except (OSError, subprocess.SubprocessError):
             continue
@@ -130,10 +149,10 @@ def fire_decision(event: str, payload: dict | None = None, *,
     entries = _entries(event, tool_name, readonly)
     if not entries:
         return True, ""
-    env = _hook_env(event, payload)
     for e in entries:
         try:
-            proc = subprocess.run(_shell(e["command"]), env=env, timeout=e["timeout"],
+            proc = subprocess.run(_shell(e["command"]), env=_hook_env(event, payload, e),
+                                  timeout=e["timeout"],
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         except (OSError, subprocess.SubprocessError):
             continue                                  # 钩子自身坏了 → 放行

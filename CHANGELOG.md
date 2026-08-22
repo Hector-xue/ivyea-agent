@@ -10,6 +10,38 @@
 
 ---
 
+## [Unreleased]
+
+### 新增
+
+- **明确许可证：MIT**。此前仓库没有 LICENSE 文件、`pyproject.toml` 也没有 license 字段
+  —— 那在法律上等于"保留所有权利"，别人不能合法使用、fork 或基于它做二次开发。
+  现在 `LICENSE` / 包元数据 / README 三处一致，构建产物里也带上 `License-File`。
+- **MCP stdio 服务器和 hook 条目支持三个环境变量字段**：`env`（直接给值，或用
+  `${VAR}` 从父进程取一个）、`env_passthrough`（列几个键名原样带过去）、
+  `inherit_env`（整份继承，退回旧行为）。
+
+### 变更
+
+- ⚠️ **MCP stdio 子进程和 hook 子进程不再继承本机全部环境变量**。此前
+  `Popen` 不带 `env=`、hook 直接 `dict(os.environ)`，意味着任何一个第三方 MCP
+  server 或 hook 脚本都能读走 `DEEPSEEK_API_KEY`、领星凭据等等。现在默认只放行
+  一份白名单（`PATH` / `HOME` / `LANG` / `TZ` / `TEMP`，Windows 另有 `SYSTEMROOT`
+  等必需项），其余要在配置里显式声明。
+
+  **如果你的某个 MCP server 或 hook 脚本依赖环境里的变量**，在它自己的条目里加
+  `"env": {"KEY": "${KEY}"}` 或 `"env_passthrough": ["KEY"]`；实在理不清可以先用
+  `"inherit_env": true` 退回旧行为。
+
+### 修复
+
+- **`mcp.json` 里的 `env` 字段此前被静默忽略**。`MCPClient` 根本没读它，配了也不生效
+  —— 因为多数 server 到真正调用工具时才校验密钥，`list_tools` 能过，所以一直没暴露。
+  本机的 sellersprite 就是这个情况：能列出工具，一调就报"SELLERSPRITE_KEY 未设置"。
+  现在 `env` 真的会传给子进程。
+
+---
+
 ## [v1.15.6] - 2026-08-21
 
 ### 新增
