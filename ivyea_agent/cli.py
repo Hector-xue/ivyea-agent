@@ -735,6 +735,18 @@ def _mcp_add_wizard() -> int:
             return 2
         parts = shlex.split(cmd)
         spec["command"], spec["args"] = parts[0], parts[1:]
+        # stdio server 是本机起的子进程。不问一句，它就会拿到本机全部环境变量
+        # （各家 API key 都在里面）。这里**一定写出显式策略**：写了就走白名单，
+        #  新加的服务器从此默认收紧，而升级前配好的老服务器不受影响。
+        print("\n  这个服务器需要哪些环境变量？（多个用逗号隔开，回车=不需要）")
+        print("  例：GITHUB_TOKEN,HTTPS_PROXY —— 会从当前环境取值传给它")
+        names = _ask("需要的变量名", "") or ""
+        wanted = [n.strip() for n in names.replace("，", ",").split(",") if n.strip()]
+        spec["env_passthrough"] = wanted
+        missing = [n for n in wanted if not os.environ.get(n)]
+        if missing:
+            print(f"  ⚠️ 当前环境里没有：{', '.join(missing)}")
+            print("     可以先跑起来，之后用 `ivyea mcp env %s --set 名=值` 直接给值" % name)
     else:
         print(f"不支持的传输方式: {transport}", file=sys.stderr)
         return 2
@@ -750,6 +762,112 @@ def _mcp_add_wizard() -> int:
     print(f"\n✓ 已保存 MCP 服务器 '{name}' → {config.MCP_FILE}")
     print(f"  {safe}")
     print("  （P1.5 的 MCP 客户端将读取它直连拉数据；当前为配置就绪）")
+    return 0
+
+
+def _mcp_env_policy_label(spec: dict) -> str:
+    """一个 stdio 服务器当前的环境策略，给人看的一句话。"""
+    if not any(k in spec for k in ("env", "env_passthrough", "inherit_env")):
+        return "全部（升级前配的，未收紧）"
+    if spec.get("inherit_env"):
+        return "全部（已显式放开）"
+    named = list(spec.get("env") or {}) + list(spec.get("env_passthrough") or [])
+    return ("受限 + " + ",".join(named)) if named else "受限"
+
+
+def _print_mcp_env_advice() -> None:
+    """doctor 末尾：谁还能读到本机全部密钥，以及怎么收紧。
+
+    只报告不自动改：这是用户配好在跑的东西，替他做决定不合适。
+    """
+    servers = config.load_mcp().get("mcpServers", {})
+    loose = [n for n, sp in servers.items()
+             if sp.get("transport") == "stdio"
+             and (sp.get("inherit_env")
+                  or not any(k in sp for k in ("env", "env_passthrough", "inherit_env")))]
+    if not loose:
+        return
+    print("\n── 环境变量 ──")
+    print(f"  以下 {len(loose)} 个 stdio 服务器能读到本机**全部**环境变量")
+    print("  （各家 API key、领星凭据都在里面）：")
+    for n in loose:
+        print(f"    · {n}")
+    print("\n  它们是升级前配好的，为了不打断你现在的使用保持了原样。")
+    print("  想收紧就跑（会只保留白名单，再按需加回）：")
+    print(f"    ivyea mcp env {loose[0]} --secure")
+    print(f"    ivyea mcp env {loose[0]} --pass 某个变量名     # 再放行需要的")
+
+
+def _cmd_mcp_env(args: argparse.Namespace) -> int:
+    """查看 / 调整一个 stdio 服务器的环境策略 —— 免得用户去手改 JSON。"""
+    name = args.name
+    if not name:
+        print("用法: ivyea mcp env <名称> [--secure|--inherit] [--pass 名] "
+              "[--set 名=值] [--unset 名]", file=sys.stderr)
+        return 2
+    data = config.load_mcp()
+    spec = (data.get("mcpServers") or {}).get(name)
+    if spec is None:
+        print(f"没有这个 MCP 服务器：{name}", file=sys.stderr)
+        return 2
+
+    changed = False
+    if args.inherit and args.secure:
+        print("--secure 和 --inherit 只能选一个。", file=sys.stderr)
+        return 2
+    if args.inherit:
+        spec["inherit_env"] = True
+        changed = True
+    if args.secure:
+        spec.pop("inherit_env", None)
+        spec.setdefault("env_passthrough", [])   # 留个显式表态，不然又回到"未收紧"
+        changed = True
+    for item in (args.env_pass or []):
+        keys = spec.setdefault("env_passthrough", [])
+        if item not in keys:
+            keys.append(item)
+        spec.pop("inherit_env", None)
+        changed = True
+    for item in (args.env_set or []):
+        if "=" not in item:
+            print(f"--set 要写成 名=值，收到的是：{item}", file=sys.stderr)
+            return 2
+        k, _, v = item.partition("=")
+        spec.setdefault("env", {})[k.strip()] = v
+        spec.pop("inherit_env", None)
+        changed = True
+    for item in (args.env_unset or []):
+        if item in (spec.get("env") or {}):
+            spec["env"].pop(item)
+            changed = True
+        if item in (spec.get("env_passthrough") or []):
+            spec["env_passthrough"].remove(item)
+            changed = True
+
+    if changed:
+        config.mcp_set_server(name, spec)
+        print(f"✓ 已更新 '{name}' → {config.MCP_FILE}")
+
+    print(f"\n  服务器：{name}")
+    print(f"  环境策略：{_mcp_env_policy_label(spec)}")
+    passthrough = spec.get("env_passthrough") or []
+    if passthrough:
+        print("  从当前环境读取：")
+        for k in passthrough:
+            have = "有值" if os.environ.get(k) else "⚠️ 当前环境里没有"
+            print(f"    · {k}  （{have}）")
+    given = spec.get("env") or {}
+    if given:
+        print("  直接给定：")
+        for k in given:
+            print(f"    · {k} = ***")
+    declared = any(k in spec for k in ("env", "env_passthrough", "inherit_env"))
+    if not declared or spec.get("inherit_env"):
+        # 别在这里写"只给白名单" —— 这两种情况恰恰是全都给。
+        print("  ⚠️ 它能读到本机全部环境变量（各家 API key 都在里面）")
+        print(f"     收紧：ivyea mcp env {name} --secure")
+    elif not passthrough and not given:
+        print("  （只给白名单：PATH / HOME / LANG / TZ / TEMP 等通用项）")
     return 0
 
 
@@ -773,7 +891,10 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
             t = spec.get("transport", "?")
             loc = spec.get("url") or spec.get("command", "")
             auth = "header" if spec.get("headers") else ("query" if spec.get("query") else "none")
-            print(f"  {name}\t[{t}]\t{loc}\t鉴权:{auth}")
+            envnote = ""
+            if spec.get("transport") == "stdio":
+                envnote = "\t环境:" + _mcp_env_policy_label(spec)
+            print(f"  {name}\t[{t}]\t{loc}\t鉴权:{auth}{envnote}")
         return 0
     if args.action == "template":
         from . import mcp_write
@@ -783,7 +904,10 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
         from . import mcp_status
         rows = mcp_status.status()
         print(mcp_status.render(rows))
+        _print_mcp_env_advice()
         return 1 if any(not r["ok"] for r in rows) else 0
+    if args.action == "env":
+        return _cmd_mcp_env(args)
     if args.action == "validate":
         from . import mcp_write
         if not args.name:
@@ -3634,11 +3758,21 @@ def build_parser() -> argparse.ArgumentParser:
     pm = sub.add_parser("mcp", help="MCP 配置/自检/反向服务（add/list/remove/edit/tools/call/suggest/template/validate/doctor/serve/self-config）")
     pm.add_argument("action", choices=[
         "add", "list", "remove", "edit", "tools", "call", "suggest",
-        "template", "validate", "doctor", "serve", "self-config",
+        "template", "validate", "doctor", "serve", "self-config", "env",
     ])
     pm.add_argument("name", nargs="?", help="服务器名（remove/tools/call 需要）")
     pm.add_argument("tool", nargs="?", help="工具名（call 需要）")
     pm.add_argument("--args", help="call 的入参 JSON，如 '{\"asin\":\"B0..\"}'")
+    pm.add_argument("--pass", dest="env_pass", action="append", metavar="名",
+                    help="env：让该服务器读到这个环境变量（可重复）")
+    pm.add_argument("--set", dest="env_set", action="append", metavar="名=值",
+                    help="env：直接给该服务器一个变量的值（可重复）")
+    pm.add_argument("--unset", dest="env_unset", action="append", metavar="名",
+                    help="env：去掉之前给它的某个变量（可重复）")
+    pm.add_argument("--secure", action="store_true",
+                    help="env：收紧 —— 只给白名单和你显式声明的那些")
+    pm.add_argument("--inherit", action="store_true",
+                    help="env：放开 —— 把本机全部环境变量都给它（不推荐）")
     pm.set_defaults(func=_cmd_mcp)
 
     pp = sub.add_parser("patrol", help="只读广告巡检（CSV / --from-lingxing 店铺维度 / --from-mcp 通用源）")

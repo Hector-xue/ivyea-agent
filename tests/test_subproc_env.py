@@ -103,13 +103,54 @@ def test_mcp_client_reads_env_from_spec():
 
 
 def test_mcp_child_env_excludes_secrets():
-    c = MCPClient({"transport": "stdio", "command": "true"})
+    """表过态（写了 env）就走白名单。"""
+    c = MCPClient({"transport": "stdio", "command": "true", "env": {}})
     assert SECRET not in c.child_env()
 
 
 def test_mcp_child_env_keeps_path():
-    c = MCPClient({"transport": "stdio", "command": "true"})
+    c = MCPClient({"transport": "stdio", "command": "true", "env": {}})
     assert c.child_env().get("PATH") == os.environ["PATH"]
+
+
+# ── 老配置不许被升级搞坏（v1.15.7 的教训）─────────────────────────────────
+
+def test_legacy_server_without_any_env_field_still_inherits():
+    """三个字段一个都没写 = 升级前配好的 —— 必须原样跑，不能悄悄收紧。
+
+    v1.15.7 把这种情况直接切成白名单，结果用户的 server 拿不到依赖的变量，
+    而报错是第三方 server 自己发的（"XXX_KEY 未设置"），指不到真正原因上。
+    """
+    c = MCPClient({"transport": "stdio", "command": "true"})
+    assert c.env_policy_declared is False
+    assert c.child_env()[SECRET] == SECRET_VALUE
+
+
+def test_declaring_empty_env_is_still_a_declaration():
+    """写了 `"env": {}` 也算表态 —— 用户明确说了"我管这个服务器的环境"。"""
+    c = MCPClient({"transport": "stdio", "command": "true", "env": {}})
+    assert c.env_policy_declared is True
+    assert SECRET not in c.child_env()
+
+
+def test_declaring_only_passthrough_tightens_the_rest():
+    c = MCPClient({"transport": "stdio", "command": "true",
+                   "env_passthrough": ["PATH"]})
+    assert c.env_policy_declared is True
+    assert SECRET not in c.child_env()
+
+
+def test_legacy_hook_entry_still_inherits():
+    entry = hooks._normalize([{"command": "true"}])[0]      # noqa: SLF001
+    env = hooks._hook_env("stop", None, entry=entry)        # noqa: SLF001
+    assert env[SECRET] == SECRET_VALUE
+
+
+def test_hook_entry_that_declared_env_is_tightened():
+    entry = hooks._normalize([{"command": "true", "env": {}}])[0]   # noqa: SLF001
+    env = hooks._hook_env("stop", None, entry=entry)                # noqa: SLF001
+    assert SECRET not in env
+    assert env["IVYEA_HOOK_EVENT"] == "stop"
 
 
 def test_mcp_spec_passthrough(monkeypatch):
@@ -148,6 +189,7 @@ def test_mcp_stdio_actually_spawns_with_scrubbed_env(tmp_path):
 # ── hooks ───────────────────────────────────────────────────────────────────
 
 def test_hook_env_excludes_secrets():
+    """不带条目直调 = 没人表态要继承 → 收紧。"""
     env = hooks._hook_env("pre_tool_use", {"tool_name": "x"})   # noqa: SLF001
     assert SECRET not in env
 
@@ -167,8 +209,9 @@ def test_hook_env_keeps_path_and_home():
 
 def test_hook_entry_env_and_passthrough(monkeypatch, tmp_path):
     monkeypatch.setenv("HOOK_ONLY_TOKEN", "ht")
-    entry = {"command": "true", "matcher": "", "timeout": 5,
-             "env": {"LITERAL": "L"}, "env_passthrough": ["HOOK_ONLY_TOKEN"]}
+    entry = hooks._normalize([{                                  # noqa: SLF001
+        "command": "true",
+        "env": {"LITERAL": "L"}, "env_passthrough": ["HOOK_ONLY_TOKEN"]}])[0]
     env = hooks._hook_env("stop", None, entry=entry)             # noqa: SLF001
     assert env["LITERAL"] == "L"
     assert env["HOOK_ONLY_TOKEN"] == "ht"
@@ -176,6 +219,7 @@ def test_hook_entry_env_and_passthrough(monkeypatch, tmp_path):
 
 
 def test_hook_inherit_all_escape_hatch():
-    entry = {"command": "true", "matcher": "", "timeout": 5, "inherit_env": True}
+    entry = hooks._normalize([{"command": "true",                # noqa: SLF001
+                               "inherit_env": True}])[0]
     env = hooks._hook_env("stop", None, entry=entry)             # noqa: SLF001
     assert env[SECRET] == SECRET_VALUE

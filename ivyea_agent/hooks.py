@@ -72,9 +72,14 @@ def _normalize(entries) -> list[dict]:
                         "timeout": t,
                         # 环境相关三件套跟着条目走：不同 hook 需要的东西不一样，
                         # 给全局开一个口子等于没清洗。
+                        #
+                        # 三个都没写 = 升级前就存在的条目 → 继承全部环境（旧行为）。
+                        # 理由同 mcp_client：不能让升级把别人配好的 hook 悄悄搞坏。
                         "env": dict(e.get("env") or {}),
                         "env_passthrough": [str(k) for k in (e.get("env_passthrough") or [])],
-                        "inherit_env": bool(e.get("inherit_env"))})
+                        "inherit_env": bool(e.get(
+                            "inherit_env",
+                            not any(k in e for k in ("env", "env_passthrough", "inherit_env")))),})
     return out
 
 
