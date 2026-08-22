@@ -232,3 +232,92 @@ def test_cold_start_suppresses_change_rules(wire):
     assert not [c for c in _codes(res)
                 if c in ("review.rating_drop", "rank.drop", "price.changed_externally")]
     assert any("冷启动" in s for s in res.skipped)
+
+
+# ── 跟卖监控 → Buy Box 风险 ─────────────────────────────────────────────────
+class _FollowSrc:
+    name, label = "fake_follow", "测试跟卖"
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def supports(self, m):
+        return m == "monitor.follow_sale"
+
+    def lag_seconds(self, m):
+        return 600.0
+
+    def fetch(self, m, scope, window=None):
+        from ivyea_agent.datasources.lingxing_mcp_source import LingxingMcpSource
+        return [LingxingMcpSource._follow(r, scope.get("sid")) for r in self.rows]
+
+
+@pytest.fixture()
+def wire_follow(ivyea_home, monkeypatch):
+    from ivyea_agent import metrics, datasources
+
+    def _install(rows):
+        for s in list(metrics.registered()):
+            metrics.unregister(s.name)
+        metrics.register(_FollowSrc(rows), priority=1)
+        monkeypatch.setattr(datasources, "install_defaults", lambda: None)
+    yield _install
+    from ivyea_agent import metrics as m
+    for s in list(m.registered()):
+        m.unregister(s.name)
+
+
+def _fol(asin="B01", n=1, title="商品"):
+    return {"asin": asin, "title": title, "total_seller": n}
+
+
+def test_new_competitor_is_crit_when_was_alone(wire_follow):
+    wire_follow([_fol(n=1)])
+    _run()
+    wire_follow([_fol(n=2)])
+    hits = [f for f in _run().findings if f.code == "buybox.competitor_appeared"]
+    assert len(hits) == 1 and hits[0].severity == "crit"
+
+
+def test_more_competitors_when_already_shared_is_warn(wire_follow):
+    wire_follow([_fol(n=2)])
+    _run()
+    wire_follow([_fol(n=3)])
+    hits = [f for f in _run().findings if f.code == "buybox.competitor_appeared"]
+    assert len(hits) == 1 and hits[0].severity == "warn"
+
+
+def test_fewer_competitors_is_not_reported(wire_follow):
+    wire_follow([_fol(n=5)])
+    _run()
+    wire_follow([_fol(n=2)])
+    assert "buybox.competitor_appeared" not in _codes(_run())
+
+
+def test_crowded_fires_without_baseline(wire_follow):
+    """拥挤是当前状态，不需要基线也能判。"""
+    wire_follow([_fol(n=5)])
+    assert "buybox.crowded" in _codes(_run())
+
+
+def test_no_double_report_for_same_asin(wire_follow):
+    """既新增跟卖又拥挤时，只报一条更具体的，不叠加。"""
+    wire_follow([_fol(n=3)])
+    _run()
+    wire_follow([_fol(n=6)])
+    codes = _codes(_run())
+    assert codes.count("buybox.competitor_appeared") == 1
+    assert "buybox.crowded" not in codes
+
+
+def test_evidence_says_it_is_a_proxy(wire_follow):
+    """跟卖数是 Buy Box 竞争的前置信号，不等于已丢失 —— 别让人误读。"""
+    wire_follow([_fol(n=5)])
+    f = [x for x in _run().findings if x.code == "buybox.crowded"][0]
+    assert "不等于已丢失" in str(f.evidence)
+
+
+def test_no_monitor_configured_is_a_skip_not_a_crash(wire_follow):
+    wire_follow([])
+    res = _run()
+    assert any("跟卖监控" in s for s in res.skipped)

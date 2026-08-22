@@ -124,6 +124,38 @@ PROFIT_ASIN = _reg(MetricSpec(
 ))
 
 
+# 下面三个由领星 MCP 提供（OpenAPI 拿不到）。**定义放这里而不是数据源模块**：
+# 指标存不存在不该取决于哪个源恰好被 import 了 —— 否则源没配时会报
+# 「未注册的指标」，而正确的说法是「没有源支持这个指标」。
+LISTING_SNAPSHOT = _reg(MetricSpec(
+    key="listing.snapshot",
+    grain=GRAIN_SNAPSHOT,
+    entity=ENTITY_MSKU,
+    fields=("sid", "msku", "asin", "parent_asin", "title", "channel",
+            "status", "status_text", "price", "currency", "stars", "reviews",
+            "rank", "quantity", "fulfillable", "volume_yesterday",
+            "volume_7", "volume_30", "avg_volume_7", "avg_volume_30",
+            "amount_7", "amount_30", "spend_7", "spend_30", "open_date"),
+    description="Listing 全量快照（评分/排名/价格/多窗口销量）",
+))
+
+FOLLOW_SALE = _reg(MetricSpec(
+    key="monitor.follow_sale",
+    grain=GRAIN_SNAPSHOT,
+    entity=ENTITY_ASIN,
+    fields=("sid", "asin", "parent_asin", "title", "seller_count", "buybox_seller"),
+    description="ASIN 跟卖监控（卖家数量 = Buy Box 竞争信号）",
+))
+
+RESTOCK = _reg(MetricSpec(
+    key="inventory.restock",
+    grain=GRAIN_SNAPSHOT,
+    entity=ENTITY_MSKU,
+    fields=("sid", "msku", "asin", "suggested_qty", "available_days", "status"),
+    description="FBA 补货建议",
+))
+
+
 # ── 时间窗 ──────────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Window:

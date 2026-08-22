@@ -175,3 +175,70 @@ def test_daily_task_falls_back_to_text_channel(ivyea_home, monkeypatch):
     ok, _t = schedule.run_task("store_daily", {"sid": 1, "notify": True,
                                                "channel": "stdout"})
     assert ok and len(sent) == 1
+
+
+# ── Listing 维度（领星 MCP 源）──────────────────────────────────────────────
+def _listing_rows(n=3, **over):
+    from ivyea_agent.datasources.lingxing_mcp_source import LingxingMcpSource
+
+    base = {"store_id": 1, "msku": "M", "asin": "B", "item_name": "商品",
+            "fulfillment_channel_type": "FBM", "status_text": "在售",
+            "listing_price": "30.00", "stars": 4.5, "reviews_num": 10,
+            "seller_rank": 1000, "quantity": "50",
+            "yesterday_volume": "2", "seven_volume": "14", "thirty_volume": "30",
+            "average_seven_volume": "2.0", "average_thirty_volume": "1.0",
+            "seven_amount": "420.00", "thirty_amount": "900.00",
+            "seven_spend": "42.00", "thirty_spend": "90.00"}
+    base.update(over)
+    return [LingxingMcpSource._listing(dict(base, msku=f"M{i}"), 1) for i in range(n)]
+
+
+def test_daily_includes_listing_dimension(wire):
+    """这个账号广告和利润都是空的，但 listing 维度有真实销量 ——
+    早报不能因此变成一张只有"无数据"的卡。"""
+    from ivyea_agent import store_health
+
+    wire(**{"listing.snapshot": lambda _w: _listing_rows(3)})
+    d = store_health.daily_summary(1)
+    text = "\n".join(d["lines"])
+    assert "销量" in text and "昨日 6 件" in text        # 3 条 × 2
+    assert "Listing" in text and "120" not in text
+    assert d["metrics"]["listings"] == 3 and d["metrics"]["on_sale"] == 3
+    assert d["metrics"]["ad_spend_7"] == pytest.approx(126.0)
+
+
+def test_daily_counts_low_rated_listings(wire):
+    from ivyea_agent import store_health
+
+    rows = _listing_rows(2) + _listing_rows(1, stars=2.0, reviews_num=8)
+    wire(**{"listing.snapshot": lambda _w: rows})
+    assert "评分偏低 1" in "\n".join(store_health.daily_summary(1)["lines"])
+
+
+def test_daily_trend_is_labelled_as_7d_vs_30d(wire):
+    """领星按 listing 只给 7 日/30 日窗口，没有"昨日 vs 前日"。
+    比的是趋势不是日环比，卡片上必须标清楚，别让人误读。"""
+    from ivyea_agent import store_health
+
+    wire(**{"listing.snapshot": lambda _w: _listing_rows(1)})
+    text = "\n".join(store_health.daily_summary(1)["lines"])
+    assert "30 日均" in text
+
+
+def test_daily_reports_gap_when_no_listing_source(wire):
+    from ivyea_agent import store_health
+
+    wire()
+    d = store_health.daily_summary(1)
+    assert any("listing.snapshot" in g or "Listing" in g for g in d["gaps"])
+
+
+def test_check_l1_is_unaffected_by_summary_code(wire):
+    """回归：早报的 listing 汇总代码一度被误插进 check_l1，
+    那里没有 lines/out/gaps，会直接 NameError。"""
+    from ivyea_agent import store_health
+
+    wire(**{"listing.snapshot": lambda _w: _listing_rows(2)})
+    res = store_health.check_l1(1)
+    assert isinstance(res, store_health.CheckResult)
+    assert res.layer == "L1"

@@ -65,6 +65,7 @@ THRESHOLDS: dict[str, Any] = {
     "rank.drop.pct": 0.30,                # 排名恶化比例（rank 数值越大越差）
     "price.changed.pct": 0.05,            # 价格变动幅度
     "stock.fbm_low.days": 14.0,           # FBM 可供天数下限
+    "buybox.crowded.sellers": 3.0,        # 跟卖卖家数达到此值视为拥挤
 }
 
 def threshold(key: str) -> Any:
@@ -414,12 +415,19 @@ def check_l1(sid: Any) -> CheckResult:
     else:
         res.gaps.append(camp.gap.describe())
 
-    snap = metrics.get_metric("listing.snapshot", {"sid": sid})
+    snap = metrics.get_metric(metrics.LISTING_SNAPSHOT.key, {"sid": sid})
     if snap.ok:
-        res.provenance.append(f"listing.snapshot：{_prov(snap)}")
+        res.provenance.append(f"{metrics.LISTING_SNAPSHOT.key}：{_prov(snap)}")
         _rule_listing(res, snap)
     else:
         res.gaps.append(snap.gap.describe())
+
+    follow = metrics.get_metric(metrics.FOLLOW_SALE.key, {"sid": sid})
+    if follow.ok:
+        res.provenance.append(f"{metrics.FOLLOW_SALE.key}：{_prov(follow)}")
+        _rule_follow_sale(res, follow)
+    else:
+        res.gaps.append(follow.gap.describe())
 
     return res
 
@@ -933,6 +941,35 @@ def daily_summary(sid: Any, *, days: int = 1) -> dict[str, Any]:
     else:
         gaps.append(cur_p.gap.describe() if not cur_p.ok else "窗口内无 ASIN 利润数据")
 
+    snap = metrics.get_metric("listing.snapshot", {"sid": sid})
+    if snap.ok and snap.rows:
+        rows = snap.rows
+        on_sale = [r for r in rows if r.get("status_text") == "在售"]
+        v_yday = sum(float(r.get("volume_yesterday") or 0) for r in rows)
+        v7 = sum(float(r.get("volume_7") or 0) for r in rows)
+        v30 = sum(float(r.get("volume_30") or 0) for r in rows)
+        a7 = sum(float(r.get("amount_7") or 0) for r in rows)
+        s7 = sum(float(r.get("spend_7") or 0) for r in rows)
+        # 领星按 listing 给的是 7 日与 30 日窗口，没有"昨日 vs 前日"。
+        # 所以这里比的是**近 7 日均 vs 近 30 日均**，是趋势不是日环比，标注清楚。
+        avg7, avg30 = v7 / 7.0, v30 / 30.0
+        out.update({"listings": len(rows), "on_sale": len(on_sale),
+                    "volume_yesterday": v_yday, "volume_7": v7,
+                    "amount_7": a7, "ad_spend_7": s7})
+        lines.append(f"**销量**　昨日 {v_yday:,.0f} 件　近 7 日 {v7:,.0f} 件"
+                     f"（日均 {avg7:.1f}，对比 30 日均 {avg30:.1f}：{_delta(avg7, avg30)}）")
+        if a7:
+            lines.append(f"**销售额**　近 7 日 {a7:,.2f}"
+                         + (f"　广告花费 {s7:,.2f}（占比 {s7 / a7:.1%}）" if s7 else ""))
+        rated = [r for r in rows if float(r.get("stars") or 0) > 0]
+        low = [r for r in rated
+               if float(r["stars"]) < threshold("listing.rating_low.stars")
+               and float(r.get("reviews") or 0) >= threshold("listing.rating_low.min_reviews")]
+        lines.append(f"**Listing**　{len(rows)} 条（在售 {len(on_sale)}）"
+                     f"　有评分 {len(rated)}　评分偏低 {len(low)}")
+    else:
+        gaps.append(snap.gap.describe() if not snap.ok else "无 Listing 快照数据")
+
     inv = metrics.get_metric(metrics.INVENTORY_FBA.key, {"sid": sid})
     if inv.ok:
         fba = [r for r in inv.rows if r.get("channel") == "FBA"]
@@ -1115,3 +1152,58 @@ def _rule_listing(res: CheckResult, snap: MetricResult) -> None:
                     provenance=prov))
 
     snapshots.save(res.sid, "listing", rows, "msku")
+
+
+def _rule_follow_sale(res: CheckResult, follow: MetricResult) -> None:
+    """跟卖监控 → Buy Box 风险。
+
+    领星没有直接的 Buy Box 占有率接口，但「有几个卖家在跟卖」是同一件事的
+    前置信号：跟卖出现就意味着 Buy Box 要分出去。**这是代理指标不是 Buy Box 本身**，
+    卡片上会说清楚，别让人当成"已丢失 Buy Box"。
+    """
+    rows = follow.rows
+    if not rows:
+        res.skipped.append("跟卖监控规则跳过：未配置跟卖监控或无数据")
+        return
+    prov = _prov(follow)
+
+    diff = snapshots.diff(res.sid, "follow_sale", rows, "asin",
+                          ["seller_count"], track_membership=False)
+    before = {c.entity_id: c.before for c in diff.changes if c.field == "seller_count"}
+    if not diff.has_baseline:
+        res.skipped.append("跟卖变化规则跳过：本次为首轮，正在建立基线（冷启动保护）")
+
+    crowded = threshold("buybox.crowded.sellers")
+    for r in rows:
+        asin = str(r.get("asin") or "")
+        name = str(r.get("title") or asin)[:28]
+        n = float(r.get("seller_count") or 0)
+
+        if asin in before:
+            prev = float(before[asin] or 0)
+            if n > prev:
+                res.findings.append(Finding(
+                    code="buybox.competitor_appeared", layer="L1",
+                    severity=CRIT if prev <= 1 else WARN, action_class=ADVISORY,
+                    sid=res.sid, scope="asin", target_id=asin, target_name=name,
+                    metric="seller_count", current=n, baseline=prev,
+                    message=f"{asin}「{name}」跟卖卖家 {prev:.0f} → {n:.0f} 家，"
+                            f"Buy Box 有被分走的风险",
+                    evidence={"seller_count_before": prev, "seller_count_now": n,
+                              "buybox_seller": r.get("buybox_seller"),
+                              "说明": "跟卖数量是 Buy Box 竞争的前置信号，不等于已丢失 Buy Box"},
+                    provenance=prov))
+                continue        # 已就该 ASIN 报过一条，不再叠加"拥挤"
+
+        if n >= crowded:
+            res.findings.append(Finding(
+                code="buybox.crowded", layer="L1", severity=WARN,
+                action_class=ADVISORY, sid=res.sid, scope="asin",
+                target_id=asin, target_name=name, metric="seller_count",
+                current=n, baseline=crowded,
+                message=f"{asin}「{name}」有 {n:.0f} 家跟卖，Buy Box 竞争激烈",
+                evidence={"seller_count": n, "buybox_seller": r.get("buybox_seller"),
+                          "说明": "跟卖数量是 Buy Box 竞争的前置信号，不等于已丢失 Buy Box"},
+                provenance=prov))
+
+    snapshots.save(res.sid, "follow_sale", rows, "asin")

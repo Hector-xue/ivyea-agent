@@ -354,3 +354,16 @@ def test_save_gives_up_cleanly_if_the_file_stays_locked(tmp_path, monkeypatch):
     with pytest.raises(PermissionError):
         sessions.save("20260808-000000-000-aaaa", [{"role": "user", "content": "x"}])
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_sessions_id_survives_burst_generation(ivyea_home):
+    """同一毫秒内连开会话不能撞 id —— id 直接当文件名，撞了就是互相覆盖。
+
+    随机段曾是 2 字节（65536 个取值），取 20 个约 0.3% 概率碰撞，
+    表现为全量测试偶发变红。
+    """
+    from ivyea_agent import sessions
+
+    ids = {sessions.new_id() for _ in range(2000)}
+    assert len(ids) == 2000
+    assert all(sessions.is_safe_id(i) for i in ids)

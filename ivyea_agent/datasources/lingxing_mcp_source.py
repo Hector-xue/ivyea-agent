@@ -113,37 +113,10 @@ def _paged(name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-# ── 新指标 ──────────────────────────────────────────────────────────────────
-LISTING_SNAPSHOT = metrics.REGISTRY.get("listing.snapshot") or metrics._reg(
-    metrics.MetricSpec(
-        key="listing.snapshot",
-        grain=metrics.GRAIN_SNAPSHOT,
-        entity=metrics.ENTITY_MSKU,
-        fields=("sid", "msku", "asin", "parent_asin", "title", "channel",
-                "status", "status_text", "price", "currency", "stars", "reviews",
-                "rank", "quantity", "fulfillable", "volume_yesterday",
-                "volume_7", "volume_30", "avg_volume_7", "avg_volume_30",
-                "amount_7", "amount_30", "spend_7", "spend_30", "open_date"),
-        description="Listing 全量快照（评分/排名/价格/多窗口销量），OpenAPI 拿不到",
-    ))
-
-FOLLOW_SALE = metrics.REGISTRY.get("monitor.follow_sale") or metrics._reg(
-    metrics.MetricSpec(
-        key="monitor.follow_sale",
-        grain=metrics.GRAIN_SNAPSHOT,
-        entity=metrics.ENTITY_ASIN,
-        fields=("sid", "asin", "parent_asin", "title", "seller_count", "buybox_seller"),
-        description="ASIN 跟卖监控（卖家数量 = Buy Box 竞争信号）",
-    ))
-
-RESTOCK = metrics.REGISTRY.get("inventory.restock") or metrics._reg(
-    metrics.MetricSpec(
-        key="inventory.restock",
-        grain=metrics.GRAIN_SNAPSHOT,
-        entity=metrics.ENTITY_MSKU,
-        fields=("sid", "msku", "asin", "suggested_qty", "available_days", "status"),
-        description="FBA 补货建议",
-    ))
+# 指标定义在 metrics.py（见那里的注释：指标存不存在不该取决于哪个源被 import）
+LISTING_SNAPSHOT = metrics.LISTING_SNAPSHOT
+FOLLOW_SALE = metrics.FOLLOW_SALE
+RESTOCK = metrics.RESTOCK
 
 
 class LingxingMcpSource:
