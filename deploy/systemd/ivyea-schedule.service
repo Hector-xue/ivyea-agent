@@ -1,0 +1,22 @@
+[Unit]
+Description=IvyeaAgent scheduled tasks (store patrol / alerts / approvals sweep)
+Documentation=https://github.com/Hector-xue/ivyea-agent
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root
+Environment=HOME=/root
+Environment=PYTHONUNBUFFERED=1
+# 只跑「到点了的」任务；跑哪些、多久一次由 ~/.ivyea/schedule.json 决定。
+# 时间写在 schedule.json 而不是 timer 里，改巡检频率就不用动 systemd。
+# 与 ivyea-agent.service 保持一致，直接调模块：ivyea 装在 /root/.local/bin，
+# 不在 systemd 的默认 PATH 里，写 `env ivyea` 会直接找不到命令。
+ExecStart=/usr/bin/python3 -m ivyea_agent.cli schedule run-due
+# 单次任务最长 10 分钟；领星 1 秒限流下，多店铺 L3 巡检可能较慢。
+TimeoutStartSec=600
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

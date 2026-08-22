@@ -3432,7 +3432,10 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         return 0
     if args.action == "set":
         if not args.name or not args.task:
-            print("用法: ivyea schedule set <名称> <alert|weekly|eval|knowledge_sync|knowledge_quality> --every-hours 24", file=sys.stderr)
+            print("用法: ivyea schedule set <名称> <任务> [--every-hours 24 | --every-minutes 20]\n"
+                  f"可用任务：{', '.join(sorted(schedule.ALLOWED_TASKS))}\n"
+                  "店铺巡检任务需 --sid，例：ivyea schedule set l1 store_l1 --every-minutes 20 --sid 1863",
+                  file=sys.stderr)
             return 2
         try:
             task_args = {}
@@ -3448,11 +3451,19 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
                 task_args = {"force": bool(args.force)}
             elif args.limit != 500:
                 task_args = {"limit": args.limit}
-            job = schedule.set_job(args.name, args.task, every_hours=args.every_hours, args=task_args)
+            if args.task in ("store_l1", "store_l2", "store_daily"):
+                if not args.sid:
+                    print("店铺巡检任务需要 --sid <SID>。", file=sys.stderr)
+                    return 2
+                task_args["sid"] = args.sid
+            job = schedule.set_job(args.name, args.task, every_hours=args.every_hours,
+                                   args=task_args, every_minutes=args.every_minutes)
         except ValueError as e:
             print(str(e), file=sys.stderr)
             return 2
-        print(f"已保存计划：{job['name']} task={job['task']} every={job['every_hours']}h")
+        every = (f"{job['every_minutes']:g}m" if job.get("every_minutes")
+                 else f"{job['every_hours']:g}h")
+        print(f"已保存计划：{job['name']} task={job['task']} every={every}")
         return 0
     if args.action == "remove":
         if not args.name:
@@ -4040,6 +4051,9 @@ def build_parser() -> argparse.ArgumentParser:
     psch.add_argument("name", nargs="?", help="set/remove 的计划名称")
     psch.add_argument("task", nargs="?", help="set/run 的任务：alert/weekly/eval/knowledge_sync/knowledge_quality")
     psch.add_argument("--every-hours", type=float, default=24.0)
+    psch.add_argument("--every-minutes", type=float, default=None,
+                      help="分钟级间隔（L1 巡检用，如 20）；传了则优先于 --every-hours")
+    psch.add_argument("--sid", help="store_l1 / store_l2 / store_daily 的店铺 SID")
     psch.add_argument("--limit", type=int, default=500)
     psch.add_argument("--notify", action="store_true", help="alert 任务完成后发送通知")
     psch.add_argument("--channel", choices=["stdout", "webhook", "feishu"], default="stdout")

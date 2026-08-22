@@ -12,7 +12,9 @@ from typing import Any
 from . import alerts, config, evals, knowledge_quality, knowledge_sync, notify, weekly_review
 
 SCHEDULE_FILE = config.IVYEA_DIR / "schedule.json"
-ALLOWED_TASKS = {"alert", "weekly", "eval", "knowledge_quality", "knowledge_sync"}
+ALLOWED_TASKS = {"alert", "weekly", "eval", "knowledge_quality", "knowledge_sync",
+                 # 店铺业务巡检（三层各自的节奏，见 store_health 的分层说明）
+                 "store_l1", "store_l2", "store_daily", "approvals_expire"}
 
 
 def _empty() -> dict[str, Any]:
@@ -35,7 +37,15 @@ def save(data: dict[str, Any]) -> None:
     SCHEDULE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def set_job(name: str, task: str, every_hours: float = 24.0, args: dict[str, Any] | None = None) -> dict[str, Any]:
+def set_job(name: str, task: str, every_hours: float = 24.0,
+            args: dict[str, Any] | None = None,
+            every_minutes: float | None = None) -> dict[str, Any]:
+    """注册/覆盖一个任务。
+
+    ``every_minutes`` 是为分钟级巡检加的：L1 每 20 分钟，写成 ``every_hours=0.333``
+    既不直观又会因四舍五入漂移。传了分钟就以分钟为准，同时回写等价的
+    ``every_hours`` 保持老读取方（IvyeaOps / 旧配置）兼容。
+    """
     if task not in ALLOWED_TASKS:
         raise ValueError(f"未知任务 {task}，可用：{', '.join(sorted(ALLOWED_TASKS))}")
     data = load()
@@ -43,11 +53,14 @@ def set_job(name: str, task: str, every_hours: float = 24.0, args: dict[str, Any
     job = {
         "name": name,
         "task": task,
-        "every_hours": float(every_hours or 24.0),
+        "every_hours": (float(every_minutes) / 60.0 if every_minutes
+                        else float(every_hours or 24.0)),
         "args": args or {},
         "last_run": 0.0,
         "enabled": True,
     }
+    if every_minutes:
+        job["every_minutes"] = float(every_minutes)
     jobs.append(job)
     data["jobs"] = sorted(jobs, key=lambda j: j["name"])
     save(data)
@@ -68,7 +81,10 @@ def due_jobs(now: float | None = None) -> list[dict[str, Any]]:
     for job in load()["jobs"]:
         if not job.get("enabled", True):
             continue
-        every = max(0.01, float(job.get("every_hours") or 24.0)) * 3600
+        if job.get("every_minutes"):
+            every = max(1.0, float(job["every_minutes"])) * 60
+        else:
+            every = max(0.01, float(job.get("every_hours") or 24.0)) * 3600
         if now - float(job.get("last_run") or 0) >= every:
             rows.append(job)
     return rows
@@ -88,6 +104,36 @@ def run_task(task: str, args: dict[str, Any] | None = None) -> tuple[bool, str]:
             if not result.get("ok"):
                 return False, f"{text}\n{notify.render_result(result)}\n"
         return True, text
+    if task in ("store_l1", "store_l2", "store_daily"):
+        from . import store_health
+        sid = args.get("sid")
+        if not sid:
+            return False, "店铺巡检任务缺少 sid 参数"
+        if task == "store_l1":
+            result = store_health.check_l1(sid)
+        elif task == "store_l2":
+            result = store_health.check_l2(sid)
+        else:
+            result = store_health.check_l3(sid, days=int(args.get("days") or 7),
+                                           include_optimizer=bool(
+                                               args.get("include_optimizer", True)))
+        text = store_health.render(result)
+        # 静默规则：无异常且无数据缺口时不推送，避免每 20 分钟刷屏。
+        # 早报例外——用户要的就是"每天确认一眼"。
+        quiet = (task != "store_daily" and not result.findings and not result.gaps)
+        if args.get("notify") and not quiet:
+            r = notify.send(text, title=str(args.get("title") or f"店铺巡检 {result.layer}"),
+                            channel=str(args.get("channel") or "stdout"),
+                            webhook_url=str(args.get("webhook_url") or ""))
+            if not r.get("ok"):
+                return False, f"{text}{notify.render_result(r)}\n"
+        return True, text
+
+    if task == "approvals_expire":
+        from . import approvals
+        n = approvals.expire_due()
+        return True, f"已把 {n} 条超期未处理的审批标记为 expired。\n"
+
     if task == "weekly":
         return True, weekly_review.render(weekly_review.build(limit=int(args.get("limit") or 200)))
     if task == "eval":
