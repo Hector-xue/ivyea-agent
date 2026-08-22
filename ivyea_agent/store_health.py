@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
 from . import metrics, snapshots
@@ -66,6 +66,7 @@ THRESHOLDS: dict[str, Any] = {
     "price.changed.pct": 0.05,            # 价格变动幅度
     "stock.fbm_low.days": 14.0,           # FBM 可供天数下限
     "buybox.crowded.sellers": 3.0,        # 跟卖卖家数达到此值视为拥挤
+    "variants.collapse.min": 3.0,         # 同母体 ASIN 的同类告警达到此数量则合并成一条
 }
 
 def threshold(key: str) -> Any:
@@ -146,6 +147,10 @@ class Finding:
     evidence: dict[str, Any] = field(default_factory=dict)
     provenance: str = ""
     intent: Optional[dict[str, Any]] = None
+    #: 同一件事的分组键（listing 类规则填母体 ASIN）。见 ``collapse_variants``。
+    group_id: str = ""
+    #: 合并后代表的变体数量；1 表示没被合并过。
+    group_size: int = 1
 
     @property
     def executable(self) -> bool:
@@ -171,9 +176,64 @@ class CheckResult:
     skipped: list[str] = field(default_factory=list)
     provenance: list[str] = field(default_factory=list)
     started_at: float = field(default_factory=time.time)
+    #: 出现缺口的**指标 key** → 原因。``gaps`` 是给人看的句子，这里是给代码用的。
+    #: 多店铺巡检要按指标维度判断"是这个店不支持，还是这个指标全线挂了"，
+    #: 靠正则从中文句子里抠 metric key 是自找麻烦。
+    gap_metrics: dict[str, str] = field(default_factory=dict)
+
+    def add_gap(self, result: "MetricResult") -> None:
+        """记一次取数缺口：人话进 ``gaps``，指标 key 进 ``gap_metrics``。"""
+        if result.gap is None:
+            return
+        self.gaps.append(result.gap.describe())
+        self.gap_metrics[result.gap.metric] = result.gap.reason
 
     def sorted_findings(self) -> list[Finding]:
         return sorted(self.findings, key=lambda f: (_SEV_RANK.get(f.severity, 9), f.code))
+
+
+def collapse_variants(findings: list[Finding]) -> list[Finding]:
+    """把同一母体 ASIN 下的同类告警合并成一条。
+
+    为什么需要：实测日本站一个母体 ASIN 挂着 30 个变体（同款不同尺寸/颜色），
+    评分都是 3.0 星。不合并的话，"这个款评分低"这一件事会被报成 24 条，
+    早报卡片直接被一个款刷满，别的店的问题就看不见了。
+
+    两条硬规则：
+    - **带 intent 的绝不合并**。那是会真去改钱的动作，一条 intent 对一个目标，
+      合并等于把 24 个写操作缩成 1 个按钮，点下去谁也说不清改了哪个。
+    - **不够 ``variants.collapse.min`` 条的不合并**。两三条变体照常逐条列出，
+      合并只用来治"一个款刷屏"，不是用来藏信息。
+    """
+    limit = int(threshold("variants.collapse.min"))
+    groups: dict[tuple[str, str], list[Finding]] = {}
+    passthrough: list[Finding] = []
+    for f in findings:
+        if f.intent is not None or not f.group_id:
+            passthrough.append(f)
+            continue
+        groups.setdefault((f.code, f.group_id), []).append(f)
+
+    out: list[Finding] = list(passthrough)
+    for (_code, group_id), items in groups.items():
+        if len(items) < limit:
+            out.extend(items)
+            continue
+        head = items[0]
+        worst = min(items, key=lambda x: _SEV_RANK.get(x.severity, 9))
+        merged = replace(
+            head,
+            severity=worst.severity,
+            target_id=group_id,
+            group_size=len(items),
+            message=f"{head.message}（同母体 {group_id} 下另有 {len(items) - 1} "
+                    f"个变体同样如此）",
+            evidence={**head.evidence, "variant_count": len(items),
+                      "parent_asin": group_id,
+                      "variants": [x.target_id for x in items[:10]]},
+        )
+        out.append(merged)
+    return out
 
 
 # ── 工具 ────────────────────────────────────────────────────────────────────
@@ -394,41 +454,60 @@ def _rule_campaign(res: CheckResult, camp: MetricResult) -> None:
 
 
 # ── 入口 ────────────────────────────────────────────────────────────────────
+#: 未开通广告的店铺跳过这些指标时给出的说法。
+ADS_NOT_ENABLED = "该店铺未在领星开通广告，广告类规则不适用"
+
+
+def ads_enabled(sid: Any) -> bool:
+    """该店是否开通广告。清单不可用时按"开通"处理，理由见 ``stores.supports_ads``。"""
+    from . import stores
+    return stores.supports_ads(sid)
+
+
 def check_l1(sid: Any) -> CheckResult:
     """L1 快照层巡检。当前走领星轮询；接入推送源后同一批规则自动升级（ADR-8/9）。"""
     from . import datasources
     datasources.install_defaults()
 
     res = CheckResult(sid=sid, layer="L1")
+    has_ads = ads_enabled(sid)
 
     inv = metrics.get_metric(metrics.INVENTORY_FBA.key, {"sid": sid})
     if inv.ok:
         res.provenance.append(f"{metrics.INVENTORY_FBA.key}：{_prov(inv)}")
         _rule_stock(res, inv)
     else:
-        res.gaps.append(inv.gap.describe())
+        res.add_gap(inv)
 
-    camp = metrics.get_metric(metrics.ADS_CAMPAIGN_CONFIG.key, {"sid": sid})
-    if camp.ok:
-        res.provenance.append(f"{metrics.ADS_CAMPAIGN_CONFIG.key}：{_prov(camp)}")
-        _rule_campaign(res, camp)
+    # 广告规则先问"这个店有没有广告"再取数。未开通的店调领星广告接口稳定返回
+    # code=102，那不是故障而是能力边界：记 skipped 不记 gap，否则连续失败计数器
+    # 会对这些店永远告警（且永远不会恢复）。顺带省掉一次注定失败的调用。
+    if not has_ads:
+        res.skipped.append(f"广告活动规则跳过：{ADS_NOT_ENABLED}")
     else:
-        res.gaps.append(camp.gap.describe())
+        camp = metrics.get_metric(metrics.ADS_CAMPAIGN_CONFIG.key, {"sid": sid})
+        if camp.ok:
+            res.provenance.append(f"{metrics.ADS_CAMPAIGN_CONFIG.key}：{_prov(camp)}")
+            _rule_campaign(res, camp)
+        else:
+            res.add_gap(camp)
 
     snap = metrics.get_metric(metrics.LISTING_SNAPSHOT.key, {"sid": sid})
     if snap.ok:
         res.provenance.append(f"{metrics.LISTING_SNAPSHOT.key}：{_prov(snap)}")
         _rule_listing(res, snap)
     else:
-        res.gaps.append(snap.gap.describe())
+        res.add_gap(snap)
 
     follow = metrics.get_metric(metrics.FOLLOW_SALE.key, {"sid": sid})
     if follow.ok:
         res.provenance.append(f"{metrics.FOLLOW_SALE.key}：{_prov(follow)}")
         _rule_follow_sale(res, follow)
     else:
-        res.gaps.append(follow.gap.describe())
+        res.add_gap(follow)
 
+    # 一个款 30 个变体会把同一件事报 24 遍，合并后才看得见别的店的问题
+    res.findings = collapse_variants(res.findings)
     return res
 
 
@@ -683,6 +762,7 @@ def check_l3(sid: Any, days: int = 7, *, include_optimizer: bool = True) -> Chec
 
     res = CheckResult(sid=sid, layer="L3")
     recent, base = _window_days(days)
+    has_ads = ads_enabled(sid)
 
     try:
         target_acos, _brk, _margin, acos_note = lingxing_optimizer.resolve_target_acos(int(sid))
@@ -690,14 +770,17 @@ def check_l3(sid: Any, days: int = 7, *, include_optimizer: bool = True) -> Chec
         target_acos, acos_note = 0.30, f"目标ACOS 推导失败（{exc}），暂用 30%"
         res.gaps.append(acos_note)
 
-    rep = metrics.get_metric(metrics.ADS_CAMPAIGN_REPORT.key, {"sid": sid},
-                            metrics.Window(tuple(base + recent)))
-    cfg = metrics.get_metric(metrics.ADS_CAMPAIGN_CONFIG.key, {"sid": sid})
-    if rep.ok:
-        res.provenance.append(f"{metrics.ADS_CAMPAIGN_REPORT.key}：{_prov(rep)}")
-        _rule_ads_l3(res, rep, cfg, recent, base, target_acos, acos_note)
+    if not has_ads:
+        res.skipped.append(f"广告日报表规则跳过：{ADS_NOT_ENABLED}")
     else:
-        res.gaps.append(rep.gap.describe())
+        rep = metrics.get_metric(metrics.ADS_CAMPAIGN_REPORT.key, {"sid": sid},
+                                metrics.Window(tuple(base + recent)))
+        cfg = metrics.get_metric(metrics.ADS_CAMPAIGN_CONFIG.key, {"sid": sid})
+        if rep.ok:
+            res.provenance.append(f"{metrics.ADS_CAMPAIGN_REPORT.key}：{_prov(rep)}")
+            _rule_ads_l3(res, rep, cfg, recent, base, target_acos, acos_note)
+        else:
+            res.add_gap(rep)
 
     cur_profit = metrics.get_metric(metrics.PROFIT_ASIN.key, {"sid": sid},
                                     metrics.Window(tuple(recent)))
@@ -707,9 +790,12 @@ def check_l3(sid: Any, days: int = 7, *, include_optimizer: bool = True) -> Chec
         res.provenance.append(f"{metrics.PROFIT_ASIN.key}：{_prov(cur_profit)}")
         _rule_profit_l3(res, cur_profit, old_profit, recent, base)
     else:
-        res.gaps.append(cur_profit.gap.describe())
+        res.add_gap(cur_profit)
 
-    if include_optimizer:
+    # 优化器的四根杠杆全在广告上，未开通广告的店没有可优化对象
+    if include_optimizer and not has_ads:
+        res.skipped.append(f"优化器候选跳过：{ADS_NOT_ENABLED}")
+    elif include_optimizer:
         _rule_optimizer(res, sid)
 
     return res
@@ -739,6 +825,11 @@ def check_l2(sid: Any) -> CheckResult:
     datasources.install_defaults()
 
     res = CheckResult(sid=sid, layer="L2")
+    # L2 的三条规则（花费突增/曝光归零/点击无单）全部建立在广告日内报表上，
+    # 未开通广告的店整层无从谈起——短路返回，别去撞一个必然失败的接口。
+    if not ads_enabled(sid):
+        res.skipped.append(f"L2 日内层整层跳过：{ADS_NOT_ENABLED}")
+        return res
     today = datetime.date.today().isoformat()
     yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
     base_days = [(datetime.date.today() - datetime.timedelta(days=d)).isoformat()
@@ -747,7 +838,7 @@ def check_l2(sid: Any) -> CheckResult:
     rep = metrics.get_metric(metrics.ADS_CAMPAIGN_REPORT.key, {"sid": sid},
                             metrics.Window((today,)))
     if not rep.ok:
-        res.gaps.append(rep.gap.describe())
+        res.add_gap(rep)
         return res
     res.provenance.append(f"{metrics.ADS_CAMPAIGN_REPORT.key}（当日）：{_prov(rep)}")
 
@@ -901,9 +992,13 @@ def daily_summary(sid: Any, *, days: int = 1) -> dict[str, Any]:
     lines: list[str] = []
     out: dict[str, Any] = {}
 
-    rep = metrics.get_metric(metrics.ADS_CAMPAIGN_REPORT.key, {"sid": sid},
-                             metrics.Window(tuple(base + recent)))
-    if rep.ok and rep.rows:
+    has_ads = ads_enabled(sid)
+    rep = (metrics.get_metric(metrics.ADS_CAMPAIGN_REPORT.key, {"sid": sid},
+                              metrics.Window(tuple(base + recent)))
+           if has_ads else None)
+    if not has_ads:
+        lines.append(f"**广告**　{ADS_NOT_ENABLED}")
+    elif rep.ok and rep.rows:
         cur = _agg_rows(rep.rows, "campaign_id", set(recent))
         old = _agg_rows(rep.rows, "campaign_id", set(base))
 
@@ -1038,6 +1133,9 @@ def _rule_listing(res: CheckResult, snap: MetricResult) -> None:
         name = r.get("title") or r.get("asin") or msku
         short = name[:28] + ("…" if len(str(name)) > 28 else "")
         ch = changes.get(msku, {})
+        # 变体合并用的分组键：同一个款的 N 个尺寸/颜色共享母体 ASIN。
+        # 独立商品的 parent_asin 等于自身 asin，天然自成一组（组内 1 条，不会被合并）。
+        group = str(r.get("parent_asin") or r.get("asin") or "")
 
         # 1. 状态跃迁：在售 → 停售
         if "status_text" in ch:
@@ -1050,7 +1148,7 @@ def _rule_listing(res: CheckResult, snap: MetricResult) -> None:
                     message=f"「{short}」({r.get('asin')}) 由「在售」变为「{after}」",
                     evidence={"status_before": before, "status_after": after,
                               "asin": r.get("asin"), "price": r.get("price")},
-                    provenance=prov))
+                    provenance=prov, group_id=group))
             elif str(after) == "在售" and str(before) != "在售":
                 res.findings.append(Finding(
                     code="listing.reactivated", layer="L1", severity=INFO,
@@ -1058,7 +1156,7 @@ def _rule_listing(res: CheckResult, snap: MetricResult) -> None:
                     target_id=msku, target_name=short, metric="status_text",
                     message=f"「{short}」已恢复在售（原「{before}」）",
                     evidence={"status_before": before, "status_after": after},
-                    provenance=prov))
+                    provenance=prov, group_id=group))
 
         # 2. 评分偏低（无评分的不报——大量新品没有评价）
         stars, reviews = float(r.get("stars") or 0), float(r.get("reviews") or 0)
@@ -1074,7 +1172,7 @@ def _rule_listing(res: CheckResult, snap: MetricResult) -> None:
                         f"{threshold('listing.rating_low.stars')} 星",
                 evidence={"stars": stars, "reviews": reviews,
                           "asin": r.get("asin"), "price": r.get("price")},
-                provenance=prov))
+                provenance=prov, group_id=group))
 
         # 3. 评分下滑
         if "stars" in ch:
@@ -1089,7 +1187,7 @@ def _rule_listing(res: CheckResult, snap: MetricResult) -> None:
                             f"建议查最近的差评",
                     evidence={"stars_before": before, "stars_after": after,
                               "reviews": reviews, "asin": r.get("asin")},
-                    provenance=prov))
+                    provenance=prov, group_id=group))
 
         # 4. 排名恶化（rank 数值越大越差）
         if "rank" in ch:
@@ -1105,7 +1203,7 @@ def _rule_listing(res: CheckResult, snap: MetricResult) -> None:
                             f"（恶化 {_pct_change(after, before):+.0%}）",
                     evidence={"rank_before": before, "rank_after": after,
                               "asin": r.get("asin")},
-                    provenance=prov))
+                    provenance=prov, group_id=group))
 
         # 5. 价格被外部改动
         if "price" in ch:
@@ -1120,7 +1218,7 @@ def _rule_listing(res: CheckResult, snap: MetricResult) -> None:
                             f"（{_pct_change(after, before):+.0%}）{r.get('currency') or ''}",
                     evidence={"price_before": before, "price_after": after,
                               "currency": r.get("currency"), "asin": r.get("asin")},
-                    provenance=prov))
+                    provenance=prov, group_id=group))
 
         # 6. 有销量的突然断单
         avg7 = float(r.get("avg_volume_7") or 0)
@@ -1133,7 +1231,7 @@ def _rule_listing(res: CheckResult, snap: MetricResult) -> None:
                 message=f"「{short}」昨日 0 单（近 7 日均 {avg7:.1f} 单/天）",
                 evidence={"avg_volume_7": avg7, "volume_7": r.get("volume_7"),
                           "asin": r.get("asin"), "status": r.get("status_text")},
-                provenance=prov))
+                provenance=prov, group_id=group))
 
         # 7. FBM 可供天数不足（长尾零销量的不算）
         if r.get("channel") == "FBM" and avg7 > 0:
@@ -1149,7 +1247,7 @@ def _rule_listing(res: CheckResult, snap: MetricResult) -> None:
                             f"按近 7 日均销 {avg7:.1f}/天只够 {days:.1f} 天",
                     evidence={"quantity": r.get("quantity"), "avg_volume_7": avg7,
                               "days_left": round(days, 1), "asin": r.get("asin")},
-                    provenance=prov))
+                    provenance=prov, group_id=group))
 
     snapshots.save(res.sid, "listing", rows, "msku")
 

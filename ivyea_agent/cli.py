@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from . import __version__, config, ui
 # chat 展示层 helper 已拆到 chat_ui.py；re-export 保持 cli.X 引用与既有测试兼容。
@@ -1199,35 +1200,123 @@ def _cmd_lingxing(args: argparse.Namespace) -> int:
     return 2
 
 
+def _store_target_args(args: argparse.Namespace) -> dict[str, Any]:
+    """把命令行参数翻译成 ``stores.resolve_targets`` 认的形状。"""
+    out: dict[str, Any] = {}
+    if getattr(args, "all_stores", False):
+        out["sids"] = "all"
+    elif getattr(args, "sids", ""):
+        out["sids"] = [v.strip() for v in str(args.sids).split(",") if v.strip()]
+    elif getattr(args, "sid", ""):
+        out["sid"] = args.sid
+    if getattr(args, "exclude_sids", ""):
+        out["exclude_sids"] = [v.strip() for v in str(args.exclude_sids).split(",") if v.strip()]
+    return out
+
+
+def _store_health_multi(args: argparse.Namespace, targets: list[dict[str, Any]],
+                        layer: str) -> int:
+    """多店巡检：逐店隔离执行，任一店异常不影响其余店。"""
+    from . import store_health
+
+    results: list[dict[str, Any]] = []
+    failed = 0
+    for store in targets:
+        sid = store.get("sid")
+        name = str(store.get("name") or f"sid {sid}")
+        try:
+            if layer == "l1":
+                r = store_health.check_l1(sid)
+            elif layer == "l2":
+                r = store_health.check_l2(sid)
+            else:
+                r = store_health.check_l3(sid, days=int(args.days or 7),
+                                          include_optimizer=not args.no_optimizer)
+        except Exception as exc:  # noqa: BLE001 —— 逐店隔离
+            failed += 1
+            results.append({"sid": sid, "name": name, "error": f"{type(exc).__name__}: {exc}"})
+            if not args.json:
+                print(f"—— {name}（sid {sid}）——\n  ! 巡检异常：{type(exc).__name__}: {exc}\n")
+            continue
+        results.append({"sid": sid, "name": name, "result": r})
+        if not args.json:
+            print(f"—— {name}（sid {sid}）——")
+            print(store_health.render(r), end="")
+            print()
+
+    if args.json:
+        import dataclasses
+        print(json.dumps([
+            {"sid": x["sid"], "name": x["name"], "error": x["error"]} if "error" in x else
+            {"sid": x["sid"], "name": x["name"], "layer": x["result"].layer,
+             "findings": [dataclasses.asdict(f) for f in x["result"].sorted_findings()],
+             "gaps": x["result"].gaps, "skipped": x["result"].skipped,
+             "provenance": x["result"].provenance}
+            for x in results], ensure_ascii=False, indent=2))
+    else:
+        total = sum(len(x["result"].findings) for x in results if "result" in x)
+        print(f"== {len(targets)} 个店铺，异常合计 {total} 条，"
+              f"取数失败 {failed} 个店 ==")
+    return 1 if failed else 0
+
+
 def _cmd_store(args: argparse.Namespace) -> int:
     """店铺业务巡检（L1 快照层）。只读，不写任何广告配置。"""
-    from . import store_health
-    if args.action != "health":
-        print("用法：ivyea store health --sid <SID> [--layer l1] [--json]", file=sys.stderr)
-        return 2
-    if not args.sid:
-        from . import lingxing_datasets
+    from . import store_health, stores
+
+    if args.action == "list":
         try:
-            sellers = lingxing_datasets.list_sellers()
+            rows = stores.list_stores(force=bool(getattr(args, "refresh", False)),
+                                      include_inactive=True)
         except Exception as exc:  # noqa: BLE001
-            print(f"未指定 --sid，且拉取店铺列表失败：{exc}", file=sys.stderr)
+            print(f"拉取店铺列表失败：{exc}", file=sys.stderr)
             return 1
-        print("未指定 --sid。可用店铺：", file=sys.stderr)
-        for x in sellers:
-            print(f"  {x.get('sid')}  {x.get('name')}  {x.get('country')}", file=sys.stderr)
+        print(f"共 {len(rows)} 个店铺：")
+        for x in rows:
+            flags = []
+            if int(x.get("status") or 0) != stores.STATUS_ACTIVE:
+                flags.append("非在营")
+            if not x.get("has_ads"):
+                flags.append("未开通广告")
+            tail = f"  [{'/'.join(flags)}]" if flags else ""
+            print(f"  {x.get('sid'):<6} {x.get('name'):<12} {x.get('region'):<4}"
+                  f" {x.get('country')}{tail}")
+        return 0
+
+    if args.action != "health":
+        print("用法：ivyea store health --sid <SID> [--layer l1] [--json]\n"
+              "  或：ivyea store health --all-stores [--layer l1]\n"
+              "  或：ivyea store list", file=sys.stderr)
         return 2
 
     layer = (args.layer or "l1").lower()
-    if layer == "l1":
-        result = store_health.check_l1(args.sid)
-    elif layer == "l2":
-        result = store_health.check_l2(args.sid)
-    elif layer == "l3":
-        result = store_health.check_l3(args.sid, days=int(args.days or 7),
-                                       include_optimizer=not args.no_optimizer)
-    else:
+    if layer not in ("l1", "l2", "l3"):
         print(f"未知巡检层 {layer}。可用：l1（快照）/ l2（日内）/ l3（隔日）", file=sys.stderr)
         return 2
+
+    targets = stores.resolve_targets(_store_target_args(args))
+    if not targets:
+        try:
+            rows = stores.list_stores(include_inactive=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"未指定 --sid，且拉取店铺列表失败：{exc}", file=sys.stderr)
+            return 1
+        print("未指定 --sid / --sids / --all-stores。可用店铺：", file=sys.stderr)
+        for x in rows:
+            print(f"  {x.get('sid')}  {x.get('name')}  {x.get('country')}", file=sys.stderr)
+        return 2
+
+    if len(targets) > 1:
+        return _store_health_multi(args, targets, layer)
+
+    sid = targets[0].get("sid")
+    if layer == "l1":
+        result = store_health.check_l1(sid)
+    elif layer == "l2":
+        result = store_health.check_l2(sid)
+    else:
+        result = store_health.check_l3(sid, days=int(args.days or 7),
+                                       include_optimizer=not args.no_optimizer)
     if args.push:
         from . import patrol_push
         pushed = patrol_push.push_result(result, chat_id=args.chat_id or "",
@@ -3510,7 +3599,8 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         if not args.name or not args.task:
             print("用法: ivyea schedule set <名称> <任务> [--every-hours 24 | --every-minutes 20]\n"
                   f"可用任务：{', '.join(sorted(schedule.ALLOWED_TASKS))}\n"
-                  "店铺巡检任务需 --sid，例：ivyea schedule set l1 store_l1 --every-minutes 20 --sid 1863",
+                  "店铺巡检任务需 --sid / --sids / --all-stores，例：\n"
+                  "  ivyea schedule set l1 store_l1 --every-minutes 20 --all-stores",
                   file=sys.stderr)
             return 2
         try:
@@ -3528,10 +3618,12 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
             elif args.limit != 500:
                 task_args = {"limit": args.limit}
             if args.task in ("store_l1", "store_l2", "store_daily"):
-                if not args.sid:
-                    print("店铺巡检任务需要 --sid <SID>。", file=sys.stderr)
+                target = _store_target_args(args)
+                if not target.get("sid") and not target.get("sids"):
+                    print("店铺巡检任务需要 --sid <SID>、--sids <逗号分隔> "
+                          "或 --all-stores。", file=sys.stderr)
                     return 2
-                task_args["sid"] = args.sid
+                task_args.update(target)
             job = schedule.set_job(args.name, args.task, every_hours=args.every_hours,
                                    args=task_args, every_minutes=args.every_minutes)
         except ValueError as e:
@@ -3576,6 +3668,9 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
             task_args = {"force": bool(args.force)}
         elif args.limit != 500:
             task_args = {"limit": args.limit}
+        # 店铺巡检任务的目标店铺（run 一次性执行也要能指定，不只是 set 落盘时）
+        if task in ("store_l1", "store_l2", "store_daily"):
+            task_args.update(_store_target_args(args))
         ok, text = schedule.run_task(task, task_args)
         print(text)
         return 0 if ok else 1
@@ -4030,8 +4125,16 @@ def build_parser() -> argparse.ArgumentParser:
     pscore.set_defaults(func=_cmd_scorecard)
 
     pstore = sub.add_parser("store", help="店铺业务巡检：health（L1 库存/广告配置快照层，只读）")
-    pstore.add_argument("action", choices=["health"])
+    pstore.add_argument("action", choices=["health", "list"])
     pstore.add_argument("--sid", help="店铺 SID；不传则列出可用店铺")
+    pstore.add_argument("--sids", default="",
+                        help="多个店铺 SID，逗号分隔（如 1863,1872）")
+    pstore.add_argument("--all-stores", action="store_true",
+                        help="巡检全部在营店铺")
+    pstore.add_argument("--exclude-sids", default="",
+                        help="从目标中排除的 SID，逗号分隔")
+    pstore.add_argument("--refresh", action="store_true",
+                        help="list 时强制重拉店铺清单（默认走 6 小时缓存）")
     pstore.add_argument("--layer", default="l1",
                         help="巡检层：l1 快照层（默认）/ l2 日内层 / l3 隔日层")
     pstore.add_argument("--days", type=int, default=7, help="l3 的窗口天数（默认 7）")
@@ -4148,6 +4251,12 @@ def build_parser() -> argparse.ArgumentParser:
     psch.add_argument("--every-minutes", type=float, default=None,
                       help="分钟级间隔（L1 巡检用，如 20）；传了则优先于 --every-hours")
     psch.add_argument("--sid", help="store_l1 / store_l2 / store_daily 的店铺 SID")
+    psch.add_argument("--sids", default="",
+                      help="多个店铺 SID，逗号分隔；写 all 表示全部在营店铺")
+    psch.add_argument("--all-stores", action="store_true",
+                      help="该巡检任务覆盖全部在营店铺（等价于 --sids all）")
+    psch.add_argument("--exclude-sids", default="",
+                      help="从目标中排除的 SID，逗号分隔")
     psch.add_argument("--limit", type=int, default=500)
     psch.add_argument("--notify", action="store_true", help="alert 任务完成后发送通知")
     psch.add_argument("--channel", choices=["stdout", "webhook", "feishu", "feishu_app"], default="stdout")

@@ -169,7 +169,11 @@ class LingxingMcpSource:
             "quantity": num(r.get("quantity")),
             "fulfillable": num(r.get("afn_fulfillable_quantity")),
             "volume_yesterday": num(r.get("yesterday_volume")),
-            "volume_7": num(r.get("seven_volume")),
+            # 领星 erp_listing 返回 116 个字段，其中**没有 seven_volume**——
+            # 有 yesterday/fourteen/thirty/total_volume，唯独跳过了 7 日。
+            # 但它给了 average_seven_volume，所以 7 日销量由日均反推。
+            # （原先直接读 seven_volume，该字段不存在，volume_7 恒为 0。）
+            "volume_7": num(r.get("seven_volume")) or num(r.get("average_seven_volume")) * 7,
             "volume_30": num(r.get("thirty_volume")),
             "avg_volume_7": num(r.get("average_seven_volume")),
             "avg_volume_30": num(r.get("average_thirty_volume")),

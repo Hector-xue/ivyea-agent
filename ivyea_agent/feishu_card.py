@@ -32,6 +32,8 @@ ACTION_APPROVE_ALL_CONFIRM = "approve_all_confirm"
 ACTION_OPERATE_ON = "operate_on"
 
 _SEV_TEMPLATE = {"crit": "red", "warn": "orange", "info": "blue"}
+#: 跨店合并时要自己排序（单店卡片拿到的已经是 sorted_findings 的结果）
+_SEV_RANK_ORDER = {"crit": 0, "warn": 1, "info": 2}
 _SEV_ICON = {"crit": "🚨", "warn": "⚠️", "info": "ℹ️"}
 _CLASS_LABEL = {"stanch": "止血", "structural": "结构", "advisory": "建议"}
 
@@ -269,6 +271,116 @@ def build_daily_card(*, date: str, store_name: str, metrics_lines: Iterable[str]
         elements.append(_md(f"[查看完整报告]({report_url})"))
 
     return _card(_header(f"📊 店铺日报 · {date} · {store_name}", "blue"), elements)
+
+
+# ── 多店铺汇总早报 ──────────────────────────────────────────────────────────
+def multi_store_key(finding: Any) -> str:
+    """多店场景下定位一条 Finding 的键。**必须带 sid。**
+
+    单店卡片用的是 ``target_id|code``，跨店合并时那个键会撞车：实测同一批货铺
+    11 个欧洲站，UK 与 DE 之间有 112 个 MSKU 完全同名，
+    ``L4-NDXL-BULA|listing.rating_low`` 在两个店里长得一模一样。
+    键一撞，卡片上「批准 3」绑的就可能是另一个国家的那条建议——
+    那是会真去改钱的按钮，不能靠运气。
+    """
+    return (f"{getattr(finding, 'sid', '')}|{getattr(finding, 'target_id', '')}"
+            f"|{getattr(finding, 'code', '')}")
+
+
+
+def build_multi_store_daily_card(*, date: str, stores: Iterable[dict[str, Any]],
+                                 approval_ids: Optional[dict[str, str]] = None,
+                                 report_url: str = "",
+                                 max_alerts: int = 8,
+                                 max_actions: int = 5) -> dict[str, Any]:
+    """一张卡装下所有店铺的早报。
+
+    ``stores`` 每项：``{name, sid, metrics_lines, findings, gaps}``。
+
+    为什么不是每店一张卡：11 个店就是每天早上 11 条推送，人会直接把这个群静音，
+    然后真出事的那张卡也一起看不见了。汇总成一张之后，**每店一行状态**用于扫读，
+    异常与待决定跨店合并按严重度排序——需要动手的东西永远在同一个位置。
+
+    单店时仍走 ``build_daily_card``（指标明细更全），这里只服务多店。
+    """
+    approval_ids = approval_ids or {}
+    rows = list(stores)
+    elements: list[dict[str, Any]] = []
+
+    all_findings: list[tuple[str, Any]] = []
+    all_gaps: list[str] = []
+    lines: list[str] = []
+    for r in rows:
+        name = str(r.get("name") or f"sid {r.get('sid')}")
+        fs = list(r.get("findings") or [])
+        gaps = list(r.get("gaps") or [])
+        all_findings.extend((name, f) for f in fs)
+        all_gaps.extend(f"{name}：{g}" for g in gaps)
+        crit = sum(1 for f in fs if str(getattr(f, "severity", "")) == "crit")
+        warn = sum(1 for f in fs if str(getattr(f, "severity", "")) == "warn")
+        # 状态图标按最坏的一条走：扫一眼就知道今天该先看哪个店
+        icon = "🚨" if crit else ("⚠️" if warn else ("📭" if gaps else "✅"))
+        bits = []
+        if crit:
+            bits.append(f"紧急 {crit}")
+        if warn:
+            bits.append(f"注意 {warn}")
+        if gaps:
+            bits.append(f"缺口 {len(gaps)}")
+        head = str((r.get("metrics_lines") or [""])[0]).replace("**", "")
+        lines.append(f"{icon} **{name}**　{'　'.join(bits) if bits else '正常'}"
+                     + (f"\n　　{head}" if head else ""))
+    elements.append(_md("\n".join(lines) if lines else "_无店铺_"))
+
+    def _rank(item: tuple[str, Any]) -> int:
+        return _SEV_RANK_ORDER.get(str(getattr(item[1], "severity", "info")), 9)
+
+    all_findings.sort(key=_rank)
+    actionable = [(n, f) for n, f in all_findings if getattr(f, "intent", None)]
+    alerts = [(n, f) for n, f in all_findings if not getattr(f, "intent", None)]
+
+    if alerts:
+        elements.append(_hr())
+        body = [f"**异常 {len(alerts)} 条**"]
+        for name, f in alerts[:max_alerts]:
+            body.append(f"{_SEV_ICON.get(str(getattr(f, 'severity', 'info')), '')} "
+                        f"[{name}] {getattr(f, 'message', '')}")
+        if len(alerts) > max_alerts:
+            body.append(f"…另有 {len(alerts) - max_alerts} 条")
+        elements.append(_md("\n".join(body)))
+
+    buttons: list[dict[str, Any]] = []
+    if actionable:
+        elements.append(_hr())
+        body = [f"**待你决定 {len(actionable)} 条**"]
+        for i, (name, f) in enumerate(actionable[:max_actions], 1):
+            cls = _CLASS_LABEL.get(str(getattr(f, "action_class", "advisory")), "建议")
+            body.append(f"{i}. [{cls}][{name}] {getattr(f, 'message', '')}")
+            aid = approval_ids.get(multi_store_key(f))
+            if aid:
+                buttons.append(_button(f"批准 {i}", ACTION_APPROVE, aid, "primary"))
+        if len(actionable) > max_actions:
+            body.append(f"…另有 {len(actionable) - max_actions} 条，"
+                        f"用 `ivyea approval list` 查看")
+        elements.append(_md("\n".join(body)))
+        if buttons:
+            row = buttons[:4]
+            if len(buttons) > 1:
+                row.append(_bare_button(f"全部批准（{len(buttons)}）",
+                                        ACTION_APPROVE_ALL, "danger"))
+            elements.append(_actions(row))
+
+    if all_gaps:
+        elements.append(_hr())
+        elements.append(_md("**数据缺口**（这些规则本次没跑）\n"
+                            + "\n".join(f"- {g}" for g in all_gaps[:6])
+                            + (f"\n…另有 {len(all_gaps) - 6} 条" if len(all_gaps) > 6 else "")))
+    if report_url:
+        elements.append(_md(f"[查看完整报告]({report_url})"))
+
+    worst = min((_rank(i) for i in all_findings), default=9)
+    template = {0: "red", 1: "orange"}.get(worst, "blue")
+    return _card(_header(f"📊 每日早报 · {date} · {len(rows)} 个店铺", template), elements)
 
 
 # ── 回调后的原地替换卡片 ────────────────────────────────────────────────────

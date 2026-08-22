@@ -38,6 +38,7 @@ def ivyea_home(monkeypatch):
                 # 下面这些同样在模块级绑定 config.IVYEA_DIR；不重载会跨用例泄漏，
                 # 甚至写到真实 ~/.ivyea（用 grep "= config.IVYEA_DIR /" 可复查）
                 "ivyea_agent.log", "ivyea_agent.schedule", "ivyea_agent.workspace",
+                "ivyea_agent.stores",
                 "ivyea_agent.self_manage", "ivyea_agent.task_runner",
                 "ivyea_agent.code_agent", "ivyea_agent.tools_general",
                 "ivyea_agent.traces", "ivyea_agent.policy"):

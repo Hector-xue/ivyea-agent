@@ -35,6 +35,7 @@ git log 记得住「改了什么」，记不住「为什么不选另一条路」
 | [0015](./0015-web-login-for-subscription-providers.md) | 订阅制 provider 的登录开成 HTTP，凭据不出服务端 | 2026-08-21 |
 | [0016](./0016-subprocess-env-allowlist.md) | 子进程环境走白名单；许可证定为 MIT | 2026-08-22 |
 | [0017](./0017-store-patrol-and-approval-loop.md) | 店铺巡检分层；证据门槛由动作可逆性决定；审批状态归 agent | 2026-08-22 |
+| [0018](./0018-multi-store-patrol.md) | 多店铺巡检：能力边界不算故障；变体合并后再推送 | 2026-08-23 |
 
 相关的工作台侧决策见
 [IvyeaOps 的 ADR 目录](https://github.com/Hector-xue/IvyeaOps/tree/main/docs/decisions)，
