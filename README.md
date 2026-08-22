@@ -385,7 +385,8 @@ ivyea mcp doctor            # 检查 transport / dataSource / writeActions / 安
 > ivyea mcp env 某服务器 --set KEY=值         # 或者直接给值
 > ```
 > `ivyea mcp add` 新加的服务器会问一句需要哪些变量，**默认就是收紧的**。
-> 升级上来的老服务器保持原样，不会因为升级突然不工作。
+> **升级上来的老服务器一律保持原样**（只有写了 `"inherit_env": false` 才收紧），
+> 不需要任何设置，不会因为升级突然不工作。
 >
 > hook 同理，`~/.ivyea/hooks.json` 的条目支持同样三个字段。
 

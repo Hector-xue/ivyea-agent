@@ -742,6 +742,9 @@ def _mcp_add_wizard() -> int:
         print("  例：GITHUB_TOKEN,HTTPS_PROXY —— 会从当前环境取值传给它")
         names = _ask("需要的变量名", "") or ""
         wanted = [n.strip() for n in names.replace("，", ",").split(",") if n.strip()]
+        # 显式写 False：新加的服务器从此默认收紧，而升级上来的老服务器
+        # （没有这个键）保持继承，不受影响。
+        spec["inherit_env"] = False
         spec["env_passthrough"] = wanted
         missing = [n for n in wanted if not os.environ.get(n)]
         if missing:
@@ -766,11 +769,12 @@ def _mcp_add_wizard() -> int:
 
 
 def _mcp_env_policy_label(spec: dict) -> str:
-    """一个 stdio 服务器当前的环境策略，给人看的一句话。"""
-    if not any(k in spec for k in ("env", "env_passthrough", "inherit_env")):
-        return "全部（升级前配的，未收紧）"
-    if spec.get("inherit_env"):
-        return "全部（已显式放开）"
+    """一个 stdio 服务器当前的环境策略，给人看的一句话。
+
+    只看 `inherit_env`：没写 = 继承（默认，也是升级前的行为）。
+    """
+    if spec.get("inherit_env", True):
+        return "全部（未收紧）"
     named = list(spec.get("env") or {}) + list(spec.get("env_passthrough") or [])
     return ("受限 + " + ",".join(named)) if named else "受限"
 
@@ -782,9 +786,7 @@ def _print_mcp_env_advice() -> None:
     """
     servers = config.load_mcp().get("mcpServers", {})
     loose = [n for n, sp in servers.items()
-             if sp.get("transport") == "stdio"
-             and (sp.get("inherit_env")
-                  or not any(k in sp for k in ("env", "env_passthrough", "inherit_env")))]
+             if sp.get("transport") == "stdio" and sp.get("inherit_env", True)]
     if not loose:
         return
     print("\n── 环境变量 ──")
@@ -792,7 +794,7 @@ def _print_mcp_env_advice() -> None:
     print("  （各家 API key、领星凭据都在里面）：")
     for n in loose:
         print(f"    · {n}")
-    print("\n  它们是升级前配好的，为了不打断你现在的使用保持了原样。")
+    print("\n  这是默认行为，也是升级前的行为 —— 保持原样是为了不打断你现在的使用。")
     print("  想收紧就跑（会只保留白名单，再按需加回）：")
     print(f"    ivyea mcp env {loose[0]} --secure")
     print(f"    ivyea mcp env {loose[0]} --pass 某个变量名     # 再放行需要的")
@@ -819,14 +821,13 @@ def _cmd_mcp_env(args: argparse.Namespace) -> int:
         spec["inherit_env"] = True
         changed = True
     if args.secure:
-        spec.pop("inherit_env", None)
-        spec.setdefault("env_passthrough", [])   # 留个显式表态，不然又回到"未收紧"
+        # 必须显式写 False —— 删掉这个键等于回到"继承全部"的默认。
+        spec["inherit_env"] = False
         changed = True
     for item in (args.env_pass or []):
         keys = spec.setdefault("env_passthrough", [])
         if item not in keys:
             keys.append(item)
-        spec.pop("inherit_env", None)
         changed = True
     for item in (args.env_set or []):
         if "=" not in item:
@@ -834,7 +835,6 @@ def _cmd_mcp_env(args: argparse.Namespace) -> int:
             return 2
         k, _, v = item.partition("=")
         spec.setdefault("env", {})[k.strip()] = v
-        spec.pop("inherit_env", None)
         changed = True
     for item in (args.env_unset or []):
         if item in (spec.get("env") or {}):
@@ -861,8 +861,7 @@ def _cmd_mcp_env(args: argparse.Namespace) -> int:
         print("  直接给定：")
         for k in given:
             print(f"    · {k} = ***")
-    declared = any(k in spec for k in ("env", "env_passthrough", "inherit_env"))
-    if not declared or spec.get("inherit_env"):
+    if spec.get("inherit_env", True):
         # 别在这里写"只给白名单" —— 这两种情况恰恰是全都给。
         print("  ⚠️ 它能读到本机全部环境变量（各家 API key 都在里面）")
         print(f"     收紧：ivyea mcp env {name} --secure")
