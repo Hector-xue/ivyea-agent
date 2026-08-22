@@ -199,7 +199,9 @@ def resolve_target_acos(sid: int) -> tuple[float, Optional[float], Optional[floa
 
 def run_store(sid: int, days: Optional[int] = None, progress: Optional[Callable] = None) -> dict[str, Any]:
     """对一个店铺跑只读规则引擎，返回 {sid, window_days, margin, target_acos, candidates...}。"""
-    factor = _f(_cfg("lingxing_target_acos_factor")) or 0.7
+    # 目标 ACOS 相关的三个配置（factor / target_acos_override / margin_override）
+    # 已收进 resolve_target_acos()，这里不再各读一遍 —— 读了不用是死代码，
+    # 更糟的是给人"这里还有一套推导"的错觉。
     neg_clicks = int(_cfg("lingxing_neg_min_clicks") or 15)
     bid_clicks = int(_cfg("lingxing_bid_min_clicks") or 15)
     scale_orders = int(_cfg("lingxing_scale_min_orders") or 3)
@@ -209,8 +211,6 @@ def run_store(sid: int, days: Optional[int] = None, progress: Optional[Callable]
     cooldown = int(_cfg("lingxing_cooldown_days") or 7)
     excl = int(_cfg("lingxing_opt_exclude_recent_days") or 2)
     win = int(days or _cfg("lingxing_opt_window_days") or 30)
-    t_over = _f(_cfg("lingxing_target_acos_override"))
-    m_over = _f(_cfg("lingxing_margin_override"))
     dates = _window_dates(win, excl)
 
     target, breakeven, margin, note = resolve_target_acos(sid)

@@ -1,7 +1,6 @@
 """审批状态机测试 —— 安全攸关，重点在「一次性消费」和「非法跃迁」。"""
 from __future__ import annotations
 
-import time
 
 import pytest
 

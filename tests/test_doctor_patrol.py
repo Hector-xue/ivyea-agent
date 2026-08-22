@@ -1,7 +1,6 @@
 """doctor 对巡检/飞书子系统的体检，以及 approval cancel。"""
 from __future__ import annotations
 
-import pytest
 
 
 def _finding(**over):
