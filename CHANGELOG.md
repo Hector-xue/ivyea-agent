@@ -10,6 +10,49 @@
 
 ---
 
+## [未发布]
+
+### 新增
+
+- **店铺业务巡检**。`ivyea store health --sid <SID> [--layer l1|l2|l3]`。
+  过去 `ivyea alert` 检的是 agent 自己（队列积压、trace 失败），
+  现在有了检**店铺**的：库存断货 / 可供天数不足 / 不可售激增 / 活动被暂停 /
+  预算被外部改动 / 花费突增 / 曝光归零 / ACOS 超标 / 销量断崖 / 毛利率下滑…
+  共 17 条规则，按数据新鲜度分三层跑（快照 20 分钟 · 日内 1 小时 · 隔日每天）。
+
+- **飞书闭环**。异常推成交互卡片，点「批准执行」直接改领星，卡片原地变绿显示
+  审计号并给出回滚按钮。相关命令：`ivyea approval list/show/approve/deny/execute/rollback`。
+  接收端是独立的 `feishu-ivyea-relay` 服务（长连接，不需要开放任何公网端口）。
+
+- **每日早报**。昨日广告/店铺/库存指标 + 环比 + 异常 + 待你决定的建议，一张卡片。
+
+- **定时巡检**。`ivyea schedule set <名> store_l1 --every-minutes 20 --sid <SID>`，
+  配合 `deploy/systemd/ivyea-schedule.timer`。`schedule set` 新增 `--every-minutes`
+  ——分钟级任务写成 `--every-hours 0.333` 既不直观又会漂移。
+
+- **飞书通知通道 `feishu_app`**。走应用身份发交互卡片（原有的 `feishu` 是群机器人
+  webhook 纯文本，保留作兜底）。`ivyea notify test --channel feishu_app`。
+
+- **阈值可在飞书里当场调**。`/threshold` 查看，`/threshold <键> <值>` 修改，
+  改完立刻生效不用重启。写错键名会直接报错，不会静默用默认值。
+
+### 变更
+
+- 巡检发现的问题带**溯源**：每条告警都标明「来源 X · 延迟 Y · N 行」，
+  你能判断该多信任它。取不到数时报「数据缺口」而不是静默返回「无异常」
+  ——「没告警」不能等于「没问题」。
+
+- 告警有降级链：应用卡片发不出去时退到群机器人 webhook；两条都失败时
+  把每条通道的原因都列出来。
+
+### 修复
+
+- 测试隔离：`intraday`/`log`/`schedule`/`workspace`/`self_manage`/`task_runner`/
+  `code_agent`/`tools_general` 共 8 个模块在模块级绑定 `config.IVYEA_DIR`
+  却不在 conftest 重载列表里，跑测试会跨用例泄漏、甚至写到真实 `~/.ivyea`。
+
+---
+
 ## [v1.15.9] - 2026-08-22
 
 ### 修复
