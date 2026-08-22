@@ -33,6 +33,8 @@
   `"env": {"KEY": "${KEY}"}` 或 `"env_passthrough": ["KEY"]`；实在理不清可以先用
   `"inherit_env": true` 退回旧行为。
 
+  取舍与代价见 [ADR-0016](docs/decisions/0016-subprocess-env-allowlist.md)。
+
 ### 修复
 
 - **`mcp.json` 里的 `env` 字段此前被静默忽略**。`MCPClient` 根本没读它，配了也不生效
