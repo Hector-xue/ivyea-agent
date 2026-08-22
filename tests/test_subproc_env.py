@@ -14,6 +14,7 @@ DEEPSEEK_API_KEY、领星凭据等等。自己配一两个服务器时没人注�
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
@@ -134,7 +135,8 @@ def test_mcp_stdio_actually_spawns_with_scrubbed_env(tmp_path):
         "import os,sys\n"
         f"open({str(out)!r},'w').write(repr(dict(os.environ)))\n",
         encoding="utf-8")
-    c = MCPClient({"transport": "stdio", "command": "python3",
+    # 用 sys.executable 而不是写死 "python3" —— Windows 上没有 python3 这个名字。
+    c = MCPClient({"transport": "stdio", "command": sys.executable,
                    "args": [str(script)], "env": {"GIVEN": "yes"}})
     proc = c._ensure_stdio()          # noqa: SLF001 — 就是要验这一层
     proc.wait(timeout=20)
