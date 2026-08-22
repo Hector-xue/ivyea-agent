@@ -100,9 +100,10 @@ def execute_approved(approval_id: str, *, operator: str = "",
     # 闸 5：写开关。关着时**保持 approved**，不判失败 —— 用户的批准意愿仍然有效，
     # 开关补开后可以直接重试，不必重新发一遍卡片。
     if not lingxing_write.operate_active():
-        detail = ("领星写开关未开启，已记为待执行。"
-                  "开启后可重试：`ivyea lingxing operate on` 然后 `ivyea approval execute <ID>`")
-        card = feishu_card.build_text_card("⏸ 待执行", detail, template="orange")
+        detail = ("领星写开关未开启，已记为**待执行**。\n\n"
+                  "点下面的按钮当场开启（带自动失效），或在终端执行："
+                  "`ivyea lingxing operate on` 后 `ivyea approval execute <ID>`")
+        card = feishu_card.build_operate_off_card(detail)
         if update_card:
             _update_card(appr, card)
         return {"ok": False, "reason": "operate_off", "state": approvals.APPROVED,
@@ -199,3 +200,88 @@ def status(approval_id: str) -> Optional[dict[str, Any]]:
             "created_at": a.created_at, "expires_at": a.expires_at,
             "resolved_by": a.resolved_by, "audit_id": a.audit_id,
             "detail": a.detail}
+
+
+# ── P6 打磨：卡片上的非审批动作 ─────────────────────────────────────────────
+def approve_all(message_id: str, *, operator: str = "", chat_id: str = "",
+                confirm: bool = False, limit: int = 20) -> dict[str, Any]:
+    """批量批准同一张卡片上的待审批项。
+
+    **必须二次确认**：一次点击执行 N 个写操作，风险与收益不对称。
+    第一次点击只返回确认卡，第二次（confirm=True）才真执行。
+    """
+    pending = [a for a in approvals.list_items(state=approvals.PENDING, limit=200)
+               if a.message_id == message_id]
+    if chat_id:
+        pending = [a for a in pending if not a.chat_id or a.chat_id == chat_id]
+    pending = pending[:limit]
+    if not pending:
+        return {"ok": False, "reason": "nothing_pending",
+                "detail": "这张卡片上没有待处理的项了",
+                "card": feishu_card.build_text_card("ℹ️ 无待处理项",
+                                                    "这张卡片上的建议都已经处理过了。")}
+
+    if not confirm:
+        lines = [f"即将批准 **{len(pending)}** 条动作：", ""]
+        lines += [f"{i}. {a.preview}" for i, a in enumerate(pending, 1)]
+        lines.append("")
+        lines.append("确认后会依次执行。每条仍各自过幅度硬闸，执行后可单独回滚。")
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text",
+                                 "content": f"⚠️ 确认批量批准 {len(pending)} 条"},
+                       "template": "orange"},
+            "elements": [
+                {"tag": "markdown", "content": "\n".join(lines)},
+                {"tag": "action", "actions": [
+                    {"tag": "button", "type": "danger",
+                     "text": {"tag": "plain_text", "content": f"确认批准 {len(pending)} 条"},
+                     "value": {"ivyea_action": "approve_all_confirm",
+                               "message_id": message_id}},
+                ]},
+            ],
+        }
+        return {"ok": True, "reason": "need_confirm", "count": len(pending),
+                "detail": f"待确认 {len(pending)} 条", "card": card}
+
+    results = []
+    for a in pending:
+        r = resolve(a.id, "approve", operator=operator, chat_id=chat_id,
+                    update_card=False)
+        results.append({"id": a.id, "ok": bool(r.get("ok")),
+                        "state": r.get("state", ""), "detail": r.get("detail", ""),
+                        "preview": a.preview})
+    done = sum(1 for r in results if r["ok"])
+    lines = [f"批量执行完成：成功 **{done}** / {len(results)}", ""]
+    for r in results:
+        mark = "✅" if r["ok"] else "⚠️"
+        lines.append(f"{mark} {r['preview']}　— {r['detail'] or r['state']}")
+    card = feishu_card.build_text_card(
+        f"{'✅' if done == len(results) else '⚠️'} 批量执行 {done}/{len(results)}",
+        "\n".join(lines), template="green" if done == len(results) else "orange")
+    return {"ok": True, "count": len(results), "done": done,
+            "results": results, "card": card}
+
+
+def set_operate(minutes: int = 120, *, operator: str = "") -> dict[str, Any]:
+    """开启领星写开关（带 TTL 自动失效）。
+
+    做成卡片按钮是因为：用户在手机上收到告警、点了批准，却被"写开关未开"挡住时，
+    唯一的出路不该是"你去登服务器敲命令"。
+    """
+    from . import lingxing_write
+
+    minutes = max(1, min(int(minutes or 120), 480))
+    lingxing_write.set_operate(True, ttl_minutes=minutes)
+    detail = f"领星写开关已开启，{minutes} 分钟后自动关闭。"
+    card = feishu_card.build_text_card(
+        "🔓 写开关已开启",
+        f"{detail}\n\n操作人：{operator or '未知'}\n\n"
+        f"期间被批准的动作会真实写入领星；每条仍过幅度硬闸，执行后可回滚。",
+        template="orange")
+    return {"ok": True, "detail": detail, "expires_in_minutes": minutes, "card": card}
+
+
+def operate_status() -> dict[str, Any]:
+    from . import lingxing_write
+    return {"ok": True, "active": bool(lingxing_write.operate_active())}

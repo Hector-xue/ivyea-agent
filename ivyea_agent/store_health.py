@@ -60,6 +60,59 @@ THRESHOLDS: dict[str, Any] = {
     "l2.baseline_min_days": 3,            # 同时段基线所需的最少历史天数
 }
 
+def threshold(key: str) -> Any:
+    """读阈值。settings 里的 ``store_thresholds`` 覆盖默认值。
+
+    做成函数而不是直接读常量，是为了让阈值能在飞书里当场调（方案 P6），
+    调完立刻生效、不用改代码重启。未知 key 直接抛错，避免手滑写错键名后
+    静默用了默认值还以为改成功了。
+    """
+    if key not in THRESHOLDS:
+        raise KeyError(f"未知阈值：{key}")
+    from . import config
+    override = (config.load_settings().get("store_thresholds") or {}).get(key)
+    return THRESHOLDS[key] if override is None else override
+
+
+def set_threshold(key: str, value: Any) -> Any:
+    """改阈值并落盘。返回生效值。"""
+    if key not in THRESHOLDS:
+        raise KeyError(f"未知阈值：{key}")
+    from . import config
+    default = THRESHOLDS[key]
+    try:
+        value = type(default)(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} 需要 {type(default).__name__} 类型") from exc
+    settings = config.load_settings()
+    store = dict(settings.get("store_thresholds") or {})
+    store[key] = value
+    settings["store_thresholds"] = store
+    config.save_settings(settings)
+    return value
+
+
+def reset_threshold(key: str = "") -> int:
+    """清除覆盖，回到默认。不传 key 则全部清除。返回清掉的条数。"""
+    from . import config
+    settings = config.load_settings()
+    store = dict(settings.get("store_thresholds") or {})
+    n = len(store) if not key else (1 if store.pop(key, None) is not None else 0)
+    if not key:
+        store = {}
+    settings["store_thresholds"] = store
+    config.save_settings(settings)
+    return n
+
+
+def threshold_table() -> list[dict[str, Any]]:
+    """当前所有阈值 + 是否被覆盖。飞书里 /threshold 不带参数时展示。"""
+    from . import config
+    store = config.load_settings().get("store_thresholds") or {}
+    return [{"key": k, "default": v, "current": store.get(k, v),
+             "overridden": k in store} for k, v in sorted(THRESHOLDS.items())]
+
+
 #: 视为「投放受阻」的 serving_status 关键字（大写匹配）。
 _BLOCKED_SERVING = ("OUT_OF_BUDGET", "OUT OF BUDGET")
 
@@ -202,13 +255,13 @@ def _rule_stock(res: CheckResult, inv: MetricResult) -> None:
                            "inbound_receiving", "reserved", "days_of_supply")},
                 provenance=prov))
         # 2. 可供天数不足
-        elif dos > 0 and dos < THRESHOLDS["stock.days_low.days"]:
-            sev = CRIT if dos < THRESHOLDS["stock.days_low.crit_days"] else WARN
+        elif dos > 0 and dos < threshold("stock.days_low.days"):
+            sev = CRIT if dos < threshold("stock.days_low.crit_days") else WARN
             res.findings.append(Finding(
                 code="stock.days_low", layer="L1", severity=sev, action_class=ADVISORY,
                 sid=res.sid, scope="msku", target_id=msku, target_name=name,
                 metric="days_of_supply", current=dos,
-                baseline=THRESHOLDS["stock.days_low.days"],
+                baseline=threshold("stock.days_low.days"),
                 message=f"「{name}」({msku}) 可供 {dos:.1f} 天，低于 "
                         f"{THRESHOLDS['stock.days_low.days']:.0f} 天阈值",
                 evidence={k: r.get(k) for k in
@@ -218,8 +271,8 @@ def _rule_stock(res: CheckResult, inv: MetricResult) -> None:
         # 3. 不可售激增（需基线）
         if msku in prev_unsellable:
             before = float(prev_unsellable[msku] or 0)
-            if (unsellable >= THRESHOLDS["stock.unsellable_spike.min_qty"]
-                    and _pct_change(unsellable, before) >= THRESHOLDS["stock.unsellable_spike.pct"]):
+            if (unsellable >= threshold("stock.unsellable_spike.min_qty")
+                    and _pct_change(unsellable, before) >= threshold("stock.unsellable_spike.pct")):
                 res.findings.append(Finding(
                     code="stock.unsellable_spike", layer="L1", severity=WARN,
                     action_class=ADVISORY, sid=res.sid, scope="msku",
@@ -240,7 +293,7 @@ def _rule_stock(res: CheckResult, inv: MetricResult) -> None:
                 provenance=prov))
 
         # 5. 冗余库存
-        if excess >= THRESHOLDS["stock.excess.min_qty"]:
+        if excess >= threshold("stock.excess.min_qty"):
             res.findings.append(Finding(
                 code="stock.excess", layer="L1", severity=INFO, action_class=ADVISORY,
                 sid=res.sid, scope="msku", target_id=msku, target_name=name,
@@ -269,7 +322,7 @@ def _rule_campaign(res: CheckResult, camp: MetricResult) -> None:
         serving = str(r.get("serving_status") or "").upper()
         if any(k in serving for k in _BLOCKED_SERVING):
             budget = float(r.get("daily_budget") or 0)
-            new_budget = round(budget * (1 + THRESHOLDS["stanch.max_change_pct"]), 2)
+            new_budget = round(budget * (1 + threshold("stanch.max_change_pct")), 2)
             res.findings.append(Finding(
                 code="ads.campaign_out_of_budget", layer="L1", severity=WARN,
                 action_class=STANCH, sid=res.sid, scope="campaign",
@@ -315,7 +368,7 @@ def _rule_campaign(res: CheckResult, camp: MetricResult) -> None:
 
         elif c.field == "daily_budget":
             before, after = float(c.before or 0), float(c.after or 0)
-            if abs(_pct_change(after, before)) < THRESHOLDS["ads.budget_changed_externally.min_pct"]:
+            if abs(_pct_change(after, before)) < threshold("ads.budget_changed_externally.min_pct"):
                 continue
             if _own_write_recently(c.entity_id):
                 continue
@@ -438,19 +491,19 @@ def _rule_ads_l3(res: CheckResult, rep: MetricResult, cfg: MetricResult,
     if not budgets:
         res.skipped.append("预算打满规则跳过：未取到活动配置（拿不到日预算做分母）")
 
-    breach_factor = THRESHOLDS["ads.acos_breach.factor"]
+    breach_factor = threshold("ads.acos_breach.factor")
     for cid, b in cur.items():
         name = str((budgets.get(cid) or {}).get("name") or cid)
         d = _derive(b)
         spend = b["spend"]
 
         # 1. ACOS 超标
-        if spend >= THRESHOLDS["ads.acos_breach.min_spend"] and d["has_sales"] \
+        if spend >= threshold("ads.acos_breach.min_spend") and d["has_sales"] \
                 and d["acos"] > target_acos * breach_factor:
             budget = float((budgets.get(cid) or {}).get("daily_budget") or 0)
             intent = None
             if budget > 0:
-                new_budget = round(budget * (1 - THRESHOLDS["stanch.max_change_pct"]), 2)
+                new_budget = round(budget * (1 - threshold("stanch.max_change_pct")), 2)
                 intent = {"op_type": "campaign_budget", "sid": res.sid, "target_id": cid,
                           "target_name": name,
                           "change": {"daily_budget": new_budget},
@@ -469,9 +522,9 @@ def _rule_ads_l3(res: CheckResult, rep: MetricResult, cfg: MetricResult,
 
         # 2. CPC 跳涨且转化未改善 —— 真正的杠杆在关键词 bid，交给优化器，这里只报
         ob = old.get(cid)
-        if ob and b["clicks"] >= THRESHOLDS["ads.cpc_jump.min_clicks"]:
+        if ob and b["clicks"] >= threshold("ads.cpc_jump.min_clicks"):
             od = _derive(ob)
-            if od["cpc"] > 0 and _pct_change(d["cpc"], od["cpc"]) >= THRESHOLDS["ads.cpc_jump.pct"] \
+            if od["cpc"] > 0 and _pct_change(d["cpc"], od["cpc"]) >= threshold("ads.cpc_jump.pct") \
                     and d["cvr"] <= od["cvr"]:
                 res.findings.append(Finding(
                     code="ads.cpc_jump", layer="L3", severity=WARN, action_class=ADVISORY,
@@ -490,9 +543,9 @@ def _rule_ads_l3(res: CheckResult, rep: MetricResult, cfg: MetricResult,
         if conf and b["days"]:
             budget = float(conf.get("daily_budget") or 0)
             daily_spend = spend / b["days"]
-            if budget > 0 and daily_spend >= budget * THRESHOLDS["ads.budget_capped.ratio"] \
+            if budget > 0 and daily_spend >= budget * threshold("ads.budget_capped.ratio") \
                     and d["has_sales"] and d["acos"] < target_acos:
-                new_budget = round(budget * (1 + THRESHOLDS["stanch.max_change_pct"]), 2)
+                new_budget = round(budget * (1 + threshold("stanch.max_change_pct")), 2)
                 res.findings.append(Finding(
                     code="ads.budget_capped", layer="L3", severity=INFO, action_class=STANCH,
                     sid=res.sid, scope="campaign", target_id=cid, target_name=name,
@@ -527,8 +580,8 @@ def _rule_profit_l3(res: CheckResult, cur: MetricResult, old: MetricResult,
         if not p:
             continue
         sales, base_sales = float(r.get("sales_amount") or 0), float(p.get("sales_amount") or 0)
-        if base_sales >= THRESHOLDS["sales.drop.min_baseline"] \
-                and sales < base_sales * THRESHOLDS["sales.drop.ratio"]:
+        if base_sales >= threshold("sales.drop.min_baseline") \
+                and sales < base_sales * threshold("sales.drop.ratio"):
             res.findings.append(Finding(
                 code="sales.drop", layer="L3", severity=CRIT, action_class=ADVISORY,
                 sid=res.sid, scope="asin", target_id=asin, target_name=asin,
@@ -544,7 +597,7 @@ def _rule_profit_l3(res: CheckResult, cur: MetricResult, old: MetricResult,
         # 领星毛利率可能以百分数返回（如 23.5 表示 23.5%），统一折算成小数再比
         if rate > 1 or base_rate > 1:
             rate, base_rate = rate / 100.0, base_rate / 100.0
-        if base_rate and (base_rate - rate) >= THRESHOLDS["profit.margin_erosion.pp"]:
+        if base_rate and (base_rate - rate) >= threshold("profit.margin_erosion.pp"):
             res.findings.append(Finding(
                 code="profit.margin_erosion", layer="L3", severity=WARN, action_class=ADVISORY,
                 sid=res.sid, scope="asin", target_id=asin, target_name=asin,
@@ -645,7 +698,7 @@ def _budget_intent(sid: Any, cid: str, name: str, budget: float,
                    direction: int = -1) -> Optional[dict[str, Any]]:
     if budget <= 0:
         return None
-    pct = THRESHOLDS["stanch.max_change_pct"] * direction
+    pct = threshold("stanch.max_change_pct") * direction
     return {"op_type": "campaign_budget", "sid": sid, "target_id": cid,
             "target_name": name,
             "change": {"daily_budget": round(budget * (1 + pct), 2)},
@@ -693,7 +746,7 @@ def check_l2(sid: Any) -> CheckResult:
         if not y:
             continue
         if float(r.get("impressions") or 0) <= 0 \
-                and y["impressions"] >= THRESHOLDS["ads.impression_zero.min_yesterday"]:
+                and y["impressions"] >= threshold("ads.impression_zero.min_yesterday"):
             name = str((conf.get(cid) or {}).get("name") or cid)
             res.findings.append(Finding(
                 code="ads.impression_zero", layer="L2", severity=CRIT,
@@ -715,8 +768,8 @@ def check_l2(sid: Any) -> CheckResult:
         if not h or not h.get("days"):
             continue
         avg_clicks = h["clicks"] / h["days"]
-        if clicks >= THRESHOLDS["ads.click_no_order.min_clicks"] and orders <= 0 \
-                and avg_clicks > 0 and clicks >= avg_clicks * THRESHOLDS["ads.click_no_order.factor"]:
+        if clicks >= threshold("ads.click_no_order.min_clicks") and orders <= 0 \
+                and avg_clicks > 0 and clicks >= avg_clicks * threshold("ads.click_no_order.factor"):
             c = conf.get(cid) or {}
             name = str(c.get("name") or cid)
             res.findings.append(Finding(
@@ -757,13 +810,13 @@ def _rule_spend_burst(res: CheckResult, sid: Any, sample: Any,
 
     from . import intraday
     hour = _t.localtime().tm_hour
-    factor = THRESHOLDS["ads.spend_burst.factor"]
+    factor = threshold("ads.spend_burst.factor")
 
     for d in sample.deltas:
-        if d.seconds < THRESHOLDS["l2.min_gap_minutes"] * 60:
+        if d.seconds < threshold("l2.min_gap_minutes") * 60:
             continue          # 采样间隔太短，增量全是噪声
         spend_delta = d.values.get("spend", 0.0)
-        if spend_delta < THRESHOLDS["ads.spend_burst.min_spend"]:
+        if spend_delta < threshold("ads.spend_burst.min_spend"):
             continue
 
         c = conf.get(d.entity_id) or {}
@@ -773,7 +826,7 @@ def _rule_spend_burst(res: CheckResult, sid: Any, sample: Any,
 
         base = intraday.hourly_baseline(
             sid, "campaign", d.entity_id, hour, exclude_day=today,
-            min_days=int(THRESHOLDS["l2.baseline_min_days"]))
+            min_days=int(threshold("l2.baseline_min_days")))
         if base:
             baseline_rate = base["spend"]
             basis = f"同时段历史均值（{hour:02d} 点）"
@@ -789,7 +842,7 @@ def _rule_spend_burst(res: CheckResult, sid: Any, sample: Any,
         # 订单同步增长则不是"烧钱"，是"卖爆了"
         order_delta = d.values.get("orders", 0.0)
         base_orders = base["orders"] if base else 0.0
-        if base_orders > 0 and order_delta >= base_orders * THRESHOLDS["ads.spend_burst.order_tolerance"]:
+        if base_orders > 0 and order_delta >= base_orders * threshold("ads.spend_burst.order_tolerance"):
             continue
 
         res.findings.append(Finding(
@@ -873,7 +926,7 @@ def daily_summary(sid: Any, *, days: int = 1) -> dict[str, Any]:
             oos = sum(1 for r in fba if float(r.get("fulfillable") or 0) <= 0)
             low = sum(1 for r in fba
                       if 0 < float(r.get("days_of_supply") or 0)
-                      < THRESHOLDS["stock.days_low.days"])
+                      < threshold("stock.days_low.days"))
             out.update({"fba_skus": len(fba), "oos": oos, "low": low})
             lines.append(f"**库存**　FBA {len(fba)} 个 MSKU　断货 {oos}　"
                          f"可供 <{THRESHOLDS['stock.days_low.days']:.0f} 天 {low}")

@@ -1928,6 +1928,55 @@ def feishu_approval_rollback(payload: dict[str, Any]) -> tuple[int, dict[str, An
     return 200, result
 
 
+def feishu_action(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """卡片上不绑定单个 approval 的动作（方案 P6）：
+    批量批准（带二次确认）、开写开关、调阈值。
+
+    与 /v1/feishu/approval/* 分开，是因为它们不走审批状态机 ——
+    塞进 resolve 里会让那条安全攸关的路径多出几个分支。
+    """
+    from . import approval_flow, store_health
+
+    action = str(payload.get("action") or "").strip()
+    operator = str(payload.get("operator_open_id") or "")
+    chat_id = str(payload.get("chat_id") or "")
+
+    if action in ("approve_all", "approve_all_confirm"):
+        message_id = str(payload.get("message_id") or "").strip()
+        if not message_id:
+            return 400, {"ok": False, "error": "approve_all 需要 message_id"}
+        result = approval_flow.approve_all(
+            message_id, operator=operator, chat_id=chat_id,
+            confirm=(action == "approve_all_confirm"))
+        return 200, result
+
+    if action == "operate_on":
+        return 200, approval_flow.set_operate(
+            minutes=int(payload.get("minutes") or 120), operator=operator)
+
+    if action == "operate_status":
+        return 200, approval_flow.operate_status()
+
+    if action == "threshold_list":
+        return 200, {"ok": True, "thresholds": store_health.threshold_table()}
+
+    if action == "threshold_set":
+        key = str(payload.get("key") or "").strip()
+        try:
+            value = store_health.set_threshold(key, payload.get("value"))
+        except KeyError as exc:
+            return 404, {"ok": False, "error": str(exc)}
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
+        return 200, {"ok": True, "key": key, "value": value}
+
+    if action == "threshold_reset":
+        n = store_health.reset_threshold(str(payload.get("key") or ""))
+        return 200, {"ok": True, "reset": n}
+
+    return 400, {"ok": False, "error": f"未知动作：{action}"}
+
+
 def feishu_approval_get(approval_id: str) -> tuple[int, dict[str, Any]]:
     from . import approval_flow
 
@@ -2305,6 +2354,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/feishu/approval/resolve":
             code, data = feishu_approval_resolve(body)
+            self._json(code, data)
+            return
+        if parsed.path == "/v1/feishu/action":
+            code, data = feishu_action(body)
             self._json(code, data)
             return
         if parsed.path == "/v1/feishu/approval/rollback":

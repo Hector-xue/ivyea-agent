@@ -25,6 +25,11 @@ ACTION_APPROVE = "approve"
 ACTION_DENY = "deny"
 ACTION_ROLLBACK = "rollback"
 ACTION_DETAIL = "detail"
+#: 批量批准与开写开关不带 approval_id —— 前者由 relay 用「被点的那张卡的 message_id」
+#: 定位（发卡前拿不到 message_id，硬塞会是鸡生蛋），后者是全局开关。
+ACTION_APPROVE_ALL = "approve_all"
+ACTION_APPROVE_ALL_CONFIRM = "approve_all_confirm"
+ACTION_OPERATE_ON = "operate_on"
 
 _SEV_TEMPLATE = {"crit": "red", "warn": "orange", "info": "blue"}
 _SEV_ICON = {"crit": "🚨", "warn": "⚠️", "info": "ℹ️"}
@@ -48,6 +53,15 @@ def _button(label: str, action: str, approval_id: str,
         "type": btn_type,
         "value": {"ivyea_action": action, "approval_id": str(approval_id)},
     }
+
+
+def _bare_button(label: str, action: str, btn_type: str = "default",
+                 **extra: Any) -> dict[str, Any]:
+    """不绑定具体 approval 的按钮（批量批准 / 开写开关）。"""
+    value: dict[str, Any] = {"ivyea_action": action}
+    value.update(extra)
+    return {"tag": "button", "text": {"tag": "plain_text", "content": label},
+            "type": btn_type, "value": value}
 
 
 def _actions(buttons: list[dict[str, Any]]) -> dict[str, Any]:
@@ -196,7 +210,11 @@ def build_alert_card(findings: Iterable[Any], *, sid: Any = "", store_name: str 
         elements.append(_md(f"_…另有 {len(findings) - max_items} 条，详见完整报告。_"))
     if buttons:
         elements.append(_hr())
-        elements.append(_actions(buttons[:5]))     # 飞书单行按钮不宜过多
+        row = buttons[:4]
+        if len(approval_ids) > 1:
+            row.append(_bare_button(f"全部批准（{len(approval_ids)}）",
+                                    ACTION_APPROVE_ALL, "danger"))
+        elements.append(_actions(row))             # 飞书单行按钮不宜过多
     if not findings:
         elements.append(_md("本次巡检未发现异常。"))
 
@@ -237,7 +255,11 @@ def build_daily_card(*, date: str, store_name: str, metrics_lines: Iterable[str]
                 buttons.append(_button(f"批准 {i}", ACTION_APPROVE, aid, "primary"))
         elements.append(_md("\n".join(body)))
         if buttons:
-            elements.append(_actions(buttons))
+            row = buttons[:4]
+            if len(buttons) > 1:
+                row.append(_bare_button(f"全部批准（{len(buttons)}）",
+                                        ACTION_APPROVE_ALL, "danger"))
+            elements.append(_actions(row))
 
     if gaps:
         elements.append(_hr())
@@ -294,6 +316,16 @@ def build_rolled_back_card(*, preview: str, operator: str,
     return _card(_header("↩️ 已回滚", "turquoise"), elements)
 
 
+def build_operate_off_card(detail: str, *, minutes: int = 120) -> dict[str, Any]:
+    """写开关未开时的卡片。给一个当场开开关的按钮 ——
+    用户在手机上被挡住时，出路不该是"你去登服务器敲命令"。"""
+    return _card(_header("⏸ 待执行（写开关未开）", "orange"), [
+        _md(detail),
+        _actions([_bare_button(f"开启写开关 {minutes} 分钟", ACTION_OPERATE_ON,
+                               "primary", minutes=minutes)]),
+    ])
+
+
 def build_text_card(title: str, body: str, *, template: str = "blue") -> dict[str, Any]:
     """纯文本卡片（降级路径、系统提示用）。超长自动只取首片，其余由调用方续发。"""
     parts = chunk(body)
@@ -306,6 +338,7 @@ def parse_action_value(value: Any) -> tuple[str, str]:
     if not isinstance(value, dict):
         return "", ""
     action = str(value.get("ivyea_action") or "")
-    if action not in (ACTION_APPROVE, ACTION_DENY, ACTION_ROLLBACK, ACTION_DETAIL):
+    if action not in (ACTION_APPROVE, ACTION_DENY, ACTION_ROLLBACK, ACTION_DETAIL,
+                      ACTION_APPROVE_ALL, ACTION_APPROVE_ALL_CONFIRM, ACTION_OPERATE_ON):
         return "", ""
     return action, str(value.get("approval_id") or "")
