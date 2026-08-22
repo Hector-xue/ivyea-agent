@@ -11,9 +11,11 @@ description = "Ivyea Agent — 自托管的亚马逊运营 CLI Agent（对话式
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "Hector" }]
+license = { text = "MIT" }
 keywords = ["amazon", "advertising", "agent", "cli", "llm", "deepseek", "claude"]
 classifiers = [
     "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
     "Operating System :: OS Independent",

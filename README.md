@@ -374,7 +374,19 @@ ivyea mcp add / list / tools <名称> / call <名称> <工具> --args '{...}'
 ivyea mcp doctor            # 检查 transport / dataSource / writeActions / 安全风险
 ```
 
-配置写 `~/.ivyea/mcp.json`（权限 600），由你配的 `dataSource` 映射驱动、不绑死厂商工具名。对话里 agent 能自主 `mcp_list_tools` / `mcp_call_tool` 等：计划模式拒绝写、标 `"trusted": true` 免审、否则逐次审批。
+配置写 `~/.ivyea/mcp.json`（权限 600），由你配的 `dataSource` 映射驱动、不绑死厂商工具名。
+
+> **stdio server 的环境变量**：子进程只拿到一份白名单（`PATH`/`HOME`/`LANG`/`TZ`/`TEMP` 等通用项），
+> 本机的 API key 不会漏给它。服务器需要什么就在它自己的条目里写：
+> ```jsonc
+> { "transport": "stdio", "command": "gh-mcp",
+>   "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" },   // ${VAR} 从父环境取
+>   "env_passthrough": ["HTTPS_PROXY"],             // 原样带过去（上面的简写）
+>   "inherit_env": false }                          // true = 整份继承（旧行为，不推荐）
+> ```
+> hook 同理，`~/.ivyea/hooks.json` 的条目支持同样三个字段。
+
+对话里 agent 能自主 `mcp_list_tools` / `mcp_call_tool` 等：计划模式拒绝写、标 `"trusted": true` 免审、否则逐次审批。
 
 **反过来 Ivyea Agent 也能作为只读 MCP server**（`ivyea mcp serve`），把知识卡暴露为 resources、Skill 暴露为 prompts、只读能力暴露为 tools，供其它 MCP 客户端接入；不暴露任何写 / 执行能力。
 
@@ -452,6 +464,14 @@ ivyea self status / backup / upgrade / uninstall   # 安装识别 / 备份 / 升
 - [docs/IvyeaAgent产品化路线图.md](docs/IvyeaAgent产品化路线图.md) —— 产品规划
 
 如有问题，欢迎到 [Issues](https://github.com/Hector-xue/ivyea-agent/issues) 反馈，或扫码进群交流。
+
+---
+
+## 许可证
+
+[MIT](LICENSE) © 2026 Hector
+
+可以自由使用、修改、分发，包括商用；保留版权声明即可。
 
 ---
 

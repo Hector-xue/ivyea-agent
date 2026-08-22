@@ -33,6 +33,7 @@ git log 记得住「改了什么」，记不住「为什么不选另一条路」
 | [0013](./0013-attachments-belong-to-the-user-message.md) | 调用方给的附图内容并进 user 消息，不放 system | 2026-08-21 |
 | [0014](./0014-per-turn-model-override.md) | 主脑可以按轮次覆盖，覆盖失败绝不回落 | 2026-08-21 |
 | [0015](./0015-web-login-for-subscription-providers.md) | 订阅制 provider 的登录开成 HTTP，凭据不出服务端 | 2026-08-21 |
+| [0016](./0016-subprocess-env-allowlist.md) | 子进程环境走白名单；许可证定为 MIT | 2026-08-22 |
 
 相关的工作台侧决策见
 [IvyeaOps 的 ADR 目录](https://github.com/Hector-xue/IvyeaOps/tree/main/docs/decisions)，

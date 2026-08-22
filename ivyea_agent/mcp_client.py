@@ -15,6 +15,8 @@ from typing import Any, Optional
 
 import httpx
 
+from . import subproc_env
+
 
 class MCPError(Exception):
     pass
@@ -35,6 +37,12 @@ class MCPClient:
         self.url: str = spec.get("url", "")
         self.headers: dict[str, str] = dict(spec.get("headers") or {})
         self.query: dict[str, str] = dict(spec.get("query") or {})
+        # stdio 子进程的环境。此前这三个字段一个都没读 —— mcp.json 里早就写着
+        # env 的服务器（如 sellersprite）其实一直没拿到密钥，只是因为多数
+        # server 到真正调用工具时才校验，list_tools 能过，所以没人发现。
+        self.env: dict[str, Any] = dict(spec.get("env") or {})
+        self.env_passthrough: list[str] = [str(k) for k in (spec.get("env_passthrough") or [])]
+        self.inherit_env: bool = bool(spec.get("inherit_env"))
         self.timeout = timeout
         self.session_id: Optional[str] = None
         self._id = 0
@@ -88,6 +96,18 @@ class MCPClient:
             raise MCPError(f"MCP 错误：{data['error']}")
         return data.get("result")
 
+    def child_env(self) -> dict[str, str]:
+        """stdio server 子进程的环境：白名单 + 本服务器显式声明的那些。
+
+        独立成方法而不是内联进 Popen，是为了能单独测 —— 直接断言"密钥不在里面"
+        比起一个进程再去读它自己的环境要可靠得多。
+        """
+        return subproc_env.build_env(
+            self.env,
+            passthrough=self.env_passthrough,
+            inherit_all=self.inherit_env,
+        )
+
     def _ensure_stdio(self) -> subprocess.Popen:
         if self._proc and self._proc.poll() is None:
             return self._proc
@@ -100,6 +120,8 @@ class MCPClient:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                # 不带 env= 的话子进程会拿到父进程全部环境（含各家 API key）。
+                env=self.child_env(),
             )
         except OSError as exc:
             raise MCPError(f"stdio 启动失败：{exc}") from exc
