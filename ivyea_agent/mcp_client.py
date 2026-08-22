@@ -42,20 +42,20 @@ class MCPClient:
         # server 到真正调用工具时才校验，list_tools 能过，所以没人发现。
         self.env: dict[str, Any] = dict(spec.get("env") or {})
         self.env_passthrough: list[str] = [str(k) for k in (spec.get("env_passthrough") or [])]
-        # 三个字段**一个都没写**时继承全部环境，也就是保持这些字段存在之前的行为。
+        # **只有 `inherit_env: false` 才收紧。** 没写就继承全部环境，也就是
+        # 这些字段存在之前的行为；`env` / `env_passthrough` 一律是**叠加**。
         #
-        # 这条不是图省事，是 v1.15.7 的教训：那一版直接把默认切成了白名单，结果
-        # 升级前配好的 server 立刻拿不到它依赖的变量 —— 而报错是**第三方 server
-        # 自己发的**（"XXX_KEY 未设置"），用户去查自己的密钥配置，明明配了，
-        # 根本猜不到是升级导致的。面向运营人员的产品，不能靠"你去改一下 JSON"收场。
+        # 为什么不能拿"写过 env"当收紧信号（v1.15.8 的错）：`env` 这个字段在
+        # v1.15.7 之前是**被静默忽略**的。用户在 mcp.json 里写它的时候，
+        # 既不知道有"收紧"这回事，也没打算收紧 —— 他只是想给服务器加一个变量，
+        # 而那个服务器同时还在靠 shell / systemd 里的其它变量工作。
+        # 把"写过 env"读成"要收紧"，等于替他做了一个他从没做过的决定。
         #
-        # 所以安全是**渐进**拿到的：老配置原样跑；向导新建的 server 一律写显式
-        # 策略（默认收紧）；`ivyea mcp doctor` 报告谁还宽松、`ivyea mcp env` 一条
-        # 命令收紧。写过任何一个字段就视为已表态，按表态走。
-        self.env_policy_declared: bool = any(
-            k in spec for k in ("env", "env_passthrough", "inherit_env"))
-        self.inherit_env: bool = bool(
-            spec.get("inherit_env", not self.env_policy_declared))
+        # 所以：升级完什么都不用改，原来能跑的照样跑，而且 env 从此真的生效
+        # （以前写了也没用）。收紧走两条主动路径 —— `ivyea mcp add` 向导给新
+        # 服务器写 `inherit_env: false`，以及 `ivyea mcp env <名> --secure`。
+        self.inherit_env: bool = bool(spec.get("inherit_env", True))
+        self.env_policy_declared: bool = "inherit_env" in spec
         self.timeout = timeout
         self.session_id: Optional[str] = None
         self._id = 0
