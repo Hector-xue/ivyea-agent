@@ -480,3 +480,32 @@ def test_collapse_threshold_is_configurable(ivyea_home):
     store_health.set_threshold("variants.collapse.min", 10)
     fs = [_listing_finding(1872, f"M{i}", "P1") for i in range(5)]
     assert len(store_health.collapse_variants(fs)) == 5   # 5 < 10，不合并
+
+
+# ── run-due 中途被杀 ────────────────────────────────────────────────────────
+def test_run_due_persists_after_each_job(ivyea_home, monkeypatch):
+    """跑完一个就落盘：多店巡检把 run-due 拉长到几分钟，中途被杀不再罕见。
+
+    只在末尾 save 的话，已跑完任务的 last_run 会一起丢，下一轮全部重跑——
+    对早报就是同一张卡再推一遍。
+    """
+    from ivyea_agent import schedule
+
+    schedule.set_job("a", "alert", every_hours=1)
+    schedule.set_job("b", "alert", every_hours=1)
+
+    done: list[str] = []
+
+    def _run_task(task, args=None):
+        done.append(task)
+        if len(done) == 2:                      # 第二个任务跑到一半被"杀"
+            raise KeyboardInterrupt("systemd 超时")
+        return True, "ok"
+
+    monkeypatch.setattr(schedule, "run_task", _run_task)
+    with pytest.raises(KeyboardInterrupt):
+        schedule.run_due()
+
+    saved = {j["name"]: j["last_run"] for j in schedule.load()["jobs"]}
+    assert saved["a"] > 0, "第一个任务已跑完，它的 last_run 必须已经落盘"
+    assert saved["b"] == 0, "第二个没跑完，不该被标记为已执行"

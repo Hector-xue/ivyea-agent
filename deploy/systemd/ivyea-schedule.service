@@ -14,8 +14,12 @@ Environment=PYTHONUNBUFFERED=1
 # 与 ivyea-agent.service 保持一致，直接调模块：ivyea 装在 /root/.local/bin，
 # 不在 systemd 的默认 PATH 里，写 `env ivyea` 会直接找不到命令。
 ExecStart=/usr/bin/python3 -m ivyea_agent.cli schedule run-due
-# 单次任务最长 10 分钟；领星 1 秒限流下，多店铺 L3 巡检可能较慢。
-TimeoutStartSec=600
+# 单次 run-due 最长 30 分钟。实测（11 个店铺、领星 1 秒限流）：
+#   L1 全店 75 秒，早报（L3）全店 258 秒。
+# 但 run-due 可能一次跑完多个到期任务——尤其重启后 Persistent=true 的补跑会把
+# L1/L2/早报凑到同一次里，再叠上广告报表缓存过期那天的冷启动，600 秒不够宽。
+# 被杀的代价不只是这次没跑：见 schedule.run_due 里逐任务落盘的注释。
+TimeoutStartSec=1800
 Nice=10
 
 [Install]

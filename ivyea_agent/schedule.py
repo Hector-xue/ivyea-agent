@@ -141,6 +141,11 @@ def run_due(now: float | None = None) -> list[dict[str, Any]]:
             if stored.get("name") == job["name"]:
                 stored["last_run"] = now
                 break
+        # **每跑完一个就落盘**，不能攒到最后一起写。多店铺巡检把单次 run-due 从
+        # 十几秒拉长到几分钟，中途被 systemd 超时杀掉/机器重启的概率不再可忽略；
+        # 只在末尾 save 的话，已经跑完的任务的 last_run 会一起丢，下一轮全部重跑——
+        # 对早报就是同一张卡再推一遍。
+        save(data)
     save(data)
     return out
 
