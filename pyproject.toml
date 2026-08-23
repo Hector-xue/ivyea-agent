@@ -64,6 +64,10 @@ Documentation = "https://agent.ivyea.com/docs.html"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6", "build>=1.2"]
+# 飞书接收端（`ivyea relay`）用的官方 SDK。**做成可选**：它 42MB / 一万个文件，
+# 不用飞书的人不该为它买单。缺它时 `ivyea relay` 与配置向导都会直接把安装命令
+# 打出来，而不是只说一句"缺依赖"。
+feishu = ["lark-oapi>=1.4"]
 anthropic = ["anthropic>=0.69"]
 semantic = ["sentence-transformers>=3.0"]
 

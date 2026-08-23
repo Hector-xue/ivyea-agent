@@ -1144,6 +1144,55 @@ def _execute_lingxing_candidates(result: dict, yes: bool = False) -> int:
     return 0
 
 
+def _cmd_relay(args: argparse.Namespace) -> int:
+    """飞书接收端。
+
+    **卡片能发出去 ≠ 按钮点得动**：出站在 agent 本体，入站要有这条长连接接着。
+    没有它，用户看到的是"按钮点了什么都没发生"——比没有按钮更糟。
+    """
+    import shutil
+    import subprocess
+
+    from . import feishu_relay, feishu_setup
+
+    if args.action == "status":
+        ok = feishu_relay.sdk_available()
+        print(f"飞书 SDK：{'已安装' if ok else '未安装 —— ' + feishu_relay.SDK_HINT}")
+        st = feishu_setup._relay_status()
+        print(f"服务：{st['detail']}")
+        gates = feishu_setup.gates()
+        print(f"审批白名单：{len(gates['allowed_senders'])} 人"
+              + ("（留空 = 没有人能点按钮，这是安全默认）"
+                 if not gates["allowed_senders"] else ""))
+        if not ok:
+            return 1
+        return 0
+
+    if args.action == "install":
+        if os.name == "nt" or not shutil.which("systemctl"):
+            print("本机没有 systemd。请用你自己的进程管理器常驻运行：")
+            print("    python -m ivyea_agent.feishu_relay")
+            return 1
+        unit = Path("/etc/systemd/system") / feishu_relay.SERVICE_NAME
+        try:
+            unit.write_text(feishu_relay.render_service(), encoding="utf-8")
+        except OSError as exc:
+            print(f"写入 {unit} 失败（需要 root）：{exc}")
+            return 1
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+        subprocess.run(["systemctl", "enable", "--now", feishu_relay.SERVICE_NAME],
+                       check=False)
+        print(f"已安装并启动 {feishu_relay.SERVICE_NAME}")
+        print(f"  日志：journalctl -u {feishu_relay.SERVICE_NAME} -f")
+        return 0
+
+    if not feishu_relay.sdk_available():
+        print(feishu_relay.SDK_HINT)
+        return 1
+    from .feishu_relay.relay import main as relay_main
+    return int(relay_main())
+
+
 def _cmd_amazon(args: argparse.Namespace) -> int:
     """亚马逊官方 API 的自检与档案清单。
 
@@ -4073,6 +4122,11 @@ def build_parser() -> argparse.ArgumentParser:
     plx.add_argument("action", choices=["setup", "probe", "sellers", "operate", "cache"])
     plx.add_argument("value", nargs="?", help="operate 的 on/off/status；cache 的 clear")
     plx.set_defaults(func=_cmd_lingxing)
+
+    prl = sub.add_parser("relay", help="飞书接收端（卡片按钮 + 飞书对话）：run / status / install")
+    prl.add_argument("action", nargs="?", default="status",
+                     choices=["status", "run", "install"])
+    prl.set_defaults(func=_cmd_relay)
 
     pam = sub.add_parser("amazon", help="亚马逊官方 API：verify（自检）/ profiles（列广告档案）/ status")
     pam.add_argument("action", nargs="?", default="status",

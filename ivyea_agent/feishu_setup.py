@@ -30,8 +30,11 @@ from typing import Any
 
 from . import config
 
-#: relay 的 systemd 单元名（长连接接收端，卡片按钮和飞书对话都靠它）
-RELAY_SERVICE = "feishu-ivyea-relay.service"
+#: relay 的 systemd 单元名（长连接接收端，卡片按钮和飞书对话都靠它）。
+#: 随包发布后规范名是 ``ivyea-feishu-relay.service``；旧名是本机手工部署时用的，
+#: **必须继续认**，否则升级完会把一个跑得好好的服务显示成"未安装"。
+RELAY_SERVICE = "ivyea-feishu-relay.service"
+LEGACY_RELAY_SERVICES = ("feishu-ivyea-relay.service",)
 
 ENV_APP_ID = "IVYEA_FEISHU_APP_ID"
 ENV_APP_SECRET = "IVYEA_FEISHU_APP_SECRET"
@@ -102,25 +105,39 @@ def _relay_status() -> dict[str, Any]:
     "没查到"和"没在跑"是两回事：Windows 上压根没有 systemd，把它显示成
     "已停止"会让人去修一个根本不存在的服务。
     """
+    from . import feishu_relay
+
+    sdk = feishu_relay.sdk_available()
     if os.name == "nt" or not shutil.which("systemctl"):
-        return {"state": "unknown", "running": None,
-                "detail": "本机没有 systemd，无法自动判定；请自行确认 relay 进程在运行"}
-    try:
-        proc = subprocess.run(["systemctl", "is-active", RELAY_SERVICE],
-                              capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001
-        return {"state": "unknown", "running": None, "detail": f"查询失败：{exc}"}
-    state = (proc.stdout or proc.stderr or "").strip() or "unknown"
-    if state == "active":
-        return {"state": state, "running": True, "detail": f"{RELAY_SERVICE} 运行中"}
-    if state == "inactive":
-        return {"state": state, "running": False,
-                "detail": f"{RELAY_SERVICE} 已安装但没在跑：systemctl start {RELAY_SERVICE}"}
-    if state in ("unknown", "failed"):
-        # is-active 对"没装过这个单元"也回 inactive/unknown，措辞上不要武断
-        return {"state": state, "running": False,
-                "detail": f"{RELAY_SERVICE} 未安装或启动失败（部署见 feishu-ivyea-relay/README.md）"}
-    return {"state": state, "running": False, "detail": f"{RELAY_SERVICE} 状态：{state}"}
+        return {"state": "unknown", "running": None, "sdk": sdk,
+                "detail": "本机没有 systemd，无法自动判定；"
+                          "常驻运行 `python -m ivyea_agent.feishu_relay` 即可"}
+
+    seen: list[tuple[str, str]] = []
+    for name in (RELAY_SERVICE, *LEGACY_RELAY_SERVICES):
+        try:
+            proc = subprocess.run(["systemctl", "is-active", name],
+                                  capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001
+            return {"state": "unknown", "running": None, "sdk": sdk,
+                    "detail": f"查询失败：{exc}"}
+        state = (proc.stdout or proc.stderr or "").strip() or "unknown"
+        seen.append((name, state))
+        if state == "active":
+            return {"state": state, "running": True, "sdk": sdk,
+                    "detail": f"{name} 运行中"}
+
+    name, state = seen[0]
+    if any(st == "inactive" for _n, st in seen):
+        inactive = next(n for n, st in seen if st == "inactive")
+        return {"state": "inactive", "running": False, "sdk": sdk,
+                "detail": f"{inactive} 已安装但没在跑：systemctl start {inactive}"}
+    # is-active 对"没装过这个单元"也回 inactive/unknown，措辞上不要武断。
+    # 给的是**能直接敲的命令**——只说"未安装"等于让人自己去猜怎么装。
+    how = ("先装 SDK：pip install \"ivyea-agent[feishu]\"，再 `ivyea relay install`"
+           if not sdk else "`ivyea relay install`（写 systemd 单元并启动）")
+    return {"state": state, "running": False, "sdk": sdk,
+            "detail": f"接收端未运行 —— {how}"}
 
 
 def patrol_defaults() -> dict[str, Any]:
@@ -328,8 +345,9 @@ def _steps(state: dict[str, Any]) -> list[dict[str, Any]]:
             "title": "启动长连接接收端 relay",
             "done": bool(state["relay"].get("running")),
             "detail": str(state["relay"].get("detail") or ""),
-            "hint": "只发告警可以不装；要点按钮、要在飞书里对话就必须装。它走长连接，"
-                    "不需要对公网开放任何端口。",
+            "hint": "只发告警可以不装；要点按钮、要在飞书里对话就必须装。"
+                    "装法：pip install \"ivyea-agent[feishu]\" 后执行 `ivyea relay install`。"
+                    "它走长连接，不需要对公网开放任何端口。",
         },
         {
             "key": "patrol",
