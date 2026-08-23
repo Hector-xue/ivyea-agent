@@ -187,3 +187,44 @@ def resolve_targets(args: dict[str, Any]) -> list[dict[str, Any]]:
         targets = [store or {"sid": sid, "name": f"sid {sid}", "has_ads": True}]
 
     return [t for t in targets if str(t.get("sid")) not in exclude]
+
+
+# ── 站点时区 ────────────────────────────────────────────────────────────────
+# 领星把促销活动时间给成**站点当地时间的裸字符串**（"2026-08-24 23:59:00"，
+# 不带时区）。要算"还剩几小时结束"，必须先按店铺所在站点把它变成绝对时刻。
+# 拿服务器时区去算，UK 的活动会差 7~8 小时 —— 正好是"以为还有一天、其实已经
+# 结束了"这种最坏的错法。
+#
+# 键用 marketplace_id：它是亚马逊自己的常量，一个站点一个，永不变。店铺名是
+# 用户起的，领星给的 country 是中文，两个都不能当键。
+MARKETPLACE_TZ: dict[str, str] = {
+    "ATVPDKIKX0DER": "America/Los_Angeles", "A2EUQ1WTGCTBG2": "America/Toronto",
+    "A1AM78C64UM0Y8": "America/Mexico_City", "A2Q3Y263D00KWC": "America/Sao_Paulo",
+    "A1F83G8C2ARO7P": "Europe/London", "A1PA6795UKMFR9": "Europe/Berlin",
+    "A13V1IB3VIYZZH": "Europe/Paris", "APJ6JRA9NG5V4": "Europe/Rome",
+    "A1RKKUPIHCS9HS": "Europe/Madrid", "A1805IZSGTT6HS": "Europe/Amsterdam",
+    "A2NODRKZP88ZB9": "Europe/Stockholm", "A1C3SOZRARQ6R3": "Europe/Warsaw",
+    "AMEN7PMS3EDWL": "Europe/Brussels", "A33AVAJ2PDY3EV": "Europe/Istanbul",
+    "A17E79C6D8DWNP": "Asia/Riyadh", "A2VIGQ35RCS4UG": "Asia/Dubai",
+    "A21TJRUUN4KGV": "Asia/Kolkata", "ARBP9OOSHTCHU": "Africa/Cairo",
+    "A1VC38T7YXB528": "Asia/Tokyo", "A39IBJ37TRP1C6": "Australia/Sydney",
+    "A19VAU5U5O7RUS": "Asia/Singapore",
+}
+
+
+def timezone_name(sid: Any) -> str:
+    """该店铺所在站点的 IANA 时区名；认不出来退回 UTC。"""
+    store = get(sid) or {}
+    return MARKETPLACE_TZ.get(str(store.get("marketplace_id") or ""), "UTC")
+
+
+def tzinfo(sid: Any):
+    """时区对象。**绝不抛异常** —— 缺 tzdata 的精简环境退回 UTC，
+    倒计时会不准，但整轮巡检不该因此挂掉（那才是更大的故障）。"""
+    from datetime import timezone as _tz
+    name = timezone_name(sid)
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(name)
+    except Exception:                                   # noqa: BLE001
+        return _tz.utc

@@ -31,6 +31,7 @@ ENTITY_CAMPAIGN = "campaign"
 ENTITY_KEYWORD = "keyword"
 ENTITY_AD = "ad"
 ENTITY_SEARCH_TERM = "search_term"
+ENTITY_PROMOTION = "promotion"
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,26 @@ RESTOCK = _reg(MetricSpec(
     fields=("sid", "msku", "asin", "suggested_qty", "available_days", "status"),
     description="FBA 补货建议",
 ))
+
+
+PROMOTION_ACTIVE = _reg(MetricSpec(
+    key="promotion.active",
+    grain=GRAIN_SNAPSHOT,
+    entity=ENTITY_PROMOTION,
+    fields=("sid", "promotion_id", "kind", "name", "status", "currency",
+            "start_at", "end_at", "start_local", "end_local", "tz",
+            "seconds_to_start", "seconds_to_end", "phase",
+            "budget", "cost", "budget_used_pct",
+            "sales_amount", "sales_volume", "asins", "asin_count",
+            "last_sync_at", "sync_age_hours"),
+    description="已报促销活动（优惠券/秒杀/管理促销/会员折扣）的窗口与预算消耗",
+))
+
+# ⚠️ 这个指标的数据在领星那边**不是 API 直连亚马逊拿的**，是「LINGXING助手」浏览器
+# 插件抓回去的（官方要求助手保持登录在线）。插件掉线时接口照样返回 200 和旧数据 ——
+# 所以行里带 ``sync_age_hours``，规则要能对"数据本身停更"报警，而不是傻等一个
+# 永远不会变的倒计时。换成亚马逊官方源（SP-API 的 GET_COUPON_PERFORMANCE_REPORT /
+# GET_PROMOTION_PERFORMANCE_REPORT）就没有这个问题，那是 P7 的事。
 
 
 # ── 时间窗 ──────────────────────────────────────────────────────────────────

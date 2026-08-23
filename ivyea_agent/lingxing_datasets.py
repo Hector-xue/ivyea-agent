@@ -23,6 +23,14 @@ DATASETS: dict[str, dict[str, Any]] = {
     "sp_targets":            {"route": "/pb/openapi/newad/spTargets", "method": "POST"},
     "sp_target_report":      {"route": "/pb/openapi/newad/spTargetReports", "method": "POST"},
     "fba_stock":             {"route": "/erp/sc/routing/fba/fbaStock/fbaList", "method": "POST"},
+    # 促销活动四类 + ASIN 维度。本机 2026-08-23 实签调用全部 code=0（该账号无促销
+    # 数据，返回空，但契约成立）。注意 promo_manage 路由里的 "manage" 是业务名词
+    # （管理促销），不是写动作 —— ops 那边的读写判定曾因为子串匹配把它当成写路由拒掉。
+    "promo_coupon":          {"route": "/basicOpen/promotionalActivities/coupon/list", "method": "POST"},
+    "promo_seckill":         {"route": "/basicOpen/promotionalActivities/secKill/list", "method": "POST"},
+    "promo_manage":          {"route": "/basicOpen/promotionalActivities/manage/list", "method": "POST"},
+    "promo_vip_discount":    {"route": "/basicOpen/promotionalActivities/vipDiscount/list", "method": "POST"},
+    "promo_listing":         {"route": "/basicOpen/promotion/listingList", "method": "POST"},
 }
 
 SELLER_ROUTE = "/erp/sc/data/seller/lists"

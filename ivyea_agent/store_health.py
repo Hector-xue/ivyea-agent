@@ -57,6 +57,15 @@ THRESHOLDS: dict[str, Any] = {
     "sales.listing_stall.min_volume_30": 5.0,  # 30 日总销量门槛，太小不算"断流"
     "ads.listing_acos.min_spend": 100.0,  # listing 级广告花费门槛
     "ads.listing_no_sales.min_spend": 50.0,   # 有花费零销售额的门槛
+    # —— L1 · 促销活动（已报活动 / 优惠券倒计时）——
+    # 两档提前量：24 小时是"今天要决定续不续"，6 小时是"再不动就来不及"。
+    # 只报这两个刻度，不是每小时都报 —— 一个活动从报名到结束会经过很多个小时，
+    # 每小时提醒一次的机器人三天就会被静音。
+    "promo.ending_soon.lead_hours": (24.0, 6.0),
+    "promo.starting_soon.lead_hours": (24.0,),
+    "promo.coupon_budget.pct": 80.0,      # 优惠券预算消耗到此比例告警
+    "promo.coupon_budget.crit_pct": 95.0,  # 到此比例升为 crit（快没了 = 活动会哑火）
+    "promo.sync_stale.hours": 24.0,       # 插件同步停了这么久就报（数据在骗人）
     # —— L2 日内层 ——
     "ads.spend_burst.factor": 2.5,        # 小时花费速率 / 基线速率
     "ads.spend_burst.min_spend": 20.0,    # 本段增量花费门槛
@@ -472,6 +481,124 @@ def ads_enabled(sid: Any) -> bool:
     return stores.supports_ads(sid)
 
 
+def _fmt_left(seconds: float) -> str:
+    """剩余秒数 → 人话。卡片上「还剩 3 小时 12 分」比「11520 秒」有用得多。"""
+    s = max(0, int(seconds))
+    d, h, m = s // 86400, (s % 86400) // 3600, (s % 3600) // 60
+    if d:
+        return f"{d} 天 {h} 小时"
+    if h:
+        return f"{h} 小时 {m} 分"
+    return f"{m} 分"
+
+
+def _rule_promotion(res: CheckResult, promo: MetricResult) -> None:
+    """促销活动 4 条规则：临期 / 即将开始 / 优惠券预算见底 / 数据停更。
+
+    **为什么没有一条带 intent（可执行动作）**：延长活动、加预算、改折扣，这些
+    在领星 OpenAPI 和亚马逊官方 API 上都**没有写接口**（促销本来就只能在卖家
+    后台操作）。给一个点了没用的按钮比不给更糟。这几条的价值是"别错过截止
+    时间"，人收到提醒去后台处理即可。
+    """
+    rows = promo.rows
+    prov = _prov(promo)
+    if not rows:
+        res.skipped.append("促销规则跳过：本店当前窗口内没有促销活动")
+        return
+
+    kind_label = {"coupon": "优惠券", "seckill": "秒杀", "manage": "管理促销",
+                  "vip_discount": "会员折扣"}
+    end_leads = threshold("promo.ending_soon.lead_hours")
+    start_leads = threshold("promo.starting_soon.lead_hours")
+
+    for r in rows:
+        phase = str(r.get("phase") or "")
+        name = str(r.get("name") or "")
+        label = kind_label.get(str(r.get("kind")), str(r.get("kind")))
+        pid = str(r.get("promotion_id") or "")
+        asins = list(r.get("asins") or [])
+        asin_hint = ("，涉及 " + "、".join(asins[:3])
+                     + (f" 等 {len(asins)} 个 ASIN" if len(asins) > 3 else "")) if asins else ""
+
+        left = r.get("seconds_to_end")
+        if phase == "running" and isinstance(left, (int, float)) and left > 0:
+            hours_left = left / 3600.0
+            # 只在跨过某一档的那一小段里报。巡检每小时一轮，窗口取 1 小时 ——
+            # 比这窄会因为一次巡检失败就整档漏掉，比这宽会连报两轮。
+            for lead in end_leads:
+                if lead - 1.0 < hours_left <= lead:
+                    res.findings.append(Finding(
+                        code="promo.ending_soon", layer="L1",
+                        severity=CRIT if lead <= 6 else WARN,
+                        action_class=ADVISORY, sid=res.sid, scope="promotion",
+                        target_id=pid, target_name=name,
+                        metric="seconds_to_end", current=float(left), baseline=lead * 3600.0,
+                        message=f"{label}「{name}」还有 {_fmt_left(left)} 结束"
+                                f"（站点时间 {r.get('end_local') or '—'}）{asin_hint}",
+                        evidence={"kind": r.get("kind"), "end_local": r.get("end_local"),
+                                  "tz": r.get("tz"), "asins": asins[:10],
+                                  "sales_amount": r.get("sales_amount")},
+                        provenance=prov))
+                    break
+
+        to_start = r.get("seconds_to_start")
+        if phase == "upcoming" and isinstance(to_start, (int, float)) and to_start > 0:
+            hours = to_start / 3600.0
+            for lead in start_leads:
+                if lead - 1.0 < hours <= lead:
+                    res.findings.append(Finding(
+                        code="promo.starting_soon", layer="L1", severity=INFO,
+                        action_class=ADVISORY, sid=res.sid, scope="promotion",
+                        target_id=pid, target_name=name,
+                        metric="seconds_to_start", current=float(to_start),
+                        baseline=lead * 3600.0,
+                        message=f"{label}「{name}」将在 {_fmt_left(to_start)} 后开始"
+                                f"（站点时间 {r.get('start_local') or '—'}）{asin_hint}"
+                                f"，确认库存与价格已就位",
+                        evidence={"kind": r.get("kind"), "start_local": r.get("start_local"),
+                                  "asins": asins[:10]},
+                        provenance=prov))
+                    break
+
+        used = r.get("budget_used_pct")
+        if phase == "running" and isinstance(used, (int, float)):
+            crit_pct = threshold("promo.coupon_budget.crit_pct")
+            warn_pct = threshold("promo.coupon_budget.pct")
+            if used >= warn_pct:
+                res.findings.append(Finding(
+                    code="promo.budget_exhausted", layer="L1",
+                    severity=CRIT if used >= crit_pct else WARN,
+                    action_class=ADVISORY, sid=res.sid, scope="promotion",
+                    target_id=pid, target_name=name,
+                    metric="budget_used_pct", current=float(used), baseline=warn_pct,
+                    message=f"{label}「{name}」预算已用掉 {used:.0f}%"
+                            f"（{r.get('cost')}/{r.get('budget')} {r.get('currency') or ''}）"
+                            f"，用完就不再展示{asin_hint}",
+                    evidence={"budget": r.get("budget"), "cost": r.get("cost"),
+                              "end_local": r.get("end_local")},
+                    provenance=prov))
+
+    # 数据停更：接口照样返回 200 和旧数据，倒计时会安静地停在过期的值上。
+    # 这条报的是**数据本身不可信**，比任何一条业务规则都更要紧 —— 前面几条
+    # 全都建立在这批数的新鲜度上。
+    ages = [r.get("sync_age_hours") for r in rows
+            if isinstance(r.get("sync_age_hours"), (int, float))]
+    if ages:
+        freshest = min(ages)
+        limit = threshold("promo.sync_stale.hours")
+        if freshest > limit:
+            res.findings.append(Finding(
+                code="promo.sync_stale", layer="L1", severity=WARN,
+                action_class=ADVISORY, sid=res.sid, scope="promotion",
+                target_id="", target_name="促销数据同步",
+                metric="sync_age_hours", current=float(freshest), baseline=limit,
+                message=f"促销数据已 {freshest:.0f} 小时没有更新 —— "
+                        f"领星的促销数据靠「LINGXING助手」插件同步，插件掉线时"
+                        f"接口照样返回旧数据，上面的倒计时可能已经不准了",
+                evidence={"freshest_age_hours": freshest, "rows": len(rows)},
+                provenance=prov))
+
+
 def check_l1(sid: Any) -> CheckResult:
     """L1 快照层巡检。当前走领星轮询；接入推送源后同一批规则自动升级（ADR-8/9）。"""
     from . import datasources
@@ -506,6 +633,13 @@ def check_l1(sid: Any) -> CheckResult:
         _rule_listing(res, snap)
     else:
         res.add_gap(snap)
+
+    promo = metrics.get_metric(metrics.PROMOTION_ACTIVE.key, {"sid": sid})
+    if promo.ok:
+        res.provenance.append(f"{metrics.PROMOTION_ACTIVE.key}：{_prov(promo)}")
+        _rule_promotion(res, promo)
+    else:
+        res.add_gap(promo)
 
     follow = metrics.get_metric(metrics.FOLLOW_SALE.key, {"sid": sid})
     if follow.ok:
