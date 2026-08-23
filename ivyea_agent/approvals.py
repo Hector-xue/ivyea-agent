@@ -320,6 +320,45 @@ def summary() -> dict[str, int]:
     return {r["state"]: int(r["c"]) for r in rows}
 
 
+def activity(since: float, *, sid: Any = "") -> dict[str, Any]:
+    """一个时间窗里的审批动态：新提了几条、批了几条、真执行了几条、回滚了几条。
+
+    周报/月报的"执行回顾"用它。**按 resolved_at 归窗**（不是 created_at）：
+    上周提出、这周才批的那一条，属于这周干的活。新提出的那部分按 created_at 单算。
+    """
+    conn = _conn()
+    try:
+        args: list[Any] = [float(since)]
+        clause = ""
+        if sid:
+            clause = " AND sid=?"
+            args.append(str(sid))
+        created = conn.execute(
+            f"SELECT COUNT(*) c FROM approvals WHERE created_at>=?{clause}", args
+        ).fetchone()["c"]
+        rows = conn.execute(
+            f"SELECT state, COUNT(*) c FROM approvals WHERE resolved_at>=?{clause}"
+            " GROUP BY state", args).fetchall()
+        # 当前待处理不看窗口：上上周提出、至今没人管的那条，才最该出现在周报里
+        pending = conn.execute(
+            "SELECT COUNT(*) c FROM approvals WHERE state=?"
+            + (" AND sid=?" if sid else ""),
+            [PENDING] + ([str(sid)] if sid else [])).fetchone()["c"]
+    finally:
+        conn.close()
+    by_state = {r["state"]: int(r["c"]) for r in rows}
+    return {
+        "created": int(created),
+        "approved": by_state.get(APPROVED, 0),
+        "executed": by_state.get(EXECUTED, 0),
+        "denied": by_state.get(DENIED, 0),
+        "failed": by_state.get(FAILED, 0),
+        "rolled_back": by_state.get(ROLLED_BACK, 0),
+        "expired": by_state.get(EXPIRED, 0),
+        "pending_now": int(pending),
+    }
+
+
 def render(items: list[Approval]) -> str:
     if not items:
         return "（无审批项）\n"

@@ -48,14 +48,25 @@ _LIST_FIELDS = {
     "allowed_chats": "feishu_allowed_chats",
 }
 
-#: 巡检任务的规范名。IvyeaOps 界面写的就是这三条，
+#: 巡检任务的规范名。IvyeaOps 界面写的就是这几条，
 #: 手工注册的同类任务在 configure_patrol 里会被一起收编（见那里的说明）。
 PATROL_JOBS = {
     "l1": ("patrol-l1", "store_l1"),
     "l2": ("patrol-l2", "store_l2"),
     "daily": ("patrol-daily", "store_daily"),
+    "weekly": ("patrol-weekly", "store_weekly"),
+    "monthly": ("patrol-monthly", "store_monthly"),
 }
 PATROL_TASKS = {task for _, task in PATROL_JOBS.values()}
+
+#: 界面上每一档的说明。措辞在这里，不在前端 —— 改一次两边都对。
+PATROL_LABELS = {
+    "l1": ("实时层 L1", "库存断货 / 活动被暂停 / 预算被外部改动 / listing 上下架"),
+    "l2": ("日内层 L2", "当日花费突增 / 曝光归零 / 点击暴涨零转化"),
+    "daily": ("每日早报", "昨日指标 + 环比 + 待你决定的建议（带按钮）"),
+    "weekly": ("每周周报", "本周 vs 上周 + 本周批了/执行了什么（只回顾，无按钮）"),
+    "monthly": ("每月月报", "本月 vs 上月，同样只回顾"),
+}
 
 
 # ── 读 ──────────────────────────────────────────────────────────────────────
@@ -112,6 +123,19 @@ def _relay_status() -> dict[str, Any]:
     return {"state": state, "running": False, "detail": f"{RELAY_SERVICE} 状态：{state}"}
 
 
+def patrol_defaults() -> dict[str, Any]:
+    """各档的默认间隔与说明。**界面从这里取默认值，不在前端再写一份**——
+    两处各写一份时，实际生效的永远是小的那个，而且没人记得改另一处。"""
+    from . import schedule
+
+    out = {}
+    for key, (_name, task) in PATROL_JOBS.items():
+        label, desc = PATROL_LABELS.get(key, (key, ""))
+        out[key] = {"task": task, "label": label, "desc": desc,
+                    "every_minutes": schedule.PATROL_DEFAULT_MINUTES.get(task, 1440.0)}
+    return out
+
+
 def patrol_status() -> dict[str, Any]:
     """已注册的店铺巡检任务。**只注册不等于会跑**，所以连触发器一起报。"""
     from . import schedule
@@ -139,6 +163,7 @@ def patrol_status() -> dict[str, Any]:
     pushing = [r for r in rows if r["enabled"] and r["notify"] and r["channel"].startswith("feishu")]
     return {
         "jobs": rows,
+        "defaults": patrol_defaults(),
         "any_enabled": any(r["enabled"] for r in rows),
         "pushing_to_feishu": len(pushing),
         "timer": _timer_status(),
@@ -312,7 +337,7 @@ def _steps(state: dict[str, Any]) -> list[dict[str, Any]]:
             "done": bool(state["patrol"]["pushing_to_feishu"]),
             "detail": (f"{state['patrol']['pushing_to_feishu']} 条任务在推"
                        if state["patrol"]["pushing_to_feishu"] else "未开启"),
-            "hint": "L1 每 20 分钟 / L2 每小时 / 早报每天一张汇总卡。",
+            "hint": "L1 每小时 / L2 每 12 小时 / 早报每天一张汇总卡，另有周报与月报。",
         },
         {
             "key": "test",
@@ -491,18 +516,20 @@ def configure_patrol(payload: dict[str, Any]) -> dict[str, Any]:
         schedule.remove_job(name)
 
     created = []
+    defaults = patrol_defaults()
     for key, (name, task) in PATROL_JOBS.items():
         spec = payload.get(key) or {}
         if not spec.get("enabled"):
             continue
-        every_minutes = spec.get("every_minutes")
-        every_hours = spec.get("every_hours")
-        if every_minutes:
-            job = schedule.set_job(name, task, args=dict(base_args),
-                                   every_minutes=float(every_minutes))
+        # 没给间隔就用这一档的默认值，而不是硬编码的 24 小时——
+        # 周报默认 7 天，被悄悄改成 1 天就成了"每天一份周报"。
+        if spec.get("every_minutes"):
+            minutes = float(spec["every_minutes"])
+        elif spec.get("every_hours"):
+            minutes = float(spec["every_hours"]) * 60.0
         else:
-            job = schedule.set_job(name, task, every_hours=float(every_hours or 24.0),
-                                   args=dict(base_args))
+            minutes = float(defaults[key]["every_minutes"])
+        job = schedule.set_job(name, task, args=dict(base_args), every_minutes=minutes)
         created.append(job["name"])
 
     return {"ok": True, "created": created,

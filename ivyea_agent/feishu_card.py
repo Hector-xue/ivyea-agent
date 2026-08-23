@@ -383,6 +383,86 @@ def build_multi_store_daily_card(*, date: str, stores: Iterable[dict[str, Any]],
     return _card(_header(f"📊 每日早报 · {date} · {len(rows)} 个店铺", template), elements)
 
 
+# ── 周报 / 月报 ─────────────────────────────────────────────────────────────
+def build_period_card(*, period: str, window: str, stores: Iterable[dict[str, Any]],
+                      activity: Optional[dict[str, Any]] = None,
+                      report_url: str = "", max_alerts: int = 10) -> dict[str, Any]:
+    """周报 / 月报。一张卡，可单店可多店。
+
+    **刻意不带审批按钮。** 同一条建议在日报里已经给过按钮了；周报再给一次，
+    同一个目标就会挂着两条 approval，批了其中一条另一条还在 pending，
+    容易变成对同一个活动改两次预算。周报的职责是**回顾**：
+    这一周花了多少、卖了多少、批了几条、执行了几条、还有什么一直没解决。
+
+    ``stores`` 每项：``{name, sid, metrics_lines, findings, gaps}``。
+    """
+    rows = list(stores)
+    elements: list[dict[str, Any]] = []
+    multi = len(rows) > 1
+
+    # 1) 指标：单店给全量明细，多店一店一行
+    if multi:
+        head_lines = []
+        for r in rows:
+            name = str(r.get("name") or f"sid {r.get('sid')}")
+            fs = list(r.get("findings") or [])
+            crit = sum(1 for f in fs if str(getattr(f, "severity", "")) == "crit")
+            warn = sum(1 for f in fs if str(getattr(f, "severity", "")) == "warn")
+            icon = "🚨" if crit else ("⚠️" if warn else "✅")
+            head = str((r.get("metrics_lines") or [""])[0]).replace("**", "")
+            head_lines.append(f"{icon} **{name}**" + (f"　{head}" if head else ""))
+        elements.append(_md("\n".join(head_lines)))
+    else:
+        lines = list((rows[0].get("metrics_lines") if rows else []) or [])
+        elements.append(_md("\n".join(lines) if lines else "_本期无数据_"))
+
+    # 2) 执行回顾：这一期真正发生了什么改动
+    if activity:
+        elements.append(_hr())
+        a = activity
+        elements.append(_md(
+            f"**本期动作**　新建议 {a.get('created', 0)} 条　"
+            f"已批准 {a.get('approved', 0)}　已执行 {a.get('executed', 0)}　"
+            f"已否决 {a.get('denied', 0)}　回滚 {a.get('rolled_back', 0)}\n"
+            f"　　失败 {a.get('failed', 0)}　超时未处理 {a.get('expired', 0)}　"
+            f"当前待处理 {a.get('pending_now', 0)}"))
+
+    # 3) 本期仍在的问题（按严重度，跨店合并）
+    all_findings: list[tuple[str, Any]] = []
+    all_gaps: list[str] = []
+    for r in rows:
+        name = str(r.get("name") or f"sid {r.get('sid')}")
+        all_findings.extend((name, f) for f in (r.get("findings") or []))
+        all_gaps.extend(f"{name}：{g}" for g in (r.get("gaps") or []))
+    all_findings.sort(key=lambda i: _SEV_RANK_ORDER.get(
+        str(getattr(i[1], "severity", "info")), 9))
+
+    if all_findings:
+        elements.append(_hr())
+        body = [f"**仍未解决 {len(all_findings)} 条**"]
+        for name, f in all_findings[:max_alerts]:
+            prefix = f"[{name}] " if multi else ""
+            body.append(f"{_SEV_ICON.get(str(getattr(f, 'severity', 'info')), '')} "
+                        f"{prefix}{getattr(f, 'message', '')}")
+        if len(all_findings) > max_alerts:
+            body.append(f"…另有 {len(all_findings) - max_alerts} 条")
+        body.append("\n_要动手的按钮在每天的早报里，这张卡只做回顾。_")
+        elements.append(_md("\n".join(body)))
+
+    if all_gaps:
+        elements.append(_hr())
+        elements.append(_md("**数据缺口**（这些规则本期没跑）\n"
+                            + "\n".join(f"- {g}" for g in all_gaps[:5])
+                            + (f"\n…另有 {len(all_gaps) - 5} 条" if len(all_gaps) > 5 else "")))
+    if report_url:
+        elements.append(_md(f"[查看完整报告]({report_url})"))
+
+    icon = "🗓" if period == "月报" else "📈"
+    scope = f"{len(rows)} 个店铺" if multi else str(
+        (rows[0].get("name") if rows else "") or "")
+    return _card(_header(f"{icon} 店铺{period} · {window} · {scope}", "wathet"), elements)
+
+
 # ── 回调后的原地替换卡片 ────────────────────────────────────────────────────
 def build_resolved_card(*, choice: str, operator: str, preview: str = "") -> dict[str, Any]:
     """点完按钮立刻原地替换，防重复点击（抄 hermes 的做法）。"""

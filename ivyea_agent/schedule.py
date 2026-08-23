@@ -13,8 +13,24 @@ from . import alerts, config, evals, knowledge_quality, knowledge_sync, notify, 
 
 SCHEDULE_FILE = config.IVYEA_DIR / "schedule.json"
 ALLOWED_TASKS = {"alert", "weekly", "eval", "knowledge_quality", "knowledge_sync",
-                 # 店铺业务巡检（三层各自的节奏，见 store_health 的分层说明）
-                 "store_l1", "store_l2", "store_daily", "approvals_expire"}
+                 # 店铺业务巡检（各层节奏见 store_health 的分层说明）
+                 "store_l1", "store_l2", "store_daily",
+                 # 回顾型报告：只汇总不派活，**不创建审批项**（见 patrol_push.push_period）
+                 "store_weekly", "store_monthly",
+                 "approvals_expire"}
+
+#: 各巡检任务的默认间隔（分钟）。**唯一真源**——CLI、IvyeaOps 界面、文档都读这里，
+#: 别在前端再写一份默认值（写两份时实际生效的永远是小的那个）。
+#: 回顾型报告 → 窗口天数与措辞
+PERIOD_TASKS = {"store_weekly": (7, "周报"), "store_monthly": (30, "月报")}
+
+PATROL_DEFAULT_MINUTES = {
+    "store_l1": 60.0,        # 快照差分：库存/活动配置/listing 状态
+    "store_l2": 720.0,       # 日内累计差分（12 小时）
+    "store_daily": 1440.0,   # 早报
+    "store_weekly": 10080.0,  # 周报（7 天）
+    "store_monthly": 43200.0,  # 月报（30 天）
+}
 
 
 def _empty() -> dict[str, Any]:
@@ -42,7 +58,8 @@ def set_job(name: str, task: str, every_hours: float = 24.0,
             every_minutes: float | None = None) -> dict[str, Any]:
     """注册/覆盖一个任务。
 
-    ``every_minutes`` 是为分钟级巡检加的：L1 每 20 分钟，写成 ``every_hours=0.333``
+    ``every_minutes`` 是为分钟级巡检加的：L1 默认每小时、可调到 20 分钟，
+    写成 ``every_hours=0.333``
     既不直观又会因四舍五入漂移。传了分钟就以分钟为准，同时回写等价的
     ``every_hours`` 保持老读取方（IvyeaOps / 旧配置）兼容。
     """
@@ -104,7 +121,8 @@ def run_task(task: str, args: dict[str, Any] | None = None) -> tuple[bool, str]:
             if not result.get("ok"):
                 return False, f"{text}\n{notify.render_result(result)}\n"
         return True, text
-    if task in ("store_l1", "store_l2", "store_daily"):
+    if task in ("store_l1", "store_l2", "store_daily",
+                "store_weekly", "store_monthly"):
         return _run_store_task(task, args)
 
     if task == "approvals_expire":
@@ -187,6 +205,10 @@ def _run_store_task(task: str, args: dict[str, Any]) -> tuple[bool, str]:
     if not targets:
         return False, "店铺巡检任务缺少 sid / sids 参数（或目标被 exclude_sids 全部排除）"
 
+    # 周报/月报没有"单店旧格式"要保，一店多店走同一条装配。
+    if task in PERIOD_TASKS:
+        return _run_period_report(task, args, targets)
+
     # 单店时保持原样返回，输出与旧版逐字一致——旧的 job、测试、IvyeaOps 的
     # 解析都依赖这个格式，不能因为支持了多店就顺手改掉单店的输出。
     if len(targets) == 1:
@@ -194,6 +216,9 @@ def _run_store_task(task: str, args: dict[str, Any]) -> tuple[bool, str]:
 
     if task == "store_daily" and str(args.get("channel") or "") == "feishu_app":
         return _run_store_daily_multi(args, targets)
+
+    if task in PERIOD_TASKS:
+        return _run_period_report(task, args, targets)
 
     oks: list[bool] = []
     chunks: list[str] = []
@@ -212,7 +237,7 @@ def _run_store_daily_multi(args: dict[str, Any],
 
     先跑完再发，是为了让卡片能按"最坏的店"决定标题颜色、并把跨店异常按严重度
     排在一起。代价是发卡时间等于所有店的巡检耗时之和——早报每天一次，可以接受；
-    L1 那种 20 分钟一轮的不能这么干，所以只有早报走这条路。
+    L1 那种小时级的不能这么干，所以只有早报和周报/月报走这条路。
     """
     import datetime
 
@@ -266,6 +291,70 @@ def _run_store_daily_multi(args: dict[str, Any],
     return not failed, "\n".join(lines) + "\n"
 
 
+def _run_period_report(task: str, args: dict[str, Any],
+                       targets: list[dict[str, Any]]) -> tuple[bool, str]:
+    """周报 / 月报：把窗口拉长跑一遍 L3，加上本期的审批动态，合成一张卡。
+
+    与早报的三点不同：
+    1. **不创建审批项**——同一条建议在早报里已经给过按钮，重复创建会让同一个
+       目标挂两条待办（见 patrol_push.push_period）。
+    2. 窗口是 7 / 30 天，环比对照的是上一个同长度窗口。
+    3. 无论一店还是多店都是一张卡：周报本来就是拿来"整体看一眼"的。
+    """
+    import datetime
+
+    from . import approvals, patrol_push, store_health
+
+    days, label = PERIOD_TASKS[task]
+    rows: list[dict[str, Any]] = []
+    failed: list[str] = []
+
+    for store in targets:
+        sid = store.get("sid")
+        name = str(store.get("name") or f"sid {sid}")
+        try:
+            result = store_health.check_l3(sid, days=days, include_optimizer=False)
+            summary = store_health.period_summary(sid, days=days)
+        except Exception as exc:                    # noqa: BLE001 —— 逐店隔离
+            failed.append(f"{name}（sid {sid}）：{type(exc).__name__}: {exc}")
+            continue
+        rows.append({"name": name, "sid": sid, "findings": result.sorted_findings(),
+                     "gaps": list(result.gaps) + list(summary["gaps"]),
+                     "metrics_lines": summary["lines"]})
+
+    if not rows:
+        return False, f"{label}全部取数失败：\n" + "\n".join(f"- {f}" for f in failed)
+
+    today = datetime.date.today()
+    window = f"{(today - datetime.timedelta(days=days)).isoformat()}~" \
+             f"{(today - datetime.timedelta(days=1)).isoformat()}"
+    act = approvals.activity(time.time() - days * 86400,
+                             sid=(targets[0].get("sid") if len(targets) == 1 else ""))
+
+    channel = str(args.get("channel") or "stdout")
+    text_lines = [f"== 店铺{label} {window}：{len(rows)} 个店 =="]
+    for r in rows:
+        text_lines.append(f"  {r['name']}：问题 {len(r['findings'])} 条，"
+                          f"缺口 {len(r['gaps'])} 条")
+        text_lines.extend(f"    {ln}" for ln in r["metrics_lines"])
+    for f in failed:
+        text_lines.append(f"  ! 取数失败：{f}")
+    text_lines.append(f"  本期动作：新建议 {act['created']} · 已执行 {act['executed']}"
+                      f" · 回滚 {act['rolled_back']} · 待处理 {act['pending_now']}")
+    text = "\n".join(text_lines) + "\n"
+
+    if not channel.startswith("feishu"):
+        return not failed, text
+
+    pushed = patrol_push.push_period(
+        rows, period=label, window=window, activity=act,
+        chat_id=str(args.get("chat_id") or ""),
+        report_url=str(args.get("report_url") or ""))
+    if not pushed.get("ok"):
+        return False, text + f"  {label}推送失败：{pushed.get('error')}\n"
+    return not failed, text + f"  已推送：message_id={pushed['message_id']}\n"
+
+
 def _run_store_task_one(task: str, args: dict[str, Any],
                         store: dict[str, Any]) -> tuple[bool, str]:
     """单个店铺的巡检。异常在这里收口成失败结果，绝不外抛。"""
@@ -308,7 +397,7 @@ def _store_task_body(task: str, args: dict[str, Any], sid: Any,
         return True, (f"{text}早报已推送：message_id={pushed['message_id']} "
                       f"待决定 {len(pushed['approvals'])} 条\n")
 
-    # 数据源健康：只有**连续**失败才告警。巡检每 20 分钟一次，
+    # 数据源健康：只有**连续**失败才告警。巡检按小时级跑，
     # 偶发一次超时是常态，累计计数迟早触发，会变成狼来了（方案 §8.2 / §8.8）。
     from . import reliability
     health_key = f"patrol.{task}.{sid}"

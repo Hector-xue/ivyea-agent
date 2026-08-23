@@ -49,7 +49,7 @@ class _Src:
 def wire3(ivyea_home, monkeypatch):
     from ivyea_agent import metrics, datasources, lingxing_optimizer
 
-    def _install(report=(), config_rows=(), profit_by_window=None):
+    def _install(report=(), config_rows=(), profit_by_window=None, listings=None):
         for s in list(metrics.registered()):
             metrics.unregister(s.name)
 
@@ -58,11 +58,16 @@ def wire3(ivyea_home, monkeypatch):
                 return []
             return list(profit_by_window.get(tuple(window.dates) if window else (), []))
 
-        metrics.register(_Src({
+        data = {
             "ads.campaign_report": list(report),
             "ads.campaign_config": list(config_rows),
             "profit.asin": _profit,
-        }), priority=1)
+        }
+        # listings=None 表示**这个源压根不提供 listing 快照**（只配了 OpenAPI 的装机），
+        # 与 listings=[] （源在、但一条都没返回）是两回事，规则对两者的反应也不同。
+        if listings is not None:
+            data["listing.snapshot"] = list(listings)
+        metrics.register(_Src(data), priority=1)
         monkeypatch.setattr(datasources, "install_defaults", lambda: None)
         monkeypatch.setattr(lingxing_optimizer, "resolve_target_acos",
                             lambda sid: (0.30, 0.40, 0.40, "测试目标"))
@@ -264,3 +269,112 @@ def test_optimizer_failure_is_a_gap_not_a_crash(wire3, monkeypatch):
     monkeypatch.setattr(lingxing_optimizer, "run_store", _boom)
     res = store_health.check_l3(1, include_optimizer=True)
     assert any("优化器候选不可用" in g for g in res.gaps)
+
+
+# ── Listing 维度：销量与广告效率 ─────────────────────────────────────────────
+# 这台机器的领星账号里没有销量数据（11 个店约 1200 条 listing 全为 0，见 ADR-0018），
+# 所以这一组用 fixtures 驱动，字段名取自 lingxing_mcp_source._listing 的规范化映射。
+# 规则本身不因**这个账号**缺数据而缩水 —— 用这套系统的人有真实数据，
+# 换 provider（SP-API / Ads API 报表）时规则一行不用改。
+
+def _listing(asin="B01", *, v7=70.0, v30=300.0, spend7=0.0, amount7=0.0,
+             status="在售", parent="P1", title=None):
+    """一条 listing 快照。avg_* 按窗口天数反推，与真实源的口径一致。"""
+    return {"sid": 1, "msku": f"MSKU-{asin}", "asin": asin, "parent_asin": parent,
+            "title": title or f"商品 {asin}", "status_text": status,
+            "channel": "FBA", "stars": 4.5, "reviews": 100, "rank": 1000,
+            "price": 29.9, "quantity": 10, "fulfillable": 10,
+            "volume_yesterday": v7 / 7.0, "volume_7": v7, "volume_30": v30,
+            "avg_volume_7": v7 / 7.0, "avg_volume_30": v30 / 30.0,
+            "amount_7": amount7, "amount_30": amount7 * 4, "spend_7": spend7,
+            "spend_30": spend7 * 4, "open_date": "2025-01-01"}
+
+
+def test_listing_sales_drop_fires_on_half_the_baseline(wire3):
+    """近 7 日日均跌到 30 日日均的一半以下 —— 活动级报表看不到这件事。"""
+    wire3(listings=[_listing(v7=21.0, v30=300.0)])      # 3/天 vs 10/天
+    hits = [f for f in _run().findings if f.code == "sales.listing_drop"]
+    assert len(hits) == 1
+    assert hits[0].current == pytest.approx(3.0) and hits[0].baseline == pytest.approx(10.0)
+
+
+def test_listing_sales_drop_ignores_long_tail(wire3):
+    """30 日日均不到 0.5 件的长尾，掉到 0 也不值得推 —— 那是噪音不是信号。"""
+    wire3(listings=[_listing(v7=0.0, v30=3.0)])
+    assert "sales.listing_drop" not in _codes(_run())
+
+
+def test_listing_stall_is_crit_and_beats_drop(wire3):
+    """卖得动的货突然一件不出，比"下滑"严重，且不该同时报两条。"""
+    from ivyea_agent import store_health
+
+    wire3(listings=[_listing(v7=0.0, v30=300.0)])
+    codes = _codes(_run())
+    assert "sales.listing_stall" in codes and "sales.listing_drop" not in codes
+    hit = [f for f in _run().findings if f.code == "sales.listing_stall"][0]
+    assert hit.severity == store_health.CRIT
+
+
+def test_delisted_listing_is_not_reported_as_stalled(wire3):
+    """已下架的 listing 没销量是应该的，报出来只会淹没真问题。"""
+    wire3(listings=[_listing(v7=0.0, v30=300.0, status="停售")])
+    assert _codes(_run()) == []
+
+
+def test_listing_acos_breach_uses_the_derived_target(wire3):
+    """目标 ACOS 由毛利率推（fixture 里是 30%），超 1.5 倍才报。"""
+    wire3(listings=[_listing(spend7=300.0, amount7=500.0)])   # ACOS 60%
+    hits = [f for f in _run().findings if f.code == "ads.listing_acos_breach"]
+    assert len(hits) == 1 and hits[0].current == pytest.approx(0.6)
+
+
+def test_listing_acos_ignored_below_spend_floor(wire3):
+    wire3(listings=[_listing(spend7=60.0, amount7=80.0)])     # ACOS 75% 但只花了 60
+    assert "ads.listing_acos_breach" not in _codes(_run())
+
+
+def test_spend_with_zero_sales_is_crit(wire3):
+    """有花费、零销售额是纯烧钱，门槛比 ACOS 超标低一档。"""
+    from ivyea_agent import store_health
+
+    wire3(listings=[_listing(spend7=80.0, amount7=0.0)])
+    hits = [f for f in _run().findings if f.code == "ads.listing_spend_no_sales"]
+    assert len(hits) == 1 and hits[0].severity == store_health.CRIT
+
+
+def test_listing_rules_never_carry_an_executable_intent(wire3):
+    """快照里没有 listing → campaign 的映射。凭 ASIN 猜一个活动去改预算，
+    改错的是别人的钱。要动手得先有确定映射（Ads API 才给得起）。"""
+    wire3(listings=[_listing(v7=0.0, v30=300.0, spend7=200.0, amount7=100.0)])
+    assert all(not f.executable for f in _run().findings)
+
+
+def test_all_zero_volumes_is_a_data_gap_not_1200_alerts(wire3):
+    """整店销量全为 0 = 这个源不给销量，不是全线断流。
+
+    逐条报出来会刷屏，而且每一条都是假的 —— 这正是本机账号的真实情况。
+    """
+    wire3(listings=[_listing(f"B{i:02d}", v7=0.0, v30=0.0, parent=f"P{i}")
+                    for i in range(20)])
+    res = _run()
+    assert _codes(res) == []
+    assert any("销量全为 0" in g for g in res.gaps)
+
+
+def test_no_listing_source_is_a_capability_boundary_not_a_failure(wire3):
+    """只配了领星 OpenAPI（没有 MCP）的装机不该天天收到"取数失败"。
+
+    能力边界记 skipped，不喂连续失败告警 —— 那条告警永远不会恢复（ADR-0018）。
+    """
+    wire3()                                  # 不注册 listing.snapshot
+    res = _run()
+    assert any("不提供 Listing 快照" in s for s in res.skipped)
+    assert not any("listing.snapshot" in g for g in res.gaps)
+
+
+def test_variants_of_one_parent_collapse_into_one_line(wire3):
+    """一个母体挂 30 个变体同时下滑，不合并就把整张早报占满。"""
+    wire3(listings=[_listing(f"B{i:02d}", v7=7.0, v30=300.0, parent="PARENT-X")
+                    for i in range(6)])
+    hits = [f for f in _run().findings if f.code == "sales.listing_drop"]
+    assert len(hits) == 1 and hits[0].group_size == 6

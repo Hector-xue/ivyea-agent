@@ -166,7 +166,9 @@ def test_spend_burst_silent_when_orders_keep_up(wire2, monkeypatch):
     store_health.check_l2(1)
     _force_gap(monkeypatch, 3600)
     wire2(today_rows=[_row(spend=70.0, orders=30.0)], config_rows=[_conf(budget=240.0)])
-    monkeypatch.setattr(intraday, "hourly_baseline",
+    # 基线的单位是每小时速率（rate_baseline）：这里 1 单/时，
+    # 而本段 1 小时增量 29 单，远超容忍倍数 → 判定为"卖爆了"，不报。
+    monkeypatch.setattr(intraday, "rate_baseline",
                         lambda *a, **k: {"spend": 10.0, "orders": 1.0, "clicks": 5.0,
                                          "impressions": 100.0, "sales": 50.0})
     assert "ads.spend_burst" not in _codes(store_health.check_l2(1))
@@ -238,7 +240,65 @@ def test_no_growth_observed_is_surfaced(wire2, monkeypatch):
     assert any("不滚动更新" in s for s in res.skipped)
 
 
-def test_hourly_baseline_needs_min_days(ivyea_home):
+def test_rate_baseline_needs_min_days(ivyea_home):
     from ivyea_agent import intraday
 
-    assert intraday.hourly_baseline(1, "campaign", "C1", 10, min_days=3) is None
+    assert intraday.rate_baseline(1, "campaign", "C1", 10, min_days=3) is None
+
+
+# ── 基线与采样节奏解耦 ──────────────────────────────────────────────────────
+# 巡检节奏从「L2 每小时」改成「每 12 小时」时暴露的问题：老的 hourly_baseline
+# 返回的是**两次采样之间的差值**，每小时采样时它恰好等于小时速率，看着没毛病；
+# 一改成 12 小时一轮，基线变成 12 小时总量、当前值仍是每小时速率，一比差 12 倍
+# —— 规则永远不触发，且不报错。这两条用例把"速率化"钉住。
+
+def _seed_days(sid, entity_id, *, days, gap_hours, spend_per_hour):
+    """按给定采样间隔造若干天历史。每天两次采样，间隔 gap_hours。"""
+    import time as _t
+
+    from ivyea_agent import intraday
+    now = _t.time()
+    conn = intraday._conn()
+    try:
+        for d in range(1, days + 1):
+            day = _t.strftime("%Y-%m-%d", _t.localtime(now - d * 86400))
+            end_ts = now - d * 86400
+            start_ts = end_ts - gap_hours * 3600
+            for ts, spend in ((start_ts, 0.0), (end_ts, spend_per_hour * gap_hours)):
+                conn.execute(
+                    "INSERT INTO samples (sid, entity, entity_id, day, ts, spend, orders)"
+                    " VALUES (?,?,?,?,?,?,0)",
+                    (str(sid), "campaign", entity_id, day, ts, spend))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("gap_hours", [1, 12])
+def test_baseline_is_a_rate_whatever_the_sampling_gap(ivyea_home, gap_hours):
+    """同样的"每小时 10 块"，1 小时采一次和 12 小时采一次必须得出同一个基线。"""
+    import time as _t
+
+    from ivyea_agent import intraday
+
+    hour = _t.localtime().tm_hour
+    _seed_days(1, f"C-{gap_hours}", days=5, gap_hours=gap_hours, spend_per_hour=10.0)
+    base = intraday.rate_baseline(1, "campaign", f"C-{gap_hours}", hour, min_days=3)
+    assert base is not None
+    assert base["spend"] == pytest.approx(10.0, rel=0.01)
+
+
+def test_baseline_tolerates_the_hour_drifting(ivyea_home):
+    """任务按「上次跑完 + 间隔」调度，执行时刻会慢慢漂。
+    要求整点严格相等的话，漂过一个小时边界基线就凭空消失。"""
+    import time as _t
+
+    from ivyea_agent import intraday
+
+    hour = _t.localtime().tm_hour
+    _seed_days(1, "C-drift", days=4, gap_hours=1, spend_per_hour=8.0)
+    assert intraday.rate_baseline(1, "campaign", "C-drift",
+                                  (hour + 2) % 24, min_days=3) is not None
+    # 但差得太远就不该硬凑 —— 凌晨和下午的花费速率本就不是一回事
+    assert intraday.rate_baseline(1, "campaign", "C-drift",
+                                  (hour + 8) % 24, min_days=3) is None

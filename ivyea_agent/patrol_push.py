@@ -138,3 +138,25 @@ def push_daily_multi(stores: list[dict[str, Any]], *, date: str, chat_id: str = 
     return {"ok": bool(sent.get("ok")), "message_id": message_id,
             "approvals": list(created), "stores": len(rows),
             "error": sent.get("error", "")}
+
+
+def push_period(stores: list[dict[str, Any]], *, period: str, window: str,
+                activity: dict[str, Any] | None = None,
+                chat_id: str = "", report_url: str = "") -> dict[str, Any]:
+    """周报 / 月报推送。**不创建任何 approval。**
+
+    与早报的区别就在这一句：早报负责"今天要你拍板的事"，周报负责回顾。
+    在周报里再创建一遍 approval，同一个目标会挂着两条待办，批一条另一条还在，
+    很容易对同一个活动改两次预算。
+    """
+    card = feishu_card.build_period_card(
+        period=period, window=window, stores=stores,
+        activity=activity, report_url=report_url)
+    fallback = "\n".join(
+        f"{s.get('name')}：问题 {len(s.get('findings') or [])} 条，"
+        f"缺口 {len(s.get('gaps') or [])} 条" for s in stores)
+    sent = notify.send_alert(fallback, card=card, chat_id=chat_id,
+                             title=f"店铺{period} {window}")
+    return {"ok": bool(sent.get("ok")),
+            "message_id": str(sent.get("message_id") or ""),
+            "stores": len(stores), "error": sent.get("error", "")}

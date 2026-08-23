@@ -49,6 +49,14 @@ THRESHOLDS: dict[str, Any] = {
     "sales.drop.ratio": 0.5,              # 销售额跌破基线的比例
     "sales.drop.min_baseline": 100.0,     # 基线太小不报（新品/长尾噪音）
     "profit.margin_erosion.pp": 0.05,     # 毛利率下降的百分点
+    # —— L3 · Listing 维度（来自 listing.snapshot 的多窗口销量/广告）——
+    # 这一组只依赖「指标契约」，不依赖是哪个 provider 给的数：
+    # 领星 MCP 现在能给，换成 SP-API / Ads API 报表后规则一行不用改（ADR-8）。
+    "sales.listing_drop.factor": 0.5,     # 近 7 日日均 / 近 30 日日均 跌破此比例
+    "sales.listing_drop.min_avg30": 0.5,  # 30 日日均低于此值不报（长尾噪音）
+    "sales.listing_stall.min_volume_30": 5.0,  # 30 日总销量门槛，太小不算"断流"
+    "ads.listing_acos.min_spend": 100.0,  # listing 级广告花费门槛
+    "ads.listing_no_sales.min_spend": 50.0,   # 有花费零销售额的门槛
     # —— L2 日内层 ——
     "ads.spend_burst.factor": 2.5,        # 小时花费速率 / 基线速率
     "ads.spend_burst.min_spend": 20.0,    # 本段增量花费门槛
@@ -755,6 +763,127 @@ def _rule_optimizer(res: CheckResult, sid: Any) -> None:
         res.skipped.append(f"优化器候选有 {blocked} 条被护栏/冷却/历史否决拦截，未纳入建议")
 
 
+def _rule_listing_sales_l3(res: CheckResult, snap: MetricResult,
+                           target_acos: float, acos_note: str) -> None:
+    """Listing 维度的销量与广告效率（L3）。
+
+    **为什么这一层要有 listing 维度**：活动级报表看不到"哪个货卖不动了"——
+    一个活动下挂十个 ASIN，其中一个断流，活动整体的 ACOS 可能还很好看。
+    出问题的是货，不是活动。
+
+    这批规则只读**指标契约**里的多窗口销量字段（`volume_7` / `volume_30` /
+    `amount_7` / `spend_7`），不关心是谁给的数：现在是领星 MCP 的 erp_listing，
+    换成 SP-API / Ads API 报表后规则一行不用改（ADR-8 分层的意义就在这）。
+
+    **全部只告警、不带 intent**：一条 listing 对应哪个广告活动，快照里没有这个
+    映射关系。凭 ASIN 猜一个活动去改预算，改错的是别人的钱。要动手得先有
+    "listing → campaign" 的确定映射，那是 Ads API 才给得起的东西。
+    """
+    if not snap.ok:
+        # 没有任何数据源提供 listing 快照（例如只配了领星 OpenAPI、没配 MCP）
+        # 是**能力边界**，不是故障：记 skipped，不喂连续失败告警。
+        # 反过来，源存在却取不到数才是缺口——那意味着规则本该跑却没跑。
+        if "没有任何已注册数据源支持该指标" in str(getattr(snap.gap, "reason", "")):
+            res.skipped.append("Listing 销量规则跳过：当前数据源不提供 Listing 快照"
+                               "（配上领星 MCP 或亚马逊 SP-API 后自动生效）")
+        else:
+            res.add_gap(snap)
+        return
+    rows = snap.rows
+    if not rows:
+        res.skipped.append("Listing 销量规则跳过：无 Listing 快照数据")
+        return
+    res.provenance.append(f"listing.snapshot：{_prov(snap)}")
+
+    # 全店 7/30 日销量都为 0 → 不是"全线断流"，是这个账号根本没有销量数据。
+    # 逐条报出来会刷屏，而且每一条都是假的。这种整体性缺失要当**数据缺口**报。
+    if not any(float(r.get("volume_30") or 0) or float(r.get("volume_7") or 0)
+               for r in rows):
+        res.gaps.append(
+            f"Listing 销量规则跳过：{len(rows)} 条 listing 的 7/30 日销量全为 0，"
+            "该数据源未提供销量（不是真的全部断流）")
+        res.gap_metrics["listing.snapshot"] = "no_sales_fields"
+        return
+
+    prov = _prov(snap)
+    drop_factor = threshold("sales.listing_drop.factor")
+    min_avg30 = threshold("sales.listing_drop.min_avg30")
+    stall_min = threshold("sales.listing_stall.min_volume_30")
+    acos_min_spend = threshold("ads.listing_acos.min_spend")
+    no_sales_min_spend = threshold("ads.listing_no_sales.min_spend")
+    breach_factor = threshold("ads.acos_breach.factor")
+
+    for r in rows:
+        if str(r.get("status_text") or "") not in ("在售", "", "Active"):
+            continue                     # 已下架的 listing 没销量是应该的
+        asin = str(r.get("asin") or r.get("msku") or "")
+        name = str(r.get("title") or asin)[:60]
+        target = str(r.get("msku") or asin)
+        v7 = float(r.get("volume_7") or 0)
+        v30 = float(r.get("volume_30") or 0)
+        avg7 = float(r.get("avg_volume_7") or 0) or (v7 / 7.0)
+        avg30 = float(r.get("avg_volume_30") or 0) or (v30 / 30.0)
+        spend7 = float(r.get("spend_7") or 0)
+        amount7 = float(r.get("amount_7") or 0)
+        # group_id = 母体 ASIN：同一个款的一堆变体同时下滑时，collapse_variants
+        # 会把它们并成一条（一个母体 30 个变体能把整张卡占满，实测过）。
+        common = {"sid": r.get("sid"), "scope": "listing", "target_id": target,
+                  "target_name": name, "provenance": prov,
+                  "group_id": str(r.get("parent_asin") or "")}
+
+        # 断流：30 日卖得动、近 7 日一件没有
+        if v30 >= stall_min and v7 <= 0:
+            res.findings.append(Finding(
+                code="sales.listing_stall", layer="L3", severity=CRIT,
+                action_class=ADVISORY, metric="volume_7",
+                current=0.0, baseline=v30, window="近 7 日 vs 近 30 日",
+                message=f"「{name}」近 7 日 0 销量（近 30 日 {v30:.0f} 件），疑似断流",
+                evidence={"asin": asin, "volume_7": 0, "volume_30": v30,
+                          "status": r.get("status_text"),
+                          "fulfillable": r.get("fulfillable"),
+                          "quantity": r.get("quantity")},
+                **common))
+        # 下滑：7 日日均跌破 30 日日均的一定比例
+        elif avg30 >= min_avg30 and avg7 < avg30 * drop_factor:
+            res.findings.append(Finding(
+                code="sales.listing_drop", layer="L3", severity=WARN,
+                action_class=ADVISORY, metric="avg_volume_7",
+                current=avg7, baseline=avg30, window="近 7 日均 vs 近 30 日均",
+                message=f"「{name}」日均销量 {avg7:.1f} 件，跌到 30 日均 "
+                        f"{avg30:.1f} 件的 {(avg7 / avg30):.0%}",
+                evidence={"asin": asin, "avg_volume_7": round(avg7, 2),
+                          "avg_volume_30": round(avg30, 2),
+                          "volume_7": v7, "volume_30": v30,
+                          "stars": r.get("stars"), "rank": r.get("rank")},
+                **common))
+
+        # 广告：有花费、零销售额 —— 纯烧钱，先看到再说
+        if spend7 >= no_sales_min_spend and amount7 <= 0:
+            res.findings.append(Finding(
+                code="ads.listing_spend_no_sales", layer="L3", severity=CRIT,
+                action_class=ADVISORY, metric="spend_7",
+                current=spend7, baseline=0.0, window="近 7 日",
+                message=f"「{name}」近 7 日广告花 {spend7:,.2f}，销售额为 0",
+                evidence={"asin": asin, "spend_7": round(spend7, 2), "amount_7": 0,
+                          "volume_7": v7},
+                **common))
+        elif spend7 >= acos_min_spend and amount7 > 0:
+            acos = spend7 / amount7
+            if acos > target_acos * breach_factor:
+                res.findings.append(Finding(
+                    code="ads.listing_acos_breach", layer="L3", severity=WARN,
+                    action_class=ADVISORY, metric="acos",
+                    current=acos, baseline=target_acos, window="近 7 日",
+                    message=f"「{name}」listing 级 ACOS {acos:.0%}，"
+                            f"超目标 {target_acos:.0%} 的 {breach_factor:g} 倍"
+                            f"（{acos_note}）",
+                    evidence={"asin": asin, "spend_7": round(spend7, 2),
+                              "amount_7": round(amount7, 2),
+                              "acos": round(acos, 4),
+                              "target_acos": round(target_acos, 4)},
+                    **common))
+
+
 def check_l3(sid: Any, days: int = 7, *, include_optimizer: bool = True) -> CheckResult:
     """L3 隔日层巡检。报表 T+1，所以窗口排除最近 1 天。"""
     from . import datasources, lingxing_optimizer
@@ -792,12 +921,20 @@ def check_l3(sid: Any, days: int = 7, *, include_optimizer: bool = True) -> Chec
     else:
         res.add_gap(cur_profit)
 
+    # Listing 维度：活动级报表看不到"哪个货卖不动了"。这一层不依赖广告开通与否——
+    # 断流和销量下滑跟有没有投广告无关，未开通广告的店同样要看。
+    snap = metrics.get_metric(metrics.LISTING_SNAPSHOT.key, {"sid": sid})
+    _rule_listing_sales_l3(res, snap, target_acos, acos_note)
+
     # 优化器的四根杠杆全在广告上，未开通广告的店没有可优化对象
     if include_optimizer and not has_ads:
         res.skipped.append(f"优化器候选跳过：{ADS_NOT_ENABLED}")
     elif include_optimizer:
         _rule_optimizer(res, sid)
 
+    # 与 L1 同理：一个母体下几十个变体同时下滑，不合并就把整张卡占满。
+    # 合并只作用于纯告警，带 intent 的建议绝不合并（见 collapse_variants）。
+    res.findings = collapse_variants(res.findings)
     return res
 
 
@@ -937,12 +1074,14 @@ def _rule_spend_burst(res: CheckResult, sid: Any, sample: Any,
         budget = float(c.get("daily_budget") or 0)
         rate = d.per_hour("spend")
 
-        base = intraday.hourly_baseline(
+        base = intraday.rate_baseline(
             sid, "campaign", d.entity_id, hour, exclude_day=today,
             min_days=int(threshold("l2.baseline_min_days")))
         if base:
+            # base 的单位是**每小时速率**（见 intraday.rate_baseline 的说明），
+            # 与 rate 同量纲。这一点在采样间隔不是 1 小时的时候是死活攸关的。
             baseline_rate = base["spend"]
-            basis = f"同时段历史均值（{hour:02d} 点）"
+            basis = f"同时段历史均值（{hour:02d} 点前后）"
         elif budget > 0:
             baseline_rate = budget / 24.0
             basis = "日预算配速（历史样本不足，退化基线）"
@@ -952,10 +1091,12 @@ def _rule_spend_burst(res: CheckResult, sid: Any, sample: Any,
         if baseline_rate <= 0 or rate < baseline_rate * factor:
             continue
 
-        # 订单同步增长则不是"烧钱"，是"卖爆了"
+        # 订单同步增长则不是"烧钱"，是"卖爆了"。
+        # 两边都换算成**每小时**再比：基线是速率，拿区间总量去比会随采样间隔变松。
         order_delta = d.values.get("orders", 0.0)
+        order_rate = d.per_hour("orders")
         base_orders = base["orders"] if base else 0.0
-        if base_orders > 0 and order_delta >= base_orders * threshold("ads.spend_burst.order_tolerance"):
+        if base_orders > 0 and order_rate >= base_orders * threshold("ads.spend_burst.order_tolerance"):
             continue
 
         res.findings.append(Finding(
@@ -971,6 +1112,7 @@ def _rule_spend_burst(res: CheckResult, sid: Any, sample: Any,
                       "baseline_per_hour": round(baseline_rate, 2),
                       "baseline_basis": basis,
                       "orders_delta": order_delta,
+                      "orders_per_hour": round(order_rate, 2),
                       "daily_budget": budget,
                       "data_corrected": d.corrected},
             provenance=f"日内采样 · {basis}",
@@ -978,16 +1120,24 @@ def _rule_spend_burst(res: CheckResult, sid: Any, sample: Any,
 
 
 # ── 早报汇总（方案 §5.5）────────────────────────────────────────────────────
-def daily_summary(sid: Any, *, days: int = 1) -> dict[str, Any]:
-    """昨日关键指标 + 环比。返回 {lines, metrics, gaps}。
+def period_label(days: int) -> str:
+    """窗口的人话名字。日报/周报/月报共用同一套装配，只有措辞不同。"""
+    return {1: "昨日", 7: "本周", 30: "本月"}.get(days, f"近 {days} 日")
+
+
+def period_summary(sid: Any, *, days: int = 1) -> dict[str, Any]:
+    """一个窗口的关键指标 + 环比。返回 {lines, metrics, gaps}。
+
+    ``days=1`` 是日报，7 是周报，30 是月报 —— 同一套装配，别为周报再写一遍。
 
     环比对照的是"再往前推同样长度的窗口"，不是"前一天"——单日波动太大，
-    拿单日比单日会天天报警。
+    拿单日比单日会天天报警；周报同理，比的是上一个 7 天。
     """
     from . import datasources
     datasources.install_defaults()
 
     recent, base = _window_days(days)
+    span = period_label(days)
     gaps: list[str] = []
     lines: list[str] = []
     out: dict[str, Any] = {}
@@ -1013,12 +1163,12 @@ def daily_summary(sid: Any, *, days: int = 1) -> dict[str, Any]:
         p_acos = (p_spend / p_sales) if p_sales else 0.0
         out.update({"ad_spend": spend, "ad_sales": sales, "ad_orders": orders,
                     "clicks": clicks, "acos": acos})
-        lines.append(f"**广告**　花费 {spend:,.2f}（{_delta(spend, p_spend)}）"
+        lines.append(f"**广告**（{span}）　花费 {spend:,.2f}（{_delta(spend, p_spend)}）"
                      f"　销售额 {sales:,.2f}（{_delta(sales, p_sales)}）")
         lines.append(f"　　　　订单 {orders:,.0f}（{_delta(orders, p_orders)}）"
                      f"　ACOS {acos:.1%}（{_delta_pp(acos, p_acos)}）")
     else:
-        gaps.append(rep.gap.describe() if not rep.ok else "窗口内无广告报表数据")
+        gaps.append(rep.gap.describe() if not rep.ok else f"{span}窗口内无广告报表数据")
 
     cur_p = metrics.get_metric(metrics.PROFIT_ASIN.key, {"sid": sid},
                                metrics.Window(tuple(recent)))
@@ -1031,10 +1181,10 @@ def daily_summary(sid: Any, *, days: int = 1) -> dict[str, Any]:
                       for r in (old_p.rows if old_p.ok else []))
         out.update({"sales_amount": total, "gross_profit": profit})
         rate = (profit / total) if total else 0.0
-        lines.append(f"**店铺**　销售额 {total:,.2f}（{_delta(total, p_total)}）"
+        lines.append(f"**店铺**（{span}）　销售额 {total:,.2f}（{_delta(total, p_total)}）"
                      f"　毛利 {profit:,.2f}（{rate:.1%}）")
     else:
-        gaps.append(cur_p.gap.describe() if not cur_p.ok else "窗口内无 ASIN 利润数据")
+        gaps.append(cur_p.gap.describe() if not cur_p.ok else f"{span}窗口内无 ASIN 利润数据")
 
     snap = metrics.get_metric("listing.snapshot", {"sid": sid})
     if snap.ok and snap.rows:
@@ -1082,7 +1232,13 @@ def daily_summary(sid: Any, *, days: int = 1) -> dict[str, Any]:
         gaps.append(inv.gap.describe())
 
     out["window"] = f"{recent[0]}~{recent[-1]}" if recent else ""
+    out["days"] = days
     return {"lines": lines, "metrics": out, "gaps": gaps}
+
+
+def daily_summary(sid: Any, *, days: int = 1) -> dict[str, Any]:
+    """早报口径的窗口汇总。保留这个名字：早报那条链路和它的测试都在用。"""
+    return period_summary(sid, days=days)
 
 
 def _delta(now: float, before: float) -> str:

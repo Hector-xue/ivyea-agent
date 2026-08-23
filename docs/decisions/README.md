@@ -37,6 +37,7 @@ git log 记得住「改了什么」，记不住「为什么不选另一条路」
 | [0017](./0017-store-patrol-and-approval-loop.md) | 店铺巡检分层；证据门槛由动作可逆性决定；审批状态归 agent | 2026-08-22 |
 | [0018](./0018-multi-store-patrol.md) | 多店铺巡检：能力边界不算故障；变体合并后再推送 | 2026-08-23 |
 | [0019](./0019-feishu-config-is-agent-owned-and-ui-driven.md) | 飞书配置归 agent 存、界面来写；relay 以它为准，env 只兜底 | 2026-08-23 |
+| [0020](./0020-cadence-tiers-review-reports-and-rules-without-data.md) | 节奏改 1h/12h/日/周/月；周报只回顾不派活；没数据也照写规则 | 2026-08-23 |
 
 相关的工作台侧决策见
 [IvyeaOps 的 ADR 目录](https://github.com/Hector-xue/IvyeaOps/tree/main/docs/decisions)，

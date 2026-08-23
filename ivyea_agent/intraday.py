@@ -133,11 +133,22 @@ def record_and_diff(sid: Any, entity: str, day: str,
     return res
 
 
-def hourly_baseline(sid: Any, entity: str, entity_id: str, hour: int,
-                    *, exclude_day: str = "", min_days: int = 3) -> Optional[dict[str, float]]:
-    """同时段历史基线：取过去若干天**同一小时**的平均增量。
+def rate_baseline(sid: Any, entity: str, entity_id: str, hour: int,
+                  *, exclude_day: str = "", min_days: int = 3,
+                  tolerance_hours: int = 3) -> Optional[dict[str, float]]:
+    """同时段历史基线，单位是**每小时速率**。
 
-    数据不足 ``min_days`` 天时返回 None——调用方应改用配速兜底，
+    两个必须记住的点：
+
+    1. **返回速率，不是区间增量。** 老版本返回的是"两次采样之间的差值"，
+       在每小时采一次样时它恰好等于小时速率，于是调用方拿它和 ``per_hour()``
+       比看着没毛病。采样间隔一改（比如 12 小时一轮），基线变成 12 小时的总量、
+       当前值仍是每小时速率，一比就是 12 倍差 —— 规则**永远不会触发**，
+       而且不会报错，静默失效。速率化之后，这条规则与采样节奏解耦。
+    2. **同时段是带容差的。** 任务由「上次跑完 + 间隔」调度，每天的执行时刻会
+       随耗时缓慢漂移；要求整点严格相等，漂过一个小时边界基线就凭空消失。
+
+    数据不足 ``min_days`` 天时返回 None —— 调用方应改用配速兜底，
     而不是拿一天的数据当基线（那样第二天就会满屏告警）。
     """
     conn = _conn()
@@ -156,16 +167,21 @@ def hourly_baseline(sid: Any, entity: str, entity_id: str, hour: int,
 
     acc: dict[str, list[float]] = {f: [] for f in CUMULATIVE_FIELDS}
     for _day, samples in by_day.items():
-        hit = None
+        # 取当天**结束时刻最接近目标时段**的那一段增量
+        best: Optional[tuple[int, Any, Any]] = None
         for i in range(1, len(samples)):
-            if time.localtime(samples[i]["ts"]).tm_hour == hour:
-                hit = (samples[i - 1], samples[i])
-                break
-        if not hit:
+            end_hour = time.localtime(samples[i]["ts"]).tm_hour
+            gap = min(abs(end_hour - hour), 24 - abs(end_hour - hour))
+            if gap > tolerance_hours:
+                continue
+            if best is None or gap < best[0]:
+                best = (gap, samples[i - 1], samples[i])
+        if best is None:
             continue
-        p, c = hit
+        _gap, p, c = best
+        hours = max(1e-6, (float(c["ts"]) - float(p["ts"])) / 3600.0)
         for f in CUMULATIVE_FIELDS:
-            acc[f].append(max(0.0, float(c[f] or 0) - float(p[f] or 0)))
+            acc[f].append(max(0.0, float(c[f] or 0) - float(p[f] or 0)) / hours)
 
     n = len(acc["spend"])
     if n < min_days:

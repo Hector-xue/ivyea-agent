@@ -6,7 +6,7 @@ import pytest
 
 # ── 连续计数 ────────────────────────────────────────────────────────────────
 def test_consecutive_not_cumulative(ivyea_home):
-    """巡检每 20 分钟一次，偶发超时是常态；累计计数迟早触发 = 狼来了。"""
+    """巡检按小时级反复跑，偶发超时是常态；累计计数迟早触发 = 狼来了。"""
     from ivyea_agent import reliability as r
 
     assert r.record_failure("k") == 1
