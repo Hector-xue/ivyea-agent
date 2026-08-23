@@ -26,10 +26,16 @@ def _dir() -> Path:
 
 
 def new_id() -> str:
+    """生成会话 id。
+
+    随机段用 4 字节（32 位）而不是 2 字节：同一毫秒内连开会话时，16 位只有
+    65536 个取值，取 20 个就有约 0.3% 概率撞上（生日问题）。而 id 直接当文件名，
+    撞了就是两个会话互相覆盖 —— 这种错极少发生、发生了又很难查。
+    """
     now = time.time()
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
     millis = int((now % 1) * 1000)
-    return f"{stamp}-{millis:03d}-{secrets.token_hex(2)}"
+    return f"{stamp}-{millis:03d}-{secrets.token_hex(4)}"
 
 
 # 会话 id 会直接拼进文件名，而 id 是**调用方给的**（serve 的 payload.session_id、

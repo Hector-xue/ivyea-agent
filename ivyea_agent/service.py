@@ -254,6 +254,12 @@ def manifest() -> dict[str, Any]:
             {"method": "POST", "path": "/v1/model/configure", "description": "configure the active IvyeaAgent model without returning secrets"},
             {"method": "GET", "path": "/v1/config/vision", "description": "vision fallback chain status (tier 1 main brain / 2 sidecar / 3 local CV)"},
             {"method": "POST", "path": "/v1/config/vision", "description": "configure the tier-2 sidecar vision model without returning secrets"},
+            {"method": "GET", "path": "/v1/config/feishu", "description": "Feishu setup state for the IvyeaOps wizard (no secrets); ?probe=1 verifies live"},
+            {"method": "POST", "path": "/v1/config/feishu", "description": "configure Feishu credentials, target chat, and approval whitelist"},
+            {"method": "POST", "path": "/v1/config/feishu/action", "description": "wizard helpers: test / chats / members / patrol"},
+            {"method": "GET", "path": "/v1/config/amazon", "description": "Amazon SP-API / Ads API credential and marketplace state (no secrets)"},
+            {"method": "POST", "path": "/v1/config/amazon", "description": "configure Amazon LWA credentials and marketplaces"},
+            {"method": "POST", "path": "/v1/config/amazon/action", "description": "verify Amazon credentials live, or list advertising profiles"},
             {"method": "GET", "path": "/v1/mcp/self-config", "description": "stdio MCP server config for local clients"},
             {"method": "GET", "path": "/v1/system/status", "description": "install/runtime status for IvyeaOps diagnostics"},
             {"method": "GET", "path": "/v1/system/doctor", "description": "install/runtime doctor checks"},
@@ -1884,6 +1890,166 @@ def chat_session_delete(session_id: str) -> dict[str, Any]:
     return {"ok": True, "deleted": session_id}
 
 
+def feishu_approval_resolve(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """飞书卡片按钮回调（批准/忽略）。契约见方案 §4.2。
+
+    relay 已做过发送者白名单、回调 chat 一致性、卡片 token 去重三道校验；
+    这里做二次校验（approval 状态 + TTL），双保险。
+    """
+    from . import approval_flow
+
+    approval_id = str(payload.get("approval_id") or "").strip()
+    choice = str(payload.get("choice") or "").strip()
+    if not approval_id or choice not in ("approve", "deny"):
+        return 400, {"ok": False, "error": "需要 approval_id 与 choice(approve|deny)"}
+    result = approval_flow.resolve(
+        approval_id, choice,
+        operator=str(payload.get("operator_open_id") or ""),
+        chat_id=str(payload.get("chat_id") or ""),
+        update_card=bool(payload.get("update_card", False)),
+    )
+    if not result.get("ok") and result.get("reason") in (
+            "already_resolved", "expired", "unknown", "chat_mismatch"):
+        return 409, {"ok": False, "reason": result["reason"],
+                     "detail": result.get("detail", ""),
+                     "state": result.get("state", "")}
+    return 200, result
+
+
+def feishu_approval_rollback(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    from . import approval_flow
+
+    approval_id = str(payload.get("approval_id") or "").strip()
+    if not approval_id:
+        return 400, {"ok": False, "error": "需要 approval_id"}
+    result = approval_flow.rollback(
+        approval_id,
+        operator=str(payload.get("operator_open_id") or ""),
+        chat_id=str(payload.get("chat_id") or ""),
+        update_card=bool(payload.get("update_card", False)),
+    )
+    if not result.get("ok") and result.get("reason") in ("unknown", "chat_mismatch"):
+        return 409, {"ok": False, "reason": result["reason"],
+                     "detail": result.get("detail", "")}
+    return 200, result
+
+
+def feishu_action(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """卡片上不绑定单个 approval 的动作（方案 P6）：
+    批量批准（带二次确认）、开写开关、调阈值。
+
+    与 /v1/feishu/approval/* 分开，是因为它们不走审批状态机 ——
+    塞进 resolve 里会让那条安全攸关的路径多出几个分支。
+    """
+    from . import approval_flow, store_health
+
+    action = str(payload.get("action") or "").strip()
+    operator = str(payload.get("operator_open_id") or "")
+    chat_id = str(payload.get("chat_id") or "")
+
+    if action in ("approve_all", "approve_all_confirm"):
+        message_id = str(payload.get("message_id") or "").strip()
+        if not message_id:
+            return 400, {"ok": False, "error": "approve_all 需要 message_id"}
+        result = approval_flow.approve_all(
+            message_id, operator=operator, chat_id=chat_id,
+            confirm=(action == "approve_all_confirm"))
+        return 200, result
+
+    if action == "operate_on":
+        return 200, approval_flow.set_operate(
+            minutes=int(payload.get("minutes") or 120), operator=operator)
+
+    if action == "operate_status":
+        return 200, approval_flow.operate_status()
+
+    if action == "threshold_list":
+        return 200, {"ok": True, "thresholds": store_health.threshold_table()}
+
+    if action == "threshold_set":
+        key = str(payload.get("key") or "").strip()
+        try:
+            value = store_health.set_threshold(key, payload.get("value"))
+        except KeyError as exc:
+            return 404, {"ok": False, "error": str(exc)}
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
+        return 200, {"ok": True, "key": key, "value": value}
+
+    if action == "threshold_reset":
+        n = store_health.reset_threshold(str(payload.get("key") or ""))
+        return 200, {"ok": True, "reset": n}
+
+    return 400, {"ok": False, "error": f"未知动作：{action}"}
+
+
+def feishu_config_get(probe: bool = False) -> dict[str, Any]:
+    """飞书配置全景（IvyeaOps 系统配置页的数据面）。**不回显 App Secret。**"""
+    from . import feishu_setup
+
+    return feishu_setup.status(probe=probe)
+
+
+def feishu_config_set(payload: dict[str, Any]) -> dict[str, Any]:
+    from . import feishu_setup
+
+    return feishu_setup.configure(payload)
+
+
+def feishu_config_action(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """配置向导里那几个「帮我列出来」和「发一条试试」。
+
+    单独一个 action 端点而不是四条路径：它们都是同一张配置页上的辅助动作，
+    生命周期一致，摊成四条路由只会让 relay/ops 两边各记一遍。
+    """
+    from . import feishu_setup
+
+    action = str(payload.get("action") or "").strip()
+    if action == "test":
+        return 200, feishu_setup.send_test(payload)
+    if action == "chats":
+        return 200, feishu_setup.list_chats()
+    if action == "members":
+        return 200, feishu_setup.list_members(str(payload.get("chat_id") or ""))
+    if action == "patrol":
+        return 200, feishu_setup.configure_patrol(payload)
+    return 400, {"ok": False, "error": f"未知动作：{action}（可用：test / chats / members / patrol）"}
+
+
+def amazon_config_get() -> dict[str, Any]:
+    """亚马逊官方 API 的配置全景。**不回显任何密钥。**"""
+    from . import amazon_auth
+
+    return {"ok": True, **amazon_auth.status()}
+
+
+def amazon_config_set(payload: dict[str, Any]) -> dict[str, Any]:
+    from . import amazon_auth
+
+    return amazon_auth.configure(payload)
+
+
+def amazon_config_action(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """verify（换 token + 打一次真接口）/ profiles（列广告档案，用来填 profile id）。"""
+    from . import amazon_verify
+
+    action = str(payload.get("action") or "").strip()
+    if action == "verify":
+        return 200, amazon_verify.verify()
+    if action == "profiles":
+        return 200, amazon_verify.list_profiles()
+    return 400, {"ok": False, "error": f"未知动作：{action}（可用：verify / profiles）"}
+
+
+def feishu_approval_get(approval_id: str) -> tuple[int, dict[str, Any]]:
+    from . import approval_flow
+
+    data = approval_flow.status(approval_id)
+    if data is None:
+        return 404, {"ok": False, "error": "审批项不存在"}
+    return 200, data
+
+
 def chat_session_create(payload: dict[str, Any]) -> dict[str, Any]:
     session_id = _checked_session_id(payload.get("id"))
     initial = str(payload.get("message") or payload.get("title") or "").strip()
@@ -1985,6 +2151,13 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/config/vision":
             self._json(200, vision_status())
             return
+        if parsed.path == "/v1/config/feishu":
+            self._json(200, feishu_config_get(
+                probe=(_first(qs, "probe") in ("1", "true", "yes"))))
+            return
+        if parsed.path == "/v1/config/amazon":
+            self._json(200, amazon_config_get())
+            return
         if parsed.path == "/v1/model":
             self._json(200, {"ok": True, "model": health()["model"]})
             return
@@ -2025,6 +2198,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/chat/sessions":
             self._json(200, chat_session_list(limit=_int(_first(qs, "limit"), 20)))
+            return
+        if parsed.path.startswith("/v1/feishu/approval/"):
+            code, data = feishu_approval_get(parsed.path.rsplit("/", 1)[-1])
+            self._json(code, data)
             return
         if parsed.path.startswith("/v1/chat/sessions/"):
             session_id = parsed.path.rsplit("/", 1)[-1]
@@ -2246,6 +2423,18 @@ class _Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._json(400, {"ok": False, "error": str(exc)})
             return
+        if parsed.path == "/v1/feishu/approval/resolve":
+            code, data = feishu_approval_resolve(body)
+            self._json(code, data)
+            return
+        if parsed.path == "/v1/feishu/action":
+            code, data = feishu_action(body)
+            self._json(code, data)
+            return
+        if parsed.path == "/v1/feishu/approval/rollback":
+            code, data = feishu_approval_rollback(body)
+            self._json(code, data)
+            return
         if parsed.path == "/v1/chat/sessions/import":
             try:
                 self._json(200, chat_session_import(body))
@@ -2388,6 +2577,20 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/config/vision":
             self._json(200, vision_configure(body))
+            return
+        if parsed.path == "/v1/config/feishu":
+            self._json(200, feishu_config_set(body))
+            return
+        if parsed.path == "/v1/config/feishu/action":
+            code, data = feishu_config_action(body)
+            self._json(code, data)
+            return
+        if parsed.path == "/v1/config/amazon":
+            self._json(200, amazon_config_set(body))
+            return
+        if parsed.path == "/v1/config/amazon/action":
+            code, data = amazon_config_action(body)
+            self._json(code, data)
             return
         if parsed.path == "/v1/system/service/start":
             self._json(200, system_service_start(body))

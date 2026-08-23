@@ -1,0 +1,16 @@
+[Unit]
+Description=Run IvyeaAgent scheduled tasks every 5 minutes
+Documentation=https://github.com/Hector-xue/ivyea-agent
+
+[Timer]
+# 每 5 分钟唤醒一次，问 schedule.json「谁到点了」。
+# L1 每 20 分钟、L2 每小时、早报每天 08:00 —— 这些都在 schedule.json 里配，
+# 不写死在 timer 里。
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=30s
+# 停机期间错过的执行，开机后补跑一次，而不是静默跳过。
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -172,9 +172,36 @@ def aggregate_terms(sid: int, days: int = 14) -> dict[str, dict[str, Any]]:
     return out
 
 
+def resolve_target_acos(sid: int) -> tuple[float, Optional[float], Optional[float], str]:
+    """推导该店铺的目标 ACOS。返回 (target, breakeven, margin, 说明)。
+
+    单一权威：巡检（store_health）与优化器都用这个函数，避免两处各推一套目标值，
+    出现「告警说超标、优化器说没超标」的自相矛盾。
+
+    优先级：手动目标 > 手动毛利率 > 店铺实际毛利率 > 默认 30%。
+    """
+    factor = _f(_cfg("lingxing_target_acos_factor")) or 0.7
+    t_over = _f(_cfg("lingxing_target_acos_override"))
+    m_over = _f(_cfg("lingxing_margin_override"))
+
+    margin = None if t_over > 0 else _store_margin(sid)
+    if t_over > 0:
+        return t_over, None, None, f"目标ACOS=手动设定 {t_over:.0%}"
+    if m_over > 0:
+        return (factor * m_over, m_over, m_over,
+                f"毛利率=手动 {m_over:.0%}，目标ACOS={factor * m_over:.0%}")
+    if margin:
+        return (factor * margin, margin, margin,
+                f"毛利率≈{margin:.0%}(店铺均值)，目标ACOS={factor * margin:.0%}"
+                f"(={factor:g}×毛利)")
+    return 0.30, None, None, "未取到毛利数据，暂用默认目标ACOS 30%"
+
+
 def run_store(sid: int, days: Optional[int] = None, progress: Optional[Callable] = None) -> dict[str, Any]:
     """对一个店铺跑只读规则引擎，返回 {sid, window_days, margin, target_acos, candidates...}。"""
-    factor = _f(_cfg("lingxing_target_acos_factor")) or 0.7
+    # 目标 ACOS 相关的三个配置（factor / target_acos_override / margin_override）
+    # 已收进 resolve_target_acos()，这里不再各读一遍 —— 读了不用是死代码，
+    # 更糟的是给人"这里还有一套推导"的错觉。
     neg_clicks = int(_cfg("lingxing_neg_min_clicks") or 15)
     bid_clicks = int(_cfg("lingxing_bid_min_clicks") or 15)
     scale_orders = int(_cfg("lingxing_scale_min_orders") or 3)
@@ -184,23 +211,9 @@ def run_store(sid: int, days: Optional[int] = None, progress: Optional[Callable]
     cooldown = int(_cfg("lingxing_cooldown_days") or 7)
     excl = int(_cfg("lingxing_opt_exclude_recent_days") or 2)
     win = int(days or _cfg("lingxing_opt_window_days") or 30)
-    t_over = _f(_cfg("lingxing_target_acos_override"))
-    m_over = _f(_cfg("lingxing_margin_override"))
     dates = _window_dates(win, excl)
 
-    margin = None if t_over > 0 else _store_margin(sid)
-    if t_over > 0:
-        breakeven, target = None, t_over
-        note = f"目标ACOS=手动设定 {t_over:.0%}"
-    elif m_over > 0:
-        margin = m_over; breakeven = margin; target = factor * margin
-        note = f"毛利率=手动 {margin:.0%}，目标ACOS={target:.0%}"
-    elif margin:
-        breakeven = margin; target = factor * margin
-        note = f"毛利率≈{margin:.0%}(店铺均值)，目标ACOS={target:.0%}(={factor:g}×毛利)"
-    else:
-        breakeven = None; target = 0.30
-        note = "未取到毛利数据，暂用默认目标ACOS 30%"
+    target, breakeven, margin, note = resolve_target_acos(sid)
 
     def tgt() -> float:
         return target

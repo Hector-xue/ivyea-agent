@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from . import __version__, config, ui
 # chat 展示层 helper 已拆到 chat_ui.py；re-export 保持 cli.X 引用与既有测试兼容。
@@ -1143,6 +1144,41 @@ def _execute_lingxing_candidates(result: dict, yes: bool = False) -> int:
     return 0
 
 
+def _cmd_amazon(args: argparse.Namespace) -> int:
+    """亚马逊官方 API 的自检与档案清单。
+
+    ``verify`` 会真的打一次接口 —— 配置类命令最没用的形态就是"保存成功"，
+    用户要的是"到底通没通"。
+    """
+    from . import amazon_auth, amazon_verify
+
+    if args.action == "status":
+        st = amazon_auth.status()
+        print(f"凭据：{'已配置' if st['configured'] else '未配置'}"
+              f"　广告凭据：{'已配置' if st['ads_configured'] else '未配置'}")
+        print(f"区域：{st['region']}　SP-API：{st['spapi_host']}　Ads：{st['ads_host']}")
+        if not st["marketplaces"]:
+            print("站点：（未登记）—— 至少填一个 marketplace_id 才能巡检")
+        for m in st["marketplaces"]:
+            print(f"  sid={m['sid']:<10} {m['name']:<8} {m['marketplace_id']}"
+                  f"  广告档案={m['ads_profile_id'] or '（未填）'}")
+        return 0
+
+    if args.action == "profiles":
+        out = amazon_verify.list_profiles()
+        if not out["ok"]:
+            print(f"✗ {out['error']}")
+            return 1
+        for p in out["profiles"]:
+            print(f"  {p['country']:<4} profileId={p['profile_id']:<14} "
+                  f"{p['type']:<8} {p['name']}  站点={p['marketplace_id']}")
+        return 0
+
+    result = amazon_verify.verify()
+    print(amazon_verify.render(result), end="")
+    return 0 if result["ok"] else 1
+
+
 def _cmd_lingxing(args: argparse.Namespace) -> int:
     from . import lingxing_openapi as lx
     from .lingxing_datasets import list_sellers
@@ -1195,6 +1231,211 @@ def _cmd_lingxing(args: argparse.Namespace) -> int:
             print("领星写入开关已关闭（回到 dry-run）。")
         else:
             print(f"领星写入开关：{'开' if lw.operate_active() else '关'}")
+        return 0
+    return 2
+
+
+def _store_target_args(args: argparse.Namespace) -> dict[str, Any]:
+    """把命令行参数翻译成 ``stores.resolve_targets`` 认的形状。"""
+    out: dict[str, Any] = {}
+    if getattr(args, "all_stores", False):
+        out["sids"] = "all"
+    elif getattr(args, "sids", ""):
+        out["sids"] = [v.strip() for v in str(args.sids).split(",") if v.strip()]
+    elif getattr(args, "sid", ""):
+        out["sid"] = args.sid
+    if getattr(args, "exclude_sids", ""):
+        out["exclude_sids"] = [v.strip() for v in str(args.exclude_sids).split(",") if v.strip()]
+    return out
+
+
+def _store_health_multi(args: argparse.Namespace, targets: list[dict[str, Any]],
+                        layer: str) -> int:
+    """多店巡检：逐店隔离执行，任一店异常不影响其余店。"""
+    from . import store_health
+
+    results: list[dict[str, Any]] = []
+    failed = 0
+    for store in targets:
+        sid = store.get("sid")
+        name = str(store.get("name") or f"sid {sid}")
+        try:
+            if layer == "l1":
+                r = store_health.check_l1(sid)
+            elif layer == "l2":
+                r = store_health.check_l2(sid)
+            else:
+                r = store_health.check_l3(sid, days=int(args.days or 7),
+                                          include_optimizer=not args.no_optimizer)
+        except Exception as exc:  # noqa: BLE001 —— 逐店隔离
+            failed += 1
+            results.append({"sid": sid, "name": name, "error": f"{type(exc).__name__}: {exc}"})
+            if not args.json:
+                print(f"—— {name}（sid {sid}）——\n  ! 巡检异常：{type(exc).__name__}: {exc}\n")
+            continue
+        results.append({"sid": sid, "name": name, "result": r})
+        if not args.json:
+            print(f"—— {name}（sid {sid}）——")
+            print(store_health.render(r), end="")
+            print()
+
+    if args.json:
+        import dataclasses
+        print(json.dumps([
+            {"sid": x["sid"], "name": x["name"], "error": x["error"]} if "error" in x else
+            {"sid": x["sid"], "name": x["name"], "layer": x["result"].layer,
+             "findings": [dataclasses.asdict(f) for f in x["result"].sorted_findings()],
+             "gaps": x["result"].gaps, "skipped": x["result"].skipped,
+             "provenance": x["result"].provenance}
+            for x in results], ensure_ascii=False, indent=2))
+    else:
+        total = sum(len(x["result"].findings) for x in results if "result" in x)
+        print(f"== {len(targets)} 个店铺，异常合计 {total} 条，"
+              f"取数失败 {failed} 个店 ==")
+    return 1 if failed else 0
+
+
+def _cmd_store(args: argparse.Namespace) -> int:
+    """店铺业务巡检（L1 快照层）。只读，不写任何广告配置。"""
+    from . import store_health, stores
+
+    if args.action == "list":
+        try:
+            rows = stores.list_stores(force=bool(getattr(args, "refresh", False)),
+                                      include_inactive=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"拉取店铺列表失败：{exc}", file=sys.stderr)
+            return 1
+        print(f"共 {len(rows)} 个店铺：")
+        for x in rows:
+            flags = []
+            if int(x.get("status") or 0) != stores.STATUS_ACTIVE:
+                flags.append("非在营")
+            if not x.get("has_ads"):
+                flags.append("未开通广告")
+            tail = f"  [{'/'.join(flags)}]" if flags else ""
+            print(f"  {x.get('sid'):<6} {x.get('name'):<12} {x.get('region'):<4}"
+                  f" {x.get('country')}{tail}")
+        return 0
+
+    if args.action != "health":
+        print("用法：ivyea store health --sid <SID> [--layer l1] [--json]\n"
+              "  或：ivyea store health --all-stores [--layer l1]\n"
+              "  或：ivyea store list", file=sys.stderr)
+        return 2
+
+    layer = (args.layer or "l1").lower()
+    if layer not in ("l1", "l2", "l3"):
+        print(f"未知巡检层 {layer}。可用：l1（快照）/ l2（日内）/ l3（隔日）", file=sys.stderr)
+        return 2
+
+    targets = stores.resolve_targets(_store_target_args(args))
+    if not targets:
+        try:
+            rows = stores.list_stores(include_inactive=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"未指定 --sid，且拉取店铺列表失败：{exc}", file=sys.stderr)
+            return 1
+        print("未指定 --sid / --sids / --all-stores。可用店铺：", file=sys.stderr)
+        for x in rows:
+            print(f"  {x.get('sid')}  {x.get('name')}  {x.get('country')}", file=sys.stderr)
+        return 2
+
+    if len(targets) > 1:
+        return _store_health_multi(args, targets, layer)
+
+    sid = targets[0].get("sid")
+    if layer == "l1":
+        result = store_health.check_l1(sid)
+    elif layer == "l2":
+        result = store_health.check_l2(sid)
+    else:
+        result = store_health.check_l3(sid, days=int(args.days or 7),
+                                       include_optimizer=not args.no_optimizer)
+    if args.push:
+        from . import patrol_push
+        pushed = patrol_push.push_result(result, chat_id=args.chat_id or "",
+                                         store_name=args.store_name or "",
+                                         channel=args.channel)
+        if pushed.get("ok"):
+            print(f"已推送：message_id={pushed['message_id']} "
+                  f"审批项={len(pushed['approvals'])} 条")
+        else:
+            print(f"推送失败：{pushed.get('error')}", file=sys.stderr)
+
+    if args.json:
+        import dataclasses
+        print(json.dumps({
+            "sid": result.sid, "layer": result.layer,
+            "findings": [dataclasses.asdict(f) for f in result.sorted_findings()],
+            "gaps": result.gaps, "skipped": result.skipped,
+            "provenance": result.provenance,
+        }, ensure_ascii=False, indent=2))
+    else:
+        print(store_health.render(result), end="")
+    return 0
+
+
+def _cmd_approval(args: argparse.Namespace) -> int:
+    """审批项管理。飞书按钮走的是同一套编排（approval_flow），这里是终端入口。"""
+    from . import approval_flow, approvals
+
+    act = args.action
+    if act == "list":
+        rows = approvals.list_items(state=args.state or "", limit=args.limit)
+        s = approvals.summary()
+        print("状态汇总：" + (" ".join(f"{k}={v}" for k, v in sorted(s.items())) or "（空）"))
+        print(approvals.render(rows), end="")
+        return 0
+    if act == "show":
+        if not args.id:
+            print("用法：ivyea approval show <ID>", file=sys.stderr)
+            return 2
+        data = approval_flow.status(args.id)
+        if data is None:
+            print(f"未找到审批项：{args.id}", file=sys.stderr)
+            return 1
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    if act in ("approve", "deny"):
+        if not args.id:
+            print(f"用法：ivyea approval {act} <ID>", file=sys.stderr)
+            return 2
+        r = approval_flow.resolve(args.id, "approve" if act == "approve" else "deny",
+                                  operator=args.operator or "cli",
+                                  update_card=not args.no_card)
+        print(json.dumps({k: v for k, v in r.items() if k != "card"},
+                         ensure_ascii=False, indent=2))
+        return 0 if r.get("ok") else 1
+    if act == "execute":
+        if not args.id:
+            print("用法：ivyea approval execute <ID>（对已批准但未执行的项重试）", file=sys.stderr)
+            return 2
+        r = approval_flow.execute_approved(args.id, operator=args.operator or "cli",
+                                           update_card=not args.no_card)
+        print(json.dumps({k: v for k, v in r.items() if k != "card"},
+                         ensure_ascii=False, indent=2))
+        return 0 if r.get("ok") else 1
+    if act == "rollback":
+        if not args.id:
+            print("用法：ivyea approval rollback <ID>", file=sys.stderr)
+            return 2
+        r = approval_flow.rollback(args.id, operator=args.operator or "cli",
+                                   update_card=not args.no_card)
+        print(json.dumps({k: v for k, v in r.items() if k != "card"},
+                         ensure_ascii=False, indent=2))
+        return 0 if r.get("ok") else 1
+    if act == "cancel":
+        if not args.id:
+            print("用法：ivyea approval cancel <ID>（撤销尚未执行的批准）", file=sys.stderr)
+            return 2
+        ok = approvals.cancel(args.id, "由 CLI 撤销")
+        print("已撤销。" if ok else "撤销失败：该项不存在，或已执行/已终态（已执行的用 rollback）",
+              file=sys.stderr if not ok else sys.stdout)
+        return 0 if ok else 1
+    if act == "expire":
+        n = approvals.expire_due()
+        print(f"已把 {n} 条超期未处理的审批标记为 expired。")
         return 0
     return 2
 
@@ -3378,6 +3619,7 @@ def _cmd_notify(args: argparse.Namespace) -> int:
         title=args.title or "Ivyea Agent",
         channel=args.channel,
         webhook_url=args.webhook_url or "",
+        chat_id=getattr(args, "chat_id", "") or "",
     )
     print(notify.render_result(result))
     return 0 if result.get("ok") else 1
@@ -3390,7 +3632,11 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         return 0
     if args.action == "set":
         if not args.name or not args.task:
-            print("用法: ivyea schedule set <名称> <alert|weekly|eval|knowledge_sync|knowledge_quality> --every-hours 24", file=sys.stderr)
+            print("用法: ivyea schedule set <名称> <任务> [--every-hours 24 | --every-minutes 20]\n"
+                  f"可用任务：{', '.join(sorted(schedule.ALLOWED_TASKS))}\n"
+                  "店铺巡检任务需 --sid / --sids / --all-stores，例：\n"
+                  "  ivyea schedule set l1 store_l1 --every-minutes 20 --all-stores",
+                  file=sys.stderr)
             return 2
         try:
             task_args = {}
@@ -3406,11 +3652,21 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
                 task_args = {"force": bool(args.force)}
             elif args.limit != 500:
                 task_args = {"limit": args.limit}
-            job = schedule.set_job(args.name, args.task, every_hours=args.every_hours, args=task_args)
+            if args.task in ("store_l1", "store_l2", "store_daily"):
+                target = _store_target_args(args)
+                if not target.get("sid") and not target.get("sids"):
+                    print("店铺巡检任务需要 --sid <SID>、--sids <逗号分隔> "
+                          "或 --all-stores。", file=sys.stderr)
+                    return 2
+                task_args.update(target)
+            job = schedule.set_job(args.name, args.task, every_hours=args.every_hours,
+                                   args=task_args, every_minutes=args.every_minutes)
         except ValueError as e:
             print(str(e), file=sys.stderr)
             return 2
-        print(f"已保存计划：{job['name']} task={job['task']} every={job['every_hours']}h")
+        every = (f"{job['every_minutes']:g}m" if job.get("every_minutes")
+                 else f"{job['every_hours']:g}h")
+        print(f"已保存计划：{job['name']} task={job['task']} every={every}")
         return 0
     if args.action == "remove":
         if not args.name:
@@ -3447,6 +3703,9 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
             task_args = {"force": bool(args.force)}
         elif args.limit != 500:
             task_args = {"limit": args.limit}
+        # 店铺巡检任务的目标店铺（run 一次性执行也要能指定，不只是 set 落盘时）
+        if task in ("store_l1", "store_l2", "store_daily"):
+            task_args.update(_store_target_args(args))
         ok, text = schedule.run_task(task, task_args)
         print(text)
         return 0 if ok else 1
@@ -3815,6 +4074,11 @@ def build_parser() -> argparse.ArgumentParser:
     plx.add_argument("value", nargs="?", help="operate 的 on/off/status；cache 的 clear")
     plx.set_defaults(func=_cmd_lingxing)
 
+    pam = sub.add_parser("amazon", help="亚马逊官方 API：verify（自检）/ profiles（列广告档案）/ status")
+    pam.add_argument("action", nargs="?", default="status",
+                     choices=["status", "verify", "profiles"])
+    pam.set_defaults(func=_cmd_amazon)
+
     pu = sub.add_parser("audit", help="执行审计 / 回滚")
     pu.add_argument("action", choices=["list", "rollback"])
     pu.add_argument("id", nargs="?", help="rollback 的审计ID")
@@ -3900,6 +4164,42 @@ def build_parser() -> argparse.ArgumentParser:
     pscore.add_argument("--output", help="导出 Markdown 到指定路径")
     pscore.set_defaults(func=_cmd_scorecard)
 
+    pstore = sub.add_parser("store", help="店铺业务巡检：health（L1 库存/广告配置快照层，只读）")
+    pstore.add_argument("action", choices=["health", "list"])
+    pstore.add_argument("--sid", help="店铺 SID；不传则列出可用店铺")
+    pstore.add_argument("--sids", default="",
+                        help="多个店铺 SID，逗号分隔（如 1863,1872）")
+    pstore.add_argument("--all-stores", action="store_true",
+                        help="巡检全部在营店铺")
+    pstore.add_argument("--exclude-sids", default="",
+                        help="从目标中排除的 SID，逗号分隔")
+    pstore.add_argument("--refresh", action="store_true",
+                        help="list 时强制重拉店铺清单（默认走 6 小时缓存）")
+    pstore.add_argument("--layer", default="l1",
+                        help="巡检层：l1 快照层（默认）/ l2 日内层 / l3 隔日层")
+    pstore.add_argument("--days", type=int, default=7, help="l3 的窗口天数（默认 7）")
+    pstore.add_argument("--no-optimizer", action="store_true",
+                        help="l3 时跳过优化器候选（只跑检测规则，快）")
+    pstore.add_argument("--json", action="store_true", help="输出 JSON")
+    pstore.add_argument("--push", action="store_true", help="把结果推成飞书卡片，并为可执行项建审批")
+    pstore.add_argument("--chat-id", default="", help="推送目标会话；默认用 settings 的 feishu_default_chat_id")
+    pstore.add_argument("--store-name", default="", help="卡片标题里显示的店铺名")
+    pstore.add_argument("--channel", default="feishu_app",
+                        choices=["feishu_app", "feishu", "webhook", "stdout"])
+    pstore.set_defaults(func=_cmd_store)
+
+    pappr = sub.add_parser("approval",
+                           help="审批项：list/show/approve/deny/execute/rollback/cancel/expire")
+    pappr.add_argument("action",
+                       choices=["list", "show", "approve", "deny", "execute",
+                                "rollback", "cancel", "expire"])
+    pappr.add_argument("id", nargs="?", help="审批项 ID")
+    pappr.add_argument("--state", help="list 时按状态过滤")
+    pappr.add_argument("--limit", type=int, default=50)
+    pappr.add_argument("--operator", default="", help="操作人标识，进审计")
+    pappr.add_argument("--no-card", action="store_true", help="不更新飞书卡片")
+    pappr.set_defaults(func=_cmd_approval)
+
     ptr = sub.add_parser("trace", help="运行时间线：recent / stats")
     ptr.add_argument("action", nargs="?", choices=["recent", "stats"], default="recent")
     ptr.add_argument("--limit", type=int, default=20)
@@ -3969,7 +4269,7 @@ def build_parser() -> argparse.ArgumentParser:
     palert.add_argument("action", choices=["check"])
     palert.add_argument("--limit", type=int, default=500)
     palert.add_argument("--notify", action="store_true", help="将预警发送到通知通道")
-    palert.add_argument("--channel", choices=["stdout", "webhook", "feishu"], default="stdout")
+    palert.add_argument("--channel", choices=["stdout", "webhook", "feishu", "feishu_app"], default="stdout")
     palert.add_argument("--webhook-url", help="覆盖 settings/env 中的 webhook URL")
     palert.add_argument("--title", help="通知标题")
     palert.set_defaults(func=_cmd_alert)
@@ -3978,7 +4278,8 @@ def build_parser() -> argparse.ArgumentParser:
     pnot.add_argument("action", choices=["test"])
     pnot.add_argument("--message", help="测试消息")
     pnot.add_argument("--title", help="通知标题")
-    pnot.add_argument("--channel", choices=["stdout", "webhook", "feishu"], default="stdout")
+    pnot.add_argument("--channel", choices=["stdout", "webhook", "feishu", "feishu_app"], default="stdout")
+    pnot.add_argument("--chat-id", default="", help="feishu_app 通道的目标会话；默认用 settings 里的 feishu_default_chat_id")
     pnot.add_argument("--webhook-url", help="覆盖 settings/env 中的 webhook URL")
     pnot.set_defaults(func=_cmd_notify)
 
@@ -3987,9 +4288,18 @@ def build_parser() -> argparse.ArgumentParser:
     psch.add_argument("name", nargs="?", help="set/remove 的计划名称")
     psch.add_argument("task", nargs="?", help="set/run 的任务：alert/weekly/eval/knowledge_sync/knowledge_quality")
     psch.add_argument("--every-hours", type=float, default=24.0)
+    psch.add_argument("--every-minutes", type=float, default=None,
+                      help="分钟级间隔（L1 巡检用，如 20）；传了则优先于 --every-hours")
+    psch.add_argument("--sid", help="store_l1 / store_l2 / store_daily 的店铺 SID")
+    psch.add_argument("--sids", default="",
+                      help="多个店铺 SID，逗号分隔；写 all 表示全部在营店铺")
+    psch.add_argument("--all-stores", action="store_true",
+                      help="该巡检任务覆盖全部在营店铺（等价于 --sids all）")
+    psch.add_argument("--exclude-sids", default="",
+                      help="从目标中排除的 SID，逗号分隔")
     psch.add_argument("--limit", type=int, default=500)
     psch.add_argument("--notify", action="store_true", help="alert 任务完成后发送通知")
-    psch.add_argument("--channel", choices=["stdout", "webhook", "feishu"], default="stdout")
+    psch.add_argument("--channel", choices=["stdout", "webhook", "feishu", "feishu_app"], default="stdout")
     psch.add_argument("--webhook-url", help="覆盖 settings/env 中的 webhook URL")
     psch.add_argument("--title", help="通知标题")
     psch.add_argument("--force", action="store_true", help="knowledge_sync 时忽略来源检查周期")

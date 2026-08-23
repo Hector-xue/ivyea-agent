@@ -1,0 +1,26 @@
+[Unit]
+Description=IvyeaAgent scheduled tasks (store patrol / alerts / approvals sweep)
+Documentation=https://github.com/Hector-xue/ivyea-agent
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root
+Environment=HOME=/root
+Environment=PYTHONUNBUFFERED=1
+# 只跑「到点了的」任务；跑哪些、多久一次由 ~/.ivyea/schedule.json 决定。
+# 时间写在 schedule.json 而不是 timer 里，改巡检频率就不用动 systemd。
+# 与 ivyea-agent.service 保持一致，直接调模块：ivyea 装在 /root/.local/bin，
+# 不在 systemd 的默认 PATH 里，写 `env ivyea` 会直接找不到命令。
+ExecStart=/usr/bin/python3 -m ivyea_agent.cli schedule run-due
+# 单次 run-due 最长 30 分钟。实测（11 个店铺、领星 1 秒限流）：
+#   L1 全店 75 秒，早报（L3）全店 258 秒。
+# 但 run-due 可能一次跑完多个到期任务——尤其重启后 Persistent=true 的补跑会把
+# L1/L2/早报凑到同一次里，再叠上广告报表缓存过期那天的冷启动，600 秒不够宽。
+# 被杀的代价不只是这次没跑：见 schedule.run_due 里逐任务落盘的注释。
+TimeoutStartSec=1800
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
