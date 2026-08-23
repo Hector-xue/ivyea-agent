@@ -193,3 +193,33 @@ def verify() -> dict[str, Any]:
     return {"ok": True, "chat_count": len(items),
             "default_chat_id": default_chat_id(),
             "chats": [{"chat_id": c.get("chat_id"), "name": c.get("name")} for c in items]}
+
+
+def list_chats(page_size: int = 50) -> list[dict[str, Any]]:
+    """机器人所在的会话清单。
+
+    配置向导要用：chat_id 形如 ``oc_8f...``，让人去飞书里翻出来手抄是配置流程里
+    最容易抄错的一步（抄错的表现是"保存成功但一条消息都收不到"，还没有报错）。
+    能列出来就让他点。
+    """
+    data = _call("GET", "/open-apis/im/v1/chats", params={"page_size": max(1, min(100, page_size))})
+    return [{"chat_id": c.get("chat_id"), "name": c.get("name") or "",
+             "description": c.get("description") or ""}
+            for c in (data.get("items") or [])]
+
+
+def list_chat_members(chat_id: str, page_size: int = 100) -> list[dict[str, Any]]:
+    """群成员（open_id + 名字）。审批白名单要按人选，同样不该让人手抄 ou_xxx。
+
+    要求应用有 ``im:chat:readonly``（或 contact 相关）权限；没有权限时飞书返回
+    非 0 code，由调用方转成"这一步还差个权限"的提示，而不是静默给空列表——
+    空列表会被误读成"这个群没人"。
+    """
+    chat_id = chat_id or default_chat_id()
+    if not chat_id:
+        raise FeishuError("未指定 chat_id，且未配置 feishu_default_chat_id")
+    data = _call("GET", f"/open-apis/im/v1/chats/{chat_id}/members",
+                 params={"member_id_type": "open_id",
+                         "page_size": max(1, min(100, page_size))})
+    return [{"open_id": m.get("member_id"), "name": m.get("name") or ""}
+            for m in (data.get("items") or [])]

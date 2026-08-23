@@ -254,6 +254,9 @@ def manifest() -> dict[str, Any]:
             {"method": "POST", "path": "/v1/model/configure", "description": "configure the active IvyeaAgent model without returning secrets"},
             {"method": "GET", "path": "/v1/config/vision", "description": "vision fallback chain status (tier 1 main brain / 2 sidecar / 3 local CV)"},
             {"method": "POST", "path": "/v1/config/vision", "description": "configure the tier-2 sidecar vision model without returning secrets"},
+            {"method": "GET", "path": "/v1/config/feishu", "description": "Feishu setup state for the IvyeaOps wizard (no secrets); ?probe=1 verifies live"},
+            {"method": "POST", "path": "/v1/config/feishu", "description": "configure Feishu credentials, target chat, and approval whitelist"},
+            {"method": "POST", "path": "/v1/config/feishu/action", "description": "wizard helpers: test / chats / members / patrol"},
             {"method": "GET", "path": "/v1/mcp/self-config", "description": "stdio MCP server config for local clients"},
             {"method": "GET", "path": "/v1/system/status", "description": "install/runtime status for IvyeaOps diagnostics"},
             {"method": "GET", "path": "/v1/system/doctor", "description": "install/runtime doctor checks"},
@@ -1977,6 +1980,39 @@ def feishu_action(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     return 400, {"ok": False, "error": f"未知动作：{action}"}
 
 
+def feishu_config_get(probe: bool = False) -> dict[str, Any]:
+    """飞书配置全景（IvyeaOps 系统配置页的数据面）。**不回显 App Secret。**"""
+    from . import feishu_setup
+
+    return feishu_setup.status(probe=probe)
+
+
+def feishu_config_set(payload: dict[str, Any]) -> dict[str, Any]:
+    from . import feishu_setup
+
+    return feishu_setup.configure(payload)
+
+
+def feishu_config_action(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """配置向导里那几个「帮我列出来」和「发一条试试」。
+
+    单独一个 action 端点而不是四条路径：它们都是同一张配置页上的辅助动作，
+    生命周期一致，摊成四条路由只会让 relay/ops 两边各记一遍。
+    """
+    from . import feishu_setup
+
+    action = str(payload.get("action") or "").strip()
+    if action == "test":
+        return 200, feishu_setup.send_test(payload)
+    if action == "chats":
+        return 200, feishu_setup.list_chats()
+    if action == "members":
+        return 200, feishu_setup.list_members(str(payload.get("chat_id") or ""))
+    if action == "patrol":
+        return 200, feishu_setup.configure_patrol(payload)
+    return 400, {"ok": False, "error": f"未知动作：{action}（可用：test / chats / members / patrol）"}
+
+
 def feishu_approval_get(approval_id: str) -> tuple[int, dict[str, Any]]:
     from . import approval_flow
 
@@ -2086,6 +2122,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/config/vision":
             self._json(200, vision_status())
+            return
+        if parsed.path == "/v1/config/feishu":
+            self._json(200, feishu_config_get(
+                probe=(_first(qs, "probe") in ("1", "true", "yes"))))
             return
         if parsed.path == "/v1/model":
             self._json(200, {"ok": True, "model": health()["model"]})
@@ -2506,6 +2546,13 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/config/vision":
             self._json(200, vision_configure(body))
+            return
+        if parsed.path == "/v1/config/feishu":
+            self._json(200, feishu_config_set(body))
+            return
+        if parsed.path == "/v1/config/feishu/action":
+            code, data = feishu_config_action(body)
+            self._json(code, data)
             return
         if parsed.path == "/v1/system/service/start":
             self._json(200, system_service_start(body))
