@@ -35,7 +35,71 @@ _SEV_TEMPLATE = {"crit": "red", "warn": "orange", "info": "blue"}
 #: 跨店合并时要自己排序（单店卡片拿到的已经是 sorted_findings 的结果）
 _SEV_RANK_ORDER = {"crit": 0, "warn": 1, "info": 2}
 _SEV_ICON = {"crit": "🚨", "warn": "⚠️", "info": "ℹ️"}
+#: 正文里的严重度圆点。**与标题的 emoji 分开**：标题用大图标定调，
+#: 正文每行再放一个大 emoji 会让整张卡看起来全是感叹号，反而没有重点。
+_SEV_DOT = {"crit": "🔴", "warn": "🟠", "info": "🔵"}
 _CLASS_LABEL = {"stanch": "止血", "structural": "结构", "advisory": "建议"}
+
+#: 规则代码 → **人话短名**。卡片第一行要让人一眼知道"出了什么事"，
+#: 而不是先读一行 ``listing.rating_low`` 再自己翻译。
+#: 代码本身仍然保留在备注里 —— 排查时要能对上日志。
+RULE_LABEL = {
+    "stock.oos": "断货", "stock.days_low": "可供天数不足",
+    "stock.unsellable_spike": "不可售激增", "stock.health_bad": "库存健康度异常",
+    "stock.excess": "冗余库存偏高", "stock.fbm_low": "FBM 库存不足",
+    "ads.campaign_out_of_budget": "预算耗尽停投",
+    "ads.campaign_unexpected_pause": "活动被暂停",
+    "ads.budget_changed_externally": "预算被外部改动",
+    "ads.spend_burst": "花费突增", "ads.impression_zero": "曝光归零",
+    "ads.click_no_order_intraday": "点击零转化", "ads.acos_breach": "ACOS 超标",
+    "ads.cpc_jump": "CPC 跳涨", "ads.budget_capped": "预算打满",
+    "ads.listing_acos_breach": "ACOS 超标", "ads.listing_spend_no_sales": "广告零销售额",
+    "sales.drop": "销量下滑", "sales.stall": "销量断流",
+    "sales.listing_drop": "销量下滑", "sales.listing_stall": "销量断流",
+    "profit.margin_erosion": "毛利率下滑",
+    "listing.deactivated": "listing 下架", "listing.reactivated": "listing 恢复在售",
+    "listing.rating_low": "评分偏低", "review.rating_drop": "评分下滑",
+    "rank.drop": "排名下滑", "price.changed_externally": "价格被改动",
+    "buybox.competitor_appeared": "出现跟卖", "buybox.crowded": "跟卖拥挤",
+}
+
+#: 指标 → 展示单位/格式。数字要能一眼读懂：2.9 星、90%、¥1,203、12 件。
+_METRIC_FMT = {
+    "acos": "pct", "gross_rate": "pct", "cvr": "pct",
+    "stars": "星", "rank": "名", "seller_count": "个卖家",
+    "days_of_supply": "天", "cpc": "money", "price": "money",
+    "daily_budget": "money", "spend_7": "money", "spend_per_hour": "money/时",
+    "sales_amount": "money",
+    "fulfillable": "件", "quantity": "件", "unsellable": "件", "excess_qty": "件",
+    "volume_7": "件", "volume_yesterday": "件", "avg_volume_7": "件/天",
+    "impressions": "次", "clicks": "次",
+}
+
+
+def rule_label(finding: Any) -> str:
+    """一条 finding 的人话短名。优化器那批是 ``ads.opt.<动作>``，单独兜一下。"""
+    code = str(getattr(finding, "code", "") or "")
+    if code in RULE_LABEL:
+        return RULE_LABEL[code]
+    if code.startswith("ads.opt."):
+        return "优化建议"
+    return code or "异常"
+
+
+def _fmt_metric(metric: str, value: Any) -> str:
+    """把裸数字渲染成人能读的样子。**取不到就返回空**，由调用方决定不显示这一格——
+    显示一个孤零零的 "0" 比不显示更误导。"""
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value or "")
+    fmt = _METRIC_FMT.get(str(metric or ""), "")
+    if fmt == "pct":
+        return f"{num:.0%}" if abs(num) < 10 else f"{num:.1f}"
+    if fmt == "money":
+        return f"{num:,.2f}"
+    body = f"{num:,.0f}" if abs(num - round(num)) < 0.05 else f"{num:,.1f}"
+    return f"{body} {fmt}".strip() if fmt else body
 
 
 # ── 基础元件 ────────────────────────────────────────────────────────────────
@@ -45,6 +109,28 @@ def _md(content: str) -> dict[str, Any]:
 
 def _hr() -> dict[str, Any]:
     return {"tag": "hr"}
+
+
+def _div(text: str, fields: Optional[list[tuple[str, str]]] = None) -> dict[str, Any]:
+    """一行标题 + 若干「标签／值」小格（两列）。
+
+    ``fields`` + ``is_short`` 是卡片 1.0 的双列布局（已对飞书官方「内容模块」
+    文档核实）。用它而不是把数字堆进一行文字里：手机屏幕上，
+    "评分 2.9 星（5 条评价），低于 3.5 星" 会折成三行，重点全糊在里面。
+    """
+    el: dict[str, Any] = {"tag": "div",
+                          "text": {"tag": "lark_md", "content": str(text or "")}}
+    if fields:
+        el["fields"] = [{"is_short": True,
+                         "text": {"tag": "lark_md", "content": f"**{k}**\n{v}"}}
+                        for k, v in fields if str(v)]
+    return el
+
+
+def _note(text: str) -> dict[str, Any]:
+    """页脚小灰字。数据来源、跳过项、规则代码这些**排查时才需要**的东西放这里：
+    删掉它们等于让人无法核对 agent 有没有瞎说，放正文又会把重点淹了。"""
+    return {"tag": "note", "elements": [{"tag": "plain_text", "content": str(text or "")}]}
 
 
 def _button(label: str, action: str, approval_id: str,
@@ -150,9 +236,16 @@ def build_finding_card(finding: Any, approval_id: str = "",
     icon = _SEV_ICON.get(sev, "ℹ️")
     label = _CLASS_LABEL.get(action_class, "建议")
     who = store_name or (f"sid {sid}" if sid else "")
-    title = f"{icon} {getattr(finding, 'code', '')}" + (f" · {who}" if who else "")
+    # 标题写人话，不写 ``listing.rating_low`` —— 代码留在页脚，排查时对得上就行
+    title = f"{icon} {rule_label(finding)}" + (f" · {who}" if who else "")
 
-    elements: list[dict[str, Any]] = [_md("\n".join(_finding_body(finding)))]
+    elements: list[dict[str, Any]] = [
+        _div(_target_line(finding), _finding_fields(finding)),
+        _md(str(getattr(finding, "message", ""))),
+    ]
+    ev = dict(getattr(finding, "evidence", {}) or {})
+    if ev:
+        elements.append(_md("**证据**\n" + "\n".join(_evidence_lines(ev))))
 
     if approval_id:
         elements.append(_hr())
@@ -169,15 +262,106 @@ def build_finding_card(finding: Any, approval_id: str = "",
         elements.append(_hr())
         elements.append(_md("_本条为告警，无可自动执行的动作。_"))
 
+    # 溯源进页脚：必须看得见（用户要能核对 agent 有没有瞎说），但不该占正文
+    foot = _footnote([finding])
+    if foot:
+        elements.append(_note(foot))
+
     return _card(_header(title, _SEV_TEMPLATE.get(sev, "blue")), elements)
+
+
+# ── 批量告警卡片 ────────────────────────────────────────────────────────────
+def _target_line(finding: Any, *, with_store: str = "") -> str:
+    """异常块的第一行：**出了什么事** · 谁。
+
+    顺序是刻意的 —— 规则名在前、商品名在后。反过来的话，一屏 6 条异常全是
+    "IVY 3m by 2M SD…"开头，扫一眼看不出哪条是断货、哪条只是评分低。
+    """
+    sev = str(getattr(finding, "severity", "info"))
+    name = str(getattr(finding, "target_name", "") or getattr(finding, "target_id", ""))
+    if len(name) > 28:
+        name = name[:28] + "…"
+    cls = str(getattr(finding, "action_class", "advisory"))
+    tag = f"「{_CLASS_LABEL[cls]}」" if cls in ("stanch", "structural") else ""
+    head = f"{_SEV_DOT.get(sev, '')} **{rule_label(finding)}**{tag}"
+    bits = [head]
+    if with_store:
+        bits.append(with_store)
+    if name:
+        bits.append(name)
+    return " · ".join(bits)
+
+
+def _finding_fields(finding: Any) -> list[tuple[str, str]]:
+    """「当前 / 基线 / 对象 / 窗口」四小格。**没有值的格子直接不出现** ——
+    显示一个孤零零的 0 比不显示更误导。"""
+    # 没声明 metric 的 finding，current/baseline 是无单位的裸数字，多半就是 0。
+    # 「当前 0」既没意义又像在说"这个指标是零"—— 不如不显示。
+    # 反过来，stock.oos 的 metric=fulfillable、current=0 是**有意义的 0**（0 件），
+    # 所以判据是"有没有 metric"，不是"值是不是 0"。
+    metric = str(getattr(finding, "metric", "") or "")
+    cur = _fmt_metric(metric, getattr(finding, "current", None)) if metric else ""
+    base = _fmt_metric(metric, getattr(finding, "baseline", None)) if metric else ""
+    fields: list[tuple[str, str]] = []
+    if cur:
+        fields.append(("当前", cur))
+    if base and base != cur:
+        # 阈值型规则的 baseline 是"门槛"，趋势型的是"上一期" —— 措辞跟着走，
+        # 否则用户会把"基线 3.5 星"读成"上周 3.5 星"
+        label = "门槛" if str(getattr(finding, "code", "")).endswith(
+            ("_low", "_breach", "_capped")) else "基线"
+        fields.append((label, base))
+    target_id = str(getattr(finding, "target_id", "") or "")
+    if target_id and target_id != str(getattr(finding, "target_name", "")):
+        fields.append(("对象", target_id))
+    window = str(getattr(finding, "window", "") or "")
+    if window:
+        fields.append(("窗口", window))
+    return fields[:4]
+
+
+def _footnote(findings: list[Any], *, layer: str = "", skipped: int = 0,
+              gaps: int = 0) -> str:
+    """页脚：排查时要用、但不该抢注意力的东西。"""
+    bits = []
+    if layer:
+        bits.append(f"巡检层 {layer}")
+    codes = sorted({str(getattr(f, "code", "")) for f in findings if getattr(f, "code", "")})
+    if codes:
+        bits.append("规则 " + "、".join(codes[:4]) + ("…" if len(codes) > 4 else ""))
+    # provenance 形如「领星 MCP · 延迟约 10 分钟 · 120 行」。页脚只留源名：
+    # 延迟和行数是排查细节，堆在这一行会把它撑成两行小灰字，比不写还乱。
+    provs = sorted({str(getattr(f, "provenance", "")).split(" · ")[0]
+                    for f in findings if getattr(f, "provenance", "")})
+    if provs:
+        bits.append("来源 " + "、".join(provs[:3]))
+    if skipped:
+        bits.append(f"{skipped} 条规则本次跳过")
+    if gaps:
+        bits.append(f"{gaps} 处数据缺口")
+    return " · ".join(bits)
 
 
 # ── 批量告警卡片 ────────────────────────────────────────────────────────────
 def build_alert_card(findings: Iterable[Any], *, sid: Any = "", store_name: str = "",
                      layer: str = "", approval_ids: Optional[dict[str, str]] = None,
-                     max_items: int = 10) -> dict[str, Any]:
-    """一次巡检的多条异常合并成一张卡（§5.3 批量合并，防刷屏）。"""
-    findings = list(findings)
+                     max_items: int = 10, skipped: int = 0,
+                     gaps: int = 0) -> dict[str, Any]:
+    """一次巡检的多条异常合并成一张卡（§5.3 批量合并，防刷屏）。
+
+    版式的三条规矩（2026-08-23 按真机截图重排）：
+
+    1. **一条异常一个块**，第一行是"出了什么事"，不是商品名。
+       原先是把整句话塞进一行 markdown，手机上折成三行，重点在句尾。
+    2. **数字进双列小格**（当前 / 门槛 / 对象 / 窗口），不混在句子里。
+    3. **技术信息降级成页脚小灰字**：数据来源、跳过项、规则代码。
+       它们必须留着（用户要能核对 agent 有没有瞎说），但不该占据视线。
+    """
+    # 防御性排序：紧急的必须在最上面。调用方大多已经排过，但"大多"不算数 ——
+    # 排错的后果是断货排在评分偏低下面，人一眼看到的是不要紧的那条。
+    findings = sorted(list(findings),
+                      key=lambda f: _SEV_RANK_ORDER.get(
+                          str(getattr(f, "severity", "info")), 9))
     approval_ids = approval_ids or {}
     worst = "info"
     for f in findings:
@@ -185,29 +369,34 @@ def build_alert_card(findings: Iterable[Any], *, sid: Any = "", store_name: str 
         if sev == "crit" or (sev == "warn" and worst == "info"):
             worst = sev
     who = store_name or (f"sid {sid}" if sid else "")
+
     counts: dict[str, int] = {}
     for f in findings:
-        s = str(getattr(f, "severity", "info"))
-        counts[s] = counts.get(s, 0) + 1
-    summary = " · ".join(f"{_SEV_ICON.get(k, '')}{v}"
-                         for k, v in sorted(counts.items(),
-                                            key=lambda kv: {"crit": 0, "warn": 1}.get(kv[0], 2)))
+        s_ = str(getattr(f, "severity", "info"))
+        counts[s_] = counts.get(s_, 0) + 1
+    # 标题直接把构成写出来：「紧急 2 · 注意 3」比「异常 5 条」有用得多
+    parts = [f"{label} {counts[key]}" for key, label in
+             (("crit", "紧急"), ("warn", "注意"), ("info", "提示")) if counts.get(key)]
+    title = f"{_SEV_ICON.get(worst, 'ℹ️')} " + (" · ".join(parts) or "无异常")
+    if who:
+        title += f" · {who}"
 
-    title = f"{_SEV_ICON.get(worst, 'ℹ️')} 店铺异常 {len(findings)} 条" + (f" · {who}" if who else "")
     elements: list[dict[str, Any]] = []
-    if layer:
-        elements.append(_md(f"**巡检层**：{layer}　**概览**：{summary or '—'}"))
-
     buttons: list[dict[str, Any]] = []
     for i, f in enumerate(findings[:max_items]):
-        sev = str(getattr(f, "severity", "info"))
-        cls = _CLASS_LABEL.get(str(getattr(f, "action_class", "advisory")), "建议")
-        elements.append(_md(f"{_SEV_ICON.get(sev, '')} **[{cls}]** "
-                            f"{getattr(f, 'message', '')}"))
+        if i:
+            elements.append(_hr())
+        elements.append(_div(_target_line(f), _finding_fields(f)))
+        detail = str(getattr(f, "message", ""))
+        # message 里已经包含规则名和目标名，这里只在它明显更长时补一句说明，
+        # 避免同一句话在卡片上出现两遍
+        if len(detail) > 24 and not _finding_fields(f):
+            elements.append(_md(detail))
         aid = approval_ids.get(str(getattr(f, "target_id", "")) + "|"
                                + str(getattr(f, "code", "")))
         if aid:
             buttons.append(_button(f"批准 {i + 1}", ACTION_APPROVE, aid, "primary"))
+
     if len(findings) > max_items:
         elements.append(_md(f"_…另有 {len(findings) - max_items} 条，详见完整报告。_"))
     if buttons:
@@ -219,6 +408,10 @@ def build_alert_card(findings: Iterable[Any], *, sid: Any = "", store_name: str 
         elements.append(_actions(row))             # 飞书单行按钮不宜过多
     if not findings:
         elements.append(_md("本次巡检未发现异常。"))
+
+    foot = _footnote(findings, layer=layer, skipped=skipped, gaps=gaps)
+    if foot:
+        elements.append(_note(foot))
 
     return _card(_header(title, _SEV_TEMPLATE.get(worst, "blue")), elements)
 
@@ -240,17 +433,17 @@ def build_daily_card(*, date: str, store_name: str, metrics_lines: Iterable[str]
 
     if alerts:
         elements.append(_hr())
+        # 与告警卡同一套读法：先"出了什么事"，再"谁" —— 一屏全是商品名开头时
+        # 扫不出哪条要紧
         elements.append(_md(f"**异常 {len(alerts)} 条**\n" + "\n".join(
-            f"{_SEV_ICON.get(str(getattr(f, 'severity', 'info')), '')} "
-            f"{getattr(f, 'message', '')}" for f in alerts[:6])))
+            _target_line(f) for f in alerts[:6])))
 
     buttons: list[dict[str, Any]] = []
     if actionable:
         elements.append(_hr())
         body = [f"**待你决定 {len(actionable)} 条**"]
         for i, f in enumerate(actionable[:5], 1):
-            cls = _CLASS_LABEL.get(str(getattr(f, "action_class", "advisory")), "建议")
-            body.append(f"{i}. [{cls}] {getattr(f, 'message', '')}")
+            body.append(f"{i}. {_target_line(f)}")
             aid = approval_ids.get(str(getattr(f, "target_id", "")) + "|"
                                    + str(getattr(f, "code", "")))
             if aid:
@@ -343,8 +536,7 @@ def build_multi_store_daily_card(*, date: str, stores: Iterable[dict[str, Any]],
         elements.append(_hr())
         body = [f"**异常 {len(alerts)} 条**"]
         for name, f in alerts[:max_alerts]:
-            body.append(f"{_SEV_ICON.get(str(getattr(f, 'severity', 'info')), '')} "
-                        f"[{name}] {getattr(f, 'message', '')}")
+            body.append(_target_line(f, with_store=name))
         if len(alerts) > max_alerts:
             body.append(f"…另有 {len(alerts) - max_alerts} 条")
         elements.append(_md("\n".join(body)))
@@ -354,8 +546,7 @@ def build_multi_store_daily_card(*, date: str, stores: Iterable[dict[str, Any]],
         elements.append(_hr())
         body = [f"**待你决定 {len(actionable)} 条**"]
         for i, (name, f) in enumerate(actionable[:max_actions], 1):
-            cls = _CLASS_LABEL.get(str(getattr(f, "action_class", "advisory")), "建议")
-            body.append(f"{i}. [{cls}][{name}] {getattr(f, 'message', '')}")
+            body.append(f"{i}. {_target_line(f, with_store=name)}")
             aid = approval_ids.get(multi_store_key(f))
             if aid:
                 buttons.append(_button(f"批准 {i}", ACTION_APPROVE, aid, "primary"))
@@ -441,9 +632,7 @@ def build_period_card(*, period: str, window: str, stores: Iterable[dict[str, An
         elements.append(_hr())
         body = [f"**仍未解决 {len(all_findings)} 条**"]
         for name, f in all_findings[:max_alerts]:
-            prefix = f"[{name}] " if multi else ""
-            body.append(f"{_SEV_ICON.get(str(getattr(f, 'severity', 'info')), '')} "
-                        f"{prefix}{getattr(f, 'message', '')}")
+            body.append(_target_line(f, with_store=name if multi else ""))
         if len(all_findings) > max_alerts:
             body.append(f"…另有 {len(all_findings) - max_alerts} 条")
         body.append("\n_要动手的按钮在每天的早报里，这张卡只做回顾。_")

@@ -262,3 +262,95 @@ def test_chunk_short_and_empty(ivyea_home):
 
     assert fc.chunk("abc") == ["abc"]
     assert fc.chunk("") == []
+
+
+# ── 版式：让人一眼抓到重点（2026-08-23 按真机截图重排）───────────────────────
+# 改之前的样子：一条异常是一整句 markdown，手机上折成三行，重点（2.9 星）在句尾；
+# 四行"数据来源：xxx 来源 领星 OpenAPI · 延迟约 5 分钟 · 120 行"压在一条异常上面。
+
+def _f2(**kw):
+    from ivyea_agent import store_health as sh
+
+    base = dict(code="listing.rating_low", layer="L1", severity=sh.WARN,
+                action_class=sh.ADVISORY, sid=1, scope="listing",
+                target_id="B08N6VPHV1", target_name="IVY 3m by 2M SD20258 Wall Art Decor",
+                metric="stars", current=2.9, baseline=3.5,
+                message="评分 2.9 星（5 条评价），低于 3.5 星",
+                provenance="领星 MCP · 延迟约 10 分钟 · 120 行")
+    base.update(kw)
+    return sh.Finding(**base)
+
+
+def test_headline_says_what_happened_before_which_product(ivyea_home):
+    """一屏 6 条异常若全以商品名开头，扫一眼看不出哪条是断货、哪条只是评分低。"""
+    from ivyea_agent import feishu_card as fc
+
+    line = fc._target_line(_f2())
+    assert line.index("评分偏低") < line.index("IVY 3m")
+    assert "listing.rating_low" not in line          # 代码留给页脚
+
+
+def test_numbers_go_into_paired_fields_not_into_the_sentence(ivyea_home):
+    from ivyea_agent import feishu_card as fc
+
+    card = fc.build_alert_card([_f2()], store_name="欧洲-UK", layer="L1")
+    div = next(e for e in card["elements"] if e["tag"] == "div")
+    got = {f["text"]["content"].split("\n")[0].strip("*"): f["text"]["content"].split("\n")[1]
+           for f in div["fields"]}
+    assert got["当前"] == "2.9 星" and got["门槛"] == "3.5 星"
+    assert got["对象"] == "B08N6VPHV1"
+
+
+def test_threshold_rules_say_threshold_and_trend_rules_say_baseline(ivyea_home):
+    """「基线 3.5 星」会被读成"上周 3.5 星"。阈值型规则必须说"门槛"。"""
+    from ivyea_agent import feishu_card as fc
+
+    assert dict(fc._finding_fields(_f2()))["门槛"] == "3.5 星"
+    trend = _f2(code="sales.listing_drop", metric="avg_volume_7", current=3.0, baseline=10.0)
+    assert "基线" in dict(fc._finding_fields(trend))
+
+
+def test_empty_numbers_are_omitted_not_shown_as_zero(ivyea_home):
+    """显示一个孤零零的 0 比不显示更误导。"""
+    from ivyea_agent import feishu_card as fc
+
+    fields = dict(fc._finding_fields(_f2(metric="", current=0.0, baseline=0.0)))
+    assert "当前" not in fields and "门槛" not in fields
+
+
+def test_technical_noise_lives_in_the_footnote(ivyea_home):
+    """数据来源 / 跳过项 / 规则代码必须留着（"没告警"不能等于"没问题"），
+    但它们是排查用的，不该压在异常上面。"""
+    from ivyea_agent import feishu_card as fc
+
+    card = fc.build_alert_card([_f2()], store_name="欧洲-UK", layer="L1",
+                               skipped=2, gaps=1)
+    note = next(e for e in card["elements"] if e["tag"] == "note")
+    text = note["elements"][0]["content"]
+    assert "listing.rating_low" in text and "领星 MCP" in text
+    assert "2 条规则本次跳过" in text and "1 处数据缺口" in text
+    # 延迟和行数不进页脚：会把这一行撑成两行小灰字，比不写还乱
+    assert "120 行" not in text
+    # 页脚必须在最后，不能挤在异常前面
+    assert card["elements"][-1]["tag"] == "note"
+
+
+def test_header_shows_the_breakdown_not_just_a_total(ivyea_home):
+    """「紧急 2 · 注意 3」比「异常 5 条」有用得多。"""
+    from ivyea_agent import feishu_card as fc, store_health as sh
+
+    card = fc.build_alert_card(
+        [_f2(), _f2(code="stock.oos", severity=sh.CRIT, target_id="M1")],
+        store_name="欧洲-UK")
+    assert card["header"]["title"]["content"].startswith("🚨 紧急 1 · 注意 1")
+
+
+def test_critical_findings_float_to_the_top(ivyea_home):
+    """排错的后果是断货排在评分偏低下面，人一眼看到的是不要紧的那条。"""
+    from ivyea_agent import feishu_card as fc, store_health as sh
+
+    card = fc.build_alert_card(
+        [_f2(), _f2(code="stock.oos", severity=sh.CRIT, target_id="M1",
+                    target_name="断货的那个")], store_name="UK")
+    first = next(e for e in card["elements"] if e["tag"] == "div")
+    assert "断货" in first["text"]["content"]

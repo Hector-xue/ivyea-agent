@@ -38,7 +38,11 @@ def push_result(result: Any, *, chat_id: str = "", store_name: str = "",
 
     card = feishu_card.build_alert_card(
         findings, sid=getattr(result, "sid", ""), store_name=store_name,
-        layer=getattr(result, "layer", ""), approval_ids=ids, max_items=max_items)
+        layer=getattr(result, "layer", ""), approval_ids=ids, max_items=max_items,
+        # 跳过项与数据缺口进页脚小灰字：它们必须留着（"没告警"不能等于"没问题"），
+        # 但堆在正文里会把真正的异常淹掉 —— 真机截图上就是四行"数据来源"压着一行异常。
+        skipped=len(getattr(result, "skipped", []) or []),
+        gaps=len(getattr(result, "gaps", []) or []))
 
     if channel == "feishu_app":
         from . import store_health
