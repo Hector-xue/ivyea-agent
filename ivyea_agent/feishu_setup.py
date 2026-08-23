@@ -113,6 +113,13 @@ def _relay_status() -> dict[str, Any]:
                 "detail": "本机没有 systemd，无法自动判定；"
                           "常驻运行 `python -m ivyea_agent.feishu_relay` 即可"}
 
+    # 进程内的长连接算数：它就是接收端，只是跟着 serve 跑，用户不用装第二个服务
+    from . import serve_workers
+    inproc = serve_workers.status().get("relay") or {}
+    if inproc.get("running"):
+        return {"state": "active", "running": True, "sdk": sdk, "builtin": True,
+                "detail": "已随 IvyeaAgent 服务内建运行（无需单独安装）"}
+
     seen: list[tuple[str, str]] = []
     for name in (RELAY_SERVICE, *LEGACY_RELAY_SERVICES):
         try:

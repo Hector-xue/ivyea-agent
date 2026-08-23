@@ -686,10 +686,13 @@ def upgrade_plan(version: str = "latest", ref: str = "", method: str = "") -> di
             commands.append(f"IVYEA_REF={ref} curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash")
         else:
             commands.append("pipx upgrade ivyea-agent")
+            # pipx 的 extras 记在初装时的 spec 里，升级会保留；这里不重复注入。
     elif chosen == "ivyea-runtime":
         commands.append("curl -fsSL https://raw.githubusercontent.com/Hector-xue/ivyea-agent/main/scripts/install.sh | bash")
     else:
-        commands.append("python -m pip install --upgrade ivyea-agent")
+        # 带 [feishu]：飞书接收端跟着 serve 跑，SDK 不在就悄悄不启动。
+        # 升级时丢掉 extra，等于把一个本来在用的功能升没了。
+        commands.append('python -m pip install --upgrade "ivyea-agent[feishu]"')
     return {"action": "upgrade", "info": info, "method": chosen, "commands": commands}
 
 

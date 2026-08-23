@@ -98,6 +98,14 @@ def schedule_status() -> dict[str, Any]:
                 "detail": "本机没有 systemd，无法自动判定；"
                           "请用计划任务每 5 分钟执行一次 `ivyea schedule run-due`",
                 "can_install": False}
+    # 进程内节拍器同样算数 —— 它和 systemd timer 是同一件事的两种落法
+    from . import serve_workers
+    inproc = serve_workers.status().get("scheduler") or {}
+    if inproc.get("running"):
+        return {"installed": True, "running": True, "state": "builtin",
+                "jobs": len(jobs), "can_install": True, "builtin": True,
+                "detail": f"已随 IvyeaAgent 服务内建运行（{len(jobs)} 个任务在册）"}
+
     state = _unit_active(SCHEDULE_TIMER)
     running = state == "active"
     return {
