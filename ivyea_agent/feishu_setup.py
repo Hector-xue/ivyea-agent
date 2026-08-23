@@ -108,17 +108,22 @@ def _relay_status() -> dict[str, Any]:
     from . import feishu_relay
 
     sdk = feishu_relay.sdk_available()
-    if os.name == "nt" or not shutil.which("systemctl"):
-        return {"state": "unknown", "running": None, "sdk": sdk,
-                "detail": "本机没有 systemd，无法自动判定；"
-                          "常驻运行 `python -m ivyea_agent.feishu_relay` 即可"}
 
-    # 进程内的长连接算数：它就是接收端，只是跟着 serve 跑，用户不用装第二个服务
+    # **内建工人要在平台分支之前判。** 放在后面的话，Windows / macOS 上即使 serve
+    # 里的长连接跑得好好的，界面也只会说"没有 systemd，无法判定"——
+    # 而那恰恰是最需要内建模式的两个平台（它们没有 systemd 这条替代路）。
     from . import serve_workers
     inproc = serve_workers.status().get("relay") or {}
     if inproc.get("running"):
         return {"state": "active", "running": True, "sdk": sdk, "builtin": True,
                 "detail": "已随 IvyeaAgent 服务内建运行（无需单独安装）"}
+
+    if os.name == "nt" or not shutil.which("systemctl"):
+        return {"state": "unknown", "running": None, "sdk": sdk,
+                "detail": ("飞书 SDK 未安装，接收端起不来：" + feishu_relay.SDK_HINT
+                           if not sdk else
+                           "本机没有 systemd；接收端会随 IvyeaAgent 服务自动运行，"
+                           "重启服务后生效")}
 
     seen: list[tuple[str, str]] = []
     for name in (RELAY_SERVICE, *LEGACY_RELAY_SERVICES):

@@ -93,18 +93,22 @@ def schedule_status() -> dict[str, Any]:
     from . import schedule
 
     jobs = [j for j in schedule.load().get("jobs", []) if j.get("enabled", True)]
-    if not _systemd():
-        return {"installed": None, "running": None, "jobs": len(jobs),
-                "detail": "本机没有 systemd，无法自动判定；"
-                          "请用计划任务每 5 分钟执行一次 `ivyea schedule run-due`",
-                "can_install": False}
-    # 进程内节拍器同样算数 —— 它和 systemd timer 是同一件事的两种落法
+
+    # **内建节拍器要在平台分支之前判**（同 feishu_setup._relay_status 的理由）：
+    # Windows / macOS 上它就是唯一的落法，报"无法判定"等于告诉用户功能没生效。
     from . import serve_workers
     inproc = serve_workers.status().get("scheduler") or {}
     if inproc.get("running"):
         return {"installed": True, "running": True, "state": "builtin",
-                "jobs": len(jobs), "can_install": True, "builtin": True,
+                "jobs": len(jobs), "can_install": _systemd(), "builtin": True,
                 "detail": f"已随 IvyeaAgent 服务内建运行（{len(jobs)} 个任务在册）"}
+
+    if not _systemd():
+        return {"installed": None, "running": None, "jobs": len(jobs),
+                "detail": "本机没有 systemd；巡检会随 IvyeaAgent 服务内建运行，"
+                          "重启服务后生效（或用计划任务每 5 分钟跑一次 "
+                          "`ivyea schedule run-due`）",
+                "can_install": False}
 
     state = _unit_active(SCHEDULE_TIMER)
     running = state == "active"

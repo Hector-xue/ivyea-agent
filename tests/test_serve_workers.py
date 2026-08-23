@@ -158,3 +158,20 @@ def test_turning_a_worker_off_clears_the_stale_running_flag(ivyea_home, monkeypa
     config.set_setting("serve_worker_scheduler", "off")
     sw.start_all(threading.Event())
     assert sw.status()["scheduler"]["running"] is False
+
+
+def test_builtin_is_recognised_on_platforms_without_systemd(ivyea_home, monkeypatch):
+    """Windows / macOS 没有 systemd —— 内建模式恰恰是它们唯一的落法。
+    平台分支若排在内建判定前面，那两个平台上永远显示"无法判定"，
+    用户会以为功能没生效。（CI 的 macOS/Windows 矩阵抓到过这个。）"""
+    from ivyea_agent import feishu_setup, feishu_relay, host_services
+
+    sw = _reload(monkeypatch)
+    monkeypatch.setattr(host_services, "_systemd", lambda: False)
+    monkeypatch.setattr(feishu_setup.shutil, "which", lambda name: None)
+    monkeypatch.setattr(feishu_relay, "sdk_available", lambda: True)
+
+    sw._note("relay", running=True)
+    sw._note("scheduler", running=True)
+    assert feishu_setup._relay_status()["running"] is True
+    assert host_services.schedule_status()["running"] is True
