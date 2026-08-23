@@ -99,6 +99,22 @@ def _mask(value: str, keep: int = 6) -> str:
     return value if len(value) <= keep + 2 else f"{value[:keep]}…{value[-2:]}"
 
 
+def external_relay_running() -> bool:
+    """**只问系统服务**，不看进程内工人。serve_workers 用它判断"要不要让位"——
+    掺进自己的状态就成了自指：重启后上一轮的残留会让新进程永远不启动长连接。"""
+    if os.name == "nt" or not shutil.which("systemctl"):
+        return False
+    for name in (RELAY_SERVICE, *LEGACY_RELAY_SERVICES):
+        try:
+            proc = subprocess.run(["systemctl", "is-active", name],
+                                  capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):   # noqa: BLE001
+            return False
+        if (proc.stdout or "").strip() == "active":
+            return True
+    return False
+
+
 def _relay_status() -> dict[str, Any]:
     """relay 是否在跑。**查不出来时报 unknown，不报 stopped。**
 
