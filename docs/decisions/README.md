@@ -39,6 +39,7 @@ git log 记得住「改了什么」，记不住「为什么不选另一条路」
 | [0019](./0019-feishu-config-is-agent-owned-and-ui-driven.md) | 飞书配置归 agent 存、界面来写；relay 以它为准，env 只兜底 | 2026-08-23 |
 | [0020](./0020-cadence-tiers-review-reports-and-rules-without-data.md) | 节奏改 1h/12h/日/周/月；周报只回顾不派活；没数据也照写规则 | 2026-08-23 |
 | [0021](./0021-amazon-official-api-built-before-the-account.md) | 亚马逊官方 API 先建好，不等某台机器有账号；契约逐条来自官方文件 | 2026-08-23 |
+| [0022](./0022-promotion-rules-without-a-write-channel.md) | 促销规则只报不改（没有写接口），且必须先报「数据还能不能信」 | 2026-08-23 |
 
 相关的工作台侧决策见
 [IvyeaOps 的 ADR 目录](https://github.com/Hector-xue/IvyeaOps/tree/main/docs/decisions)，

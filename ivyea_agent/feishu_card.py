@@ -61,6 +61,8 @@ RULE_LABEL = {
     "listing.rating_low": "评分偏低", "review.rating_drop": "评分下滑",
     "rank.drop": "排名下滑", "price.changed_externally": "价格被改动",
     "buybox.competitor_appeared": "出现跟卖", "buybox.crowded": "跟卖拥挤",
+    "promo.ending_soon": "活动即将结束", "promo.starting_soon": "活动即将开始",
+    "promo.budget_exhausted": "优惠券预算见底", "promo.sync_stale": "促销数据停更",
 }
 
 #: 指标 → 展示单位/格式。数字要能一眼读懂：2.9 星、90%、¥1,203、12 件。
@@ -73,6 +75,10 @@ _METRIC_FMT = {
     "fulfillable": "件", "quantity": "件", "unsellable": "件", "excess_qty": "件",
     "volume_7": "件", "volume_yesterday": "件", "avg_volume_7": "件/天",
     "impressions": "次", "clicks": "次",
+    # 促销：秒数在卡片上没有意义，规则的 message 里已经写成"还有 3 小时 12 分"了，
+    # 数字格只显示小时，避免出现 "11520" 这种要心算的数。
+    "seconds_to_end": "hours", "seconds_to_start": "hours",
+    "budget_used_pct": "pct_raw", "sync_age_hours": "小时",
 }
 
 
@@ -98,6 +104,12 @@ def _fmt_metric(metric: str, value: Any) -> str:
         return f"{num:.0%}" if abs(num) < 10 else f"{num:.1f}"
     if fmt == "money":
         return f"{num:,.2f}"
+    if fmt == "hours":
+        # 传进来的是秒。不到一小时就给分钟 —— "0.3 小时"要心算，"18 分"不用。
+        return f"{num / 60:.0f} 分" if abs(num) < 3600 else f"{num / 3600:.1f} 小时"
+    if fmt == "pct_raw":
+        # 已经是 0~100 的百分数，别再乘 100（"pct" 那条是给 0~1 小数用的）。
+        return f"{num:.0f}%"
     body = f"{num:,.0f}" if abs(num - round(num)) < 0.05 else f"{num:,.1f}"
     return f"{body} {fmt}".strip() if fmt else body
 
