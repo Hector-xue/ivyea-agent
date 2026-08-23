@@ -2121,6 +2121,13 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, api_token: str = "")
     server = make_server(host, port, api_token=api_token)
     actual_host, actual_port = server.server_address
     print(f"Ivyea Agent API listening on http://{actual_host}:{actual_port}")
+
+    # 巡检节拍器与飞书长连接跟着 serve 一起起来 —— 用户不必再单独装两个系统服务。
+    # 外部已有同类服务在跑时会自动让位（跑两份 = 早报推两遍、按钮执行两遍）。
+    from . import serve_workers
+    for name, info in serve_workers.start_all().items():
+        mark = "✓" if info.get("started") else "·"
+        print(f"  {mark} {name}: {info.get('reason', '')}")
     if api_token:
         print("Auth: Bearer token required.")
     print("Endpoints: /health, /v1/manifest, /v1/capabilities, /v1/knowledge/search, /v1/retrieval/search, /v1/tasks")
