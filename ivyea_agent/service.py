@@ -2013,7 +2013,15 @@ def feishu_config_action(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         return 200, feishu_setup.list_members(str(payload.get("chat_id") or ""))
     if action == "patrol":
         return 200, feishu_setup.configure_patrol(payload)
-    return 400, {"ok": False, "error": f"未知动作：{action}（可用：test / chats / members / patrol）"}
+    if action in ("install_relay", "install_timer"):
+        # 网页用户没有终端。"请自行 pip install / 写 systemd 单元"对他等于
+        # "这个功能你用不了" —— 所以装这件事必须能从界面点。
+        from . import host_services
+        if action == "install_relay":
+            return 200, host_services.install_relay()
+        return 200, host_services.install_schedule()
+    return 400, {"ok": False, "error": f"未知动作：{action}"
+                 "（可用：test / chats / members / patrol / install_relay / install_timer）"}
 
 
 def amazon_config_get() -> dict[str, Any]:

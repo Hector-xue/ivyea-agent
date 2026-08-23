@@ -136,7 +136,7 @@ def _relay_status() -> dict[str, Any]:
     # 给的是**能直接敲的命令**——只说"未安装"等于让人自己去猜怎么装。
     how = ("先装 SDK：pip install \"ivyea-agent[feishu]\"，再 `ivyea relay install`"
            if not sdk else "`ivyea relay install`（写 systemd 单元并启动）")
-    return {"state": state, "running": False, "sdk": sdk,
+    return {"state": state, "running": False, "sdk": sdk, "can_install": True,
             "detail": f"接收端未运行 —— {how}"}
 
 
@@ -188,21 +188,18 @@ def patrol_status() -> dict[str, Any]:
 
 
 def _timer_status() -> dict[str, Any]:
-    """巡检任务的触发器。注册了任务却没装 timer = 以为在跑其实没跑。"""
-    if os.name == "nt" or not shutil.which("systemctl"):
-        return {"state": "unknown", "running": None,
-                "detail": "本机没有 systemd；请用计划任务定期执行 `ivyea schedule run-due`"}
-    try:
-        proc = subprocess.run(["systemctl", "is-active", "ivyea-schedule.timer"],
-                              capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001
-        return {"state": "unknown", "running": None, "detail": f"查询失败：{exc}"}
-    state = (proc.stdout or proc.stderr or "").strip() or "unknown"
-    running = state == "active"
-    return {"state": state, "running": running,
-            "detail": ("ivyea-schedule.timer 运行中" if running
-                       else "ivyea-schedule.timer 未启用，注册的巡检任务不会被触发"
-                            "（deploy/systemd/ivyea-schedule.timer）")}
+    """巡检任务的触发器。注册了任务却没装 timer = 以为在跑其实没跑。
+
+    统一走 ``host_services``：那边同时给出"能不能一键装"，界面据此决定要不要
+    显示安装按钮 —— 只告诉用户"未启用"而不给装的办法，等于这个功能不存在。
+    """
+    from . import host_services
+
+    st = host_services.schedule_status()
+    return {"state": "active" if st.get("running") else "inactive",
+            "running": st.get("running"), "detail": st.get("detail", ""),
+            "can_install": bool(st.get("can_install")),
+            "installed": st.get("installed")}
 
 
 def status(*, probe: bool = False) -> dict[str, Any]:

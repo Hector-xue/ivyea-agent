@@ -1150,8 +1150,6 @@ def _cmd_relay(args: argparse.Namespace) -> int:
     **卡片能发出去 ≠ 按钮点得动**：出站在 agent 本体，入站要有这条长连接接着。
     没有它，用户看到的是"按钮点了什么都没发生"——比没有按钮更糟。
     """
-    import shutil
-    import subprocess
 
     from . import feishu_relay, feishu_setup
 
@@ -1169,22 +1167,16 @@ def _cmd_relay(args: argparse.Namespace) -> int:
         return 0
 
     if args.action == "install":
-        if os.name == "nt" or not shutil.which("systemctl"):
-            print("本机没有 systemd。请用你自己的进程管理器常驻运行：")
-            print("    python -m ivyea_agent.feishu_relay")
-            return 1
-        unit = Path("/etc/systemd/system") / feishu_relay.SERVICE_NAME
-        try:
-            unit.write_text(feishu_relay.render_service(), encoding="utf-8")
-        except OSError as exc:
-            print(f"写入 {unit} 失败（需要 root）：{exc}")
-            return 1
-        subprocess.run(["systemctl", "daemon-reload"], check=False)
-        subprocess.run(["systemctl", "enable", "--now", feishu_relay.SERVICE_NAME],
-                       check=False)
-        print(f"已安装并启动 {feishu_relay.SERVICE_NAME}")
-        print(f"  日志：journalctl -u {feishu_relay.SERVICE_NAME} -f")
-        return 0
+        from . import host_services
+        out = host_services.install_relay(install_sdk=not args.no_sdk)
+        for st in out.get("steps", []):
+            print(f"  {'✓' if st['ok'] else '✗'} {st['cmd']}")
+        if out.get("ok"):
+            print(f"已安装并启动 {feishu_relay.SERVICE_NAME}")
+            print(f"  日志：journalctl -u {feishu_relay.SERVICE_NAME} -f")
+            return 0
+        print(out.get("hint") or out.get("error") or "安装未完成")
+        return 1
 
     if not feishu_relay.sdk_available():
         print(feishu_relay.SDK_HINT)
@@ -3679,6 +3671,19 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     if args.action == "list":
         print(schedule.render_jobs())
         return 0
+    if args.action == "install":
+        # **注册任务 ≠ 会跑。** 没有触发器的话，上面 list 出来的任务一条都不会执行，
+        # 而且不会有任何报错 —— 这是最难自己发现的一类故障。
+        from . import host_services
+        out = host_services.install_schedule()
+        for st in out.get("steps", []):
+            print(f"  {'✓' if st['ok'] else '✗'} {st['cmd']}")
+        if out.get("ok"):
+            print(f"已启用 {host_services.SCHEDULE_TIMER}（每 5 分钟唤醒一次）")
+            print(f"  查看：systemctl list-timers {host_services.SCHEDULE_TIMER}")
+            return 0
+        print(out.get("hint") or out.get("error") or "安装未完成")
+        return 1
     if args.action == "set":
         if not args.name or not args.task:
             print("用法: ivyea schedule set <名称> <任务> [--every-hours 24 | --every-minutes 20]\n"
@@ -4126,6 +4131,8 @@ def build_parser() -> argparse.ArgumentParser:
     prl = sub.add_parser("relay", help="飞书接收端（卡片按钮 + 飞书对话）：run / status / install")
     prl.add_argument("action", nargs="?", default="status",
                      choices=["status", "run", "install"])
+    prl.add_argument("--no-sdk", action="store_true",
+                     help="install 时不自动装飞书 SDK（默认会装）")
     prl.set_defaults(func=_cmd_relay)
 
     pam = sub.add_parser("amazon", help="亚马逊官方 API：verify（自检）/ profiles（列广告档案）/ status")
@@ -4337,8 +4344,9 @@ def build_parser() -> argparse.ArgumentParser:
     pnot.add_argument("--webhook-url", help="覆盖 settings/env 中的 webhook URL")
     pnot.set_defaults(func=_cmd_notify)
 
-    psch = sub.add_parser("schedule", help="本地计划任务：list/set/remove/run-due/run")
-    psch.add_argument("action", choices=["list", "set", "remove", "run-due", "run"])
+    psch = sub.add_parser("schedule", help="本地计划任务：list/set/remove/run-due/run/install")
+    psch.add_argument("action",
+                      choices=["list", "set", "remove", "run-due", "run", "install"])
     psch.add_argument("name", nargs="?", help="set/remove 的计划名称")
     psch.add_argument("task", nargs="?", help="set/run 的任务：alert/weekly/eval/knowledge_sync/knowledge_quality")
     psch.add_argument("--every-hours", type=float, default=24.0)

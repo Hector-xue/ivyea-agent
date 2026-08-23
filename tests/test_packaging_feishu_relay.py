@@ -89,3 +89,60 @@ def test_built_wheel_contains_the_relay(tmp_path):
         names = set(z.namelist())
     for m in RELAY_MODULES:
         assert f"ivyea_agent/feishu_relay/{m}.py" in names, f"wheel 里没有 {m}.py"
+
+
+# ── 巡检触发器同样必须随包走 ─────────────────────────────────────────────────
+# 它以前只以 deploy/systemd/*.timer 的形式存在于仓库里，wheel 里没有。
+# 后果比 relay 更隐蔽：用户在界面上把巡检开关全打开，界面显示"已启用"，
+# 然后**永远不触发**，也没有任何报错——因为缺的东西根本不在他机器上。
+
+def test_timer_units_are_generated_from_code_not_read_from_repo():
+    from ivyea_agent import host_services
+
+    assert "ExecStart=" in host_services._SCHEDULE_SERVICE_UNIT
+    assert "OnUnitActiveSec=5min" in host_services._SCHEDULE_TIMER_UNIT
+    assert "Persistent=true" in host_services._SCHEDULE_TIMER_UNIT, \
+        "停机期间错过的执行必须补跑，否则关机一晚上等于漏一晚上巡检"
+    # 单元内容不能靠读仓库文件——pip 装的用户没有 deploy/ 目录
+    src = (REPO / "ivyea_agent" / "host_services.py").read_text(encoding="utf-8")
+    assert "deploy/systemd" not in src
+
+
+def test_schedule_status_says_registered_is_not_running(monkeypatch):
+    """"注册了 3 个任务"和"这 3 个任务会被执行"是两回事，措辞必须区分。"""
+    from ivyea_agent import host_services
+
+    monkeypatch.setattr(host_services, "_systemd", lambda: True)
+    monkeypatch.setattr(host_services, "_unit_active", lambda name: "inactive")
+    st = host_services.schedule_status()
+    assert st["running"] is False and st["can_install"] is True
+    assert "不会被触发" in st["detail"]
+
+
+def test_install_actions_are_reachable_from_the_web(monkeypatch):
+    """网页用户没有终端。装这两样必须能从界面点，否则等于功能不存在。"""
+    from ivyea_agent import service
+
+    calls = []
+    monkeypatch.setattr("ivyea_agent.host_services.install_relay",
+                        lambda **k: calls.append("relay") or {"ok": True})
+    monkeypatch.setattr("ivyea_agent.host_services.install_schedule",
+                        lambda: calls.append("timer") or {"ok": True})
+    assert service.feishu_config_action({"action": "install_relay"})[0] == 200
+    assert service.feishu_config_action({"action": "install_timer"})[0] == 200
+    assert calls == ["relay", "timer"]
+
+
+def test_relay_install_pulls_the_sdk_when_missing(monkeypatch, tmp_path):
+    """"请自行 pip install" 对网页用户等于"这个功能你用不了"。"""
+    from ivyea_agent import feishu_relay, host_services
+
+    ran = []
+    monkeypatch.setattr(feishu_relay, "sdk_available", lambda: bool(ran))
+    monkeypatch.setattr(host_services, "_systemd", lambda: False)
+    monkeypatch.setattr(host_services, "_run",
+                        lambda cmd, timeout=30.0: ran.append(cmd) or
+                        {"cmd": " ".join(cmd), "ok": True, "detail": ""})
+    out = host_services.install_relay()
+    assert any("lark-oapi>=1.4" in " ".join(c) for c in ran), "没去装 SDK"
+    assert out["manual"] is True and "-m ivyea_agent.feishu_relay" in out["hint"]
