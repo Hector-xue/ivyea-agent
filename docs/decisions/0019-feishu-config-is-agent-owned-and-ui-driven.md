@@ -57,6 +57,19 @@
 审批人而起不来。安全性没下降：`gates.sender_allowed` 里空名单依旧拒绝所有人，
 这里只是把它降级成一条醒目的启动警告。
 
+## 补记（2026-08-23，v1.15.11）
+
+本 ADR 一直把 relay 称作"独立的 `feishu-ivyea-relay` 服务"，但**它从来没有随任何
+release 发出去过** —— 它只存在于开发机的一个本地目录里。后果是：拿到开源包的人
+卡片收得到、按钮点了没反应、飞书里也没法对话，而界面上按钮还看得见、点得动。
+
+已改为包内的 `ivyea_agent.feishu_relay`，随 wheel 发布，SDK 走可选依赖
+`ivyea-agent[feishu]`，装法收成 `ivyea relay install` 一条命令。
+`tests/test_packaging_feishu_relay.py` 盯着"必须进 wheel"这件事 ——
+它漏了不会报错，只会让用户点按钮时什么都不发生。
+
+**教训**：判断一个功能"做完了"，标准是**别人装完能用**，不是"我这台机器上跑起来了"。
+
 ## 后果
 
 - 老部署（只有 EnvironmentFile、从没用过界面）行为不变：settings 里没有那两个键，
