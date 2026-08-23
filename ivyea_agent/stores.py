@@ -84,13 +84,45 @@ def list_stores(*, force: bool = False, ttl: float = DEFAULT_TTL_SECONDS,
                       if isinstance(r, dict) and r.get("sid") is not None]
             _write_cache(stores)
         except Exception:                               # noqa: BLE001
-            if cached is None:
-                raise
-            stores = cached                             # 陈旧缓存好过全店失明
+            if cached is not None:
+                stores = cached                         # 陈旧缓存好过全店失明
+            else:
+                # 领星没配（或挂了且无缓存）时退到亚马逊那边登记的站点。
+                # 不做这一步的话，只用亚马逊官方 API 的人**一个店都巡检不了**：
+                # 目标解析拿不到清单，每条任务都报"缺少 sid"。
+                stores = _amazon_stores()
+                if not stores:
+                    raise
 
     if include_inactive:
         return list(stores)
     return [s for s in stores if int(s.get("status") or 0) == STATUS_ACTIVE]
+
+
+def _amazon_stores() -> list[dict[str, Any]]:
+    """把亚马逊侧登记的站点当作店铺清单。
+
+    形状与领星那份**逐字段对齐**（sid/name/region/country/marketplace_id/
+    seller_id/status/has_ads），调用方无从分辨来源 —— 这正是目的：
+    店铺清单是元数据，不该让上层为"你用的是哪家 ERP"分叉。
+    """
+    try:
+        from . import amazon_auth
+        rows = amazon_auth.marketplaces()
+    except Exception:                                   # noqa: BLE001
+        return []
+    return [{
+        "sid": m["sid"],
+        "name": m["name"],
+        "region": m["region"],
+        "country": m["country"],
+        "marketplace_id": m["marketplace_id"],
+        "seller_id": m["seller_id"],
+        "status": STATUS_ACTIVE,
+        # 有广告档案 ID 才算开通广告 —— 与领星的 has_ads_setting 同一语义，
+        # 广告类规则据此跳过而不是当成故障（ADR-0018）
+        "has_ads": bool(m["ads_profile_id"]),
+    } for m in rows]
 
 
 def get(sid: Any, *, ttl: float = DEFAULT_TTL_SECONDS) -> Optional[dict[str, Any]]:

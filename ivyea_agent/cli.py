@@ -1144,6 +1144,41 @@ def _execute_lingxing_candidates(result: dict, yes: bool = False) -> int:
     return 0
 
 
+def _cmd_amazon(args: argparse.Namespace) -> int:
+    """亚马逊官方 API 的自检与档案清单。
+
+    ``verify`` 会真的打一次接口 —— 配置类命令最没用的形态就是"保存成功"，
+    用户要的是"到底通没通"。
+    """
+    from . import amazon_auth, amazon_verify
+
+    if args.action == "status":
+        st = amazon_auth.status()
+        print(f"凭据：{'已配置' if st['configured'] else '未配置'}"
+              f"　广告凭据：{'已配置' if st['ads_configured'] else '未配置'}")
+        print(f"区域：{st['region']}　SP-API：{st['spapi_host']}　Ads：{st['ads_host']}")
+        if not st["marketplaces"]:
+            print("站点：（未登记）—— 至少填一个 marketplace_id 才能巡检")
+        for m in st["marketplaces"]:
+            print(f"  sid={m['sid']:<10} {m['name']:<8} {m['marketplace_id']}"
+                  f"  广告档案={m['ads_profile_id'] or '（未填）'}")
+        return 0
+
+    if args.action == "profiles":
+        out = amazon_verify.list_profiles()
+        if not out["ok"]:
+            print(f"✗ {out['error']}")
+            return 1
+        for p in out["profiles"]:
+            print(f"  {p['country']:<4} profileId={p['profile_id']:<14} "
+                  f"{p['type']:<8} {p['name']}  站点={p['marketplace_id']}")
+        return 0
+
+    result = amazon_verify.verify()
+    print(amazon_verify.render(result), end="")
+    return 0 if result["ok"] else 1
+
+
 def _cmd_lingxing(args: argparse.Namespace) -> int:
     from . import lingxing_openapi as lx
     from .lingxing_datasets import list_sellers
@@ -4038,6 +4073,11 @@ def build_parser() -> argparse.ArgumentParser:
     plx.add_argument("action", choices=["setup", "probe", "sellers", "operate", "cache"])
     plx.add_argument("value", nargs="?", help="operate 的 on/off/status；cache 的 clear")
     plx.set_defaults(func=_cmd_lingxing)
+
+    pam = sub.add_parser("amazon", help="亚马逊官方 API：verify（自检）/ profiles（列广告档案）/ status")
+    pam.add_argument("action", nargs="?", default="status",
+                     choices=["status", "verify", "profiles"])
+    pam.set_defaults(func=_cmd_amazon)
 
     pu = sub.add_parser("audit", help="执行审计 / 回滚")
     pu.add_argument("action", choices=["list", "rollback"])

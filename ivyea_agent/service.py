@@ -257,6 +257,9 @@ def manifest() -> dict[str, Any]:
             {"method": "GET", "path": "/v1/config/feishu", "description": "Feishu setup state for the IvyeaOps wizard (no secrets); ?probe=1 verifies live"},
             {"method": "POST", "path": "/v1/config/feishu", "description": "configure Feishu credentials, target chat, and approval whitelist"},
             {"method": "POST", "path": "/v1/config/feishu/action", "description": "wizard helpers: test / chats / members / patrol"},
+            {"method": "GET", "path": "/v1/config/amazon", "description": "Amazon SP-API / Ads API credential and marketplace state (no secrets)"},
+            {"method": "POST", "path": "/v1/config/amazon", "description": "configure Amazon LWA credentials and marketplaces"},
+            {"method": "POST", "path": "/v1/config/amazon/action", "description": "verify Amazon credentials live, or list advertising profiles"},
             {"method": "GET", "path": "/v1/mcp/self-config", "description": "stdio MCP server config for local clients"},
             {"method": "GET", "path": "/v1/system/status", "description": "install/runtime status for IvyeaOps diagnostics"},
             {"method": "GET", "path": "/v1/system/doctor", "description": "install/runtime doctor checks"},
@@ -2013,6 +2016,31 @@ def feishu_config_action(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     return 400, {"ok": False, "error": f"未知动作：{action}（可用：test / chats / members / patrol）"}
 
 
+def amazon_config_get() -> dict[str, Any]:
+    """亚马逊官方 API 的配置全景。**不回显任何密钥。**"""
+    from . import amazon_auth
+
+    return {"ok": True, **amazon_auth.status()}
+
+
+def amazon_config_set(payload: dict[str, Any]) -> dict[str, Any]:
+    from . import amazon_auth
+
+    return amazon_auth.configure(payload)
+
+
+def amazon_config_action(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """verify（换 token + 打一次真接口）/ profiles（列广告档案，用来填 profile id）。"""
+    from . import amazon_verify
+
+    action = str(payload.get("action") or "").strip()
+    if action == "verify":
+        return 200, amazon_verify.verify()
+    if action == "profiles":
+        return 200, amazon_verify.list_profiles()
+    return 400, {"ok": False, "error": f"未知动作：{action}（可用：verify / profiles）"}
+
+
 def feishu_approval_get(approval_id: str) -> tuple[int, dict[str, Any]]:
     from . import approval_flow
 
@@ -2126,6 +2154,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/config/feishu":
             self._json(200, feishu_config_get(
                 probe=(_first(qs, "probe") in ("1", "true", "yes"))))
+            return
+        if parsed.path == "/v1/config/amazon":
+            self._json(200, amazon_config_get())
             return
         if parsed.path == "/v1/model":
             self._json(200, {"ok": True, "model": health()["model"]})
@@ -2552,6 +2583,13 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/config/feishu/action":
             code, data = feishu_config_action(body)
+            self._json(code, data)
+            return
+        if parsed.path == "/v1/config/amazon":
+            self._json(200, amazon_config_set(body))
+            return
+        if parsed.path == "/v1/config/amazon/action":
+            code, data = amazon_config_action(body)
             self._json(code, data)
             return
         if parsed.path == "/v1/system/service/start":
