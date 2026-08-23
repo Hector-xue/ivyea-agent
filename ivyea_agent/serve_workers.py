@@ -91,9 +91,15 @@ def _renew() -> None:
 
 # ── 巡检节拍器 ──────────────────────────────────────────────────────────────
 def _external_timer_running() -> bool:
+    """**只问 systemd**。
+
+    不能走 `schedule_status()`：那个函数会把进程内工人的状态算进去，而进程内
+    工人就是我自己 —— 重启后上一轮残留的心跳会让新进程判定"外部 timer 在跑"，
+    于是让位给一个根本不存在的服务，节拍器就此再也不启动。**线上实测踩到过。**
+    """
     from . import host_services
 
-    return bool(host_services.schedule_status().get("running"))
+    return host_services.systemd_timer_running()
 
 
 def _scheduler_loop(stop: threading.Event) -> None:
@@ -123,9 +129,10 @@ def _scheduler_loop(stop: threading.Event) -> None:
 
 # ── 飞书长连接 ──────────────────────────────────────────────────────────────
 def _external_relay_running() -> bool:
+    """同上：只问系统服务，绝不问合并状态（自指会让自己永远不启动）。"""
     from . import feishu_setup
 
-    return bool(feishu_setup._relay_status().get("running"))
+    return feishu_setup.external_relay_running()
 
 
 def _relay_loop(stop: threading.Event) -> None:
@@ -182,8 +189,35 @@ def _persisted() -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
     now = time.time()
-    return {k: v for k, v in raw.items()
-            if isinstance(v, dict) and now - float(v.get("ts") or 0) < _STATE_TTL}
+    out = {}
+    for k, v in raw.items():
+        if not isinstance(v, dict):
+            continue
+        if now - float(v.get("ts") or 0) >= _STATE_TTL:
+            continue
+        # 写这条状态的进程还在吗。serve 重启后旧条目可能还没过期，
+        # 但它描述的那个工人已经随旧进程一起没了。
+        pid = int(v.get("pid") or 0)
+        if pid and pid != os.getpid() and not _pid_alive(pid):
+            continue
+        out[k] = v
+    return out
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # type: ignore[attr-defined]
+            if not handle:
+                return False
+            ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+            return True
+        os.kill(pid, 0)
+    except (OSError, ValueError, AttributeError):
+        return False
+    return True
 
 
 # ── 启动 ────────────────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import os
 import threading
 
 
@@ -205,3 +206,46 @@ def test_heartbeat_is_faster_than_the_staleness_window(ivyea_home, monkeypatch):
     """续得比过期慢的话，等于自己把自己续成过期。"""
     sw = _reload(monkeypatch)
     assert sw._HEARTBEAT_SECONDS < sw._STATE_TTL / 2
+
+
+def test_a_restart_does_not_mistake_its_own_leftovers_for_an_external_service(
+        ivyea_home, monkeypatch):
+    """**线上实测踩到的**：serve 重启后，上一轮落盘的心跳还没过期，
+    新进程把它当成"外部服务在跑"，于是让位给一个根本不存在的服务 ——
+    节拍器就此再也不启动，而且日志上写着"系统 timer 已在跑"，看起来一切正常。
+
+    外部探测必须**只问系统服务**，绝不掺进程内工人的状态。
+    """
+    import json
+    import threading
+    import time
+
+    from ivyea_agent import feishu_setup, host_services
+
+    sw = _reload(monkeypatch)
+    # 造一份"上一轮 serve 留下的、尚未过期的"状态
+    sw._STATE_FILE.write_text(json.dumps({
+        "scheduler": {"running": True, "ts": time.time(), "pid": os.getpid()},
+    }), encoding="utf-8")
+    monkeypatch.setattr(host_services, "systemd_timer_running", lambda: False)
+    monkeypatch.setattr(feishu_setup, "external_relay_running", lambda: True)
+
+    stop = threading.Event()
+    try:
+        out = sw.start_all(stop)
+        assert out["scheduler"]["started"] is True, "被自己的残留状态挡住了"
+    finally:
+        stop.set()
+
+
+def test_leftovers_from_a_dead_process_are_ignored(ivyea_home, monkeypatch):
+    """旧 serve 已经没了，它落盘的"运行中"不能继续算数。"""
+    import json
+    import time
+
+    sw = _reload(monkeypatch)
+    sw._STATE_FILE.write_text(json.dumps({
+        "relay": {"running": True, "ts": time.time(), "pid": 999999},
+    }), encoding="utf-8")
+    monkeypatch.setattr(sw, "_pid_alive", lambda pid: False)
+    assert sw.status().get("relay") is None

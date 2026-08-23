@@ -87,6 +87,12 @@ def _unit_active(name: str) -> str:
 
 
 # ── 巡检触发器 ──────────────────────────────────────────────────────────────
+def systemd_timer_running() -> bool:
+    """**只问 systemd**。serve_workers 用它判断"要不要让位"——
+    掺进进程内工人的状态就成了自指（见那边的说明）。"""
+    return _systemd() and _unit_active(SCHEDULE_TIMER) == "active"
+
+
 def schedule_status() -> dict[str, Any]:
     """**注册了任务 ≠ 会跑。** 触发器没装的话，界面上开的巡检永远不会被执行，
     而且不会有任何报错——这是最难自己发现的一类故障。"""
