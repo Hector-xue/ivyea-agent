@@ -35,6 +35,7 @@ def ivyea_home(monkeypatch):
                 "ivyea_agent.action_queue", "ivyea_agent.doctor", "ivyea_agent.profiles",
                 "ivyea_agent.snapshots", "ivyea_agent.intraday", "ivyea_agent.approvals",
                 "ivyea_agent.feishu_client", "ivyea_agent.reliability",
+                "ivyea_agent.alert_state",
                 # 下面这些同样在模块级绑定 config.IVYEA_DIR；不重载会跨用例泄漏，
                 # 甚至写到真实 ~/.ivyea（用 grep "= config.IVYEA_DIR /" 可复查）
                 "ivyea_agent.log", "ivyea_agent.schedule", "ivyea_agent.workspace",

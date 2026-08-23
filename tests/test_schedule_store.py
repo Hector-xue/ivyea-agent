@@ -231,3 +231,99 @@ def test_period_report_isolates_a_broken_store(ivyea_home, monkeypatch):
     ok, text = schedule.run_task("store_weekly", {"sids": "all"})
     assert ok is False                       # 有店失败就不算全绿
     assert "店A" in text and "取数失败" in text
+
+
+# ── 即时告警：发现即推、带按钮、不重复 ──────────────────────────────────────
+
+class _Fx:
+    def __init__(self, code="stock.oos", target="M1", severity="crit",
+                 message="断货了", intent=None):
+        self.code, self.target_id, self.severity = code, target, severity
+        self.message, self.target_name, self.intent = message, target, intent
+        self.layer, self.sid, self.action_class = "L1", 1, "stanch"
+        self.scope, self.metric, self.evidence = "msku", "qty", {}
+        self.current = self.baseline = 0.0
+        self.window = self.provenance = ""
+        self.group_id, self.group_size = "", 1
+
+    @property
+    def executable(self):
+        return self.intent is not None
+
+    def line(self):
+        return f"[紧急] {self.message}"
+
+
+def _l1_result(monkeypatch, findings, gaps=()):
+    from ivyea_agent import store_health
+
+    res = store_health.CheckResult(sid=1, layer="L1")
+    res.findings = list(findings)
+    res.gaps = list(gaps)
+    monkeypatch.setattr(store_health, "check_l1", lambda sid: res)
+    return res
+
+
+def test_l1_alert_goes_out_as_a_card_with_buttons(ivyea_home, monkeypatch):
+    """以前这里走的是纯文本：要动手得等第二天早报。异常本来就该发现即可处理。"""
+    from ivyea_agent import patrol_push, schedule
+
+    _l1_result(monkeypatch, [_Fx()])
+    seen = {}
+    monkeypatch.setattr(patrol_push, "push_result",
+                        lambda res, **kw: seen.update(kw, n=len(res.findings)) or
+                        {"ok": True, "message_id": "om_1", "approvals": []})
+    ok, text = schedule.run_task("store_l1", {"sid": 1, "notify": True,
+                                              "channel": "feishu_app"})
+    assert ok and seen["n"] == 1 and "已推送异常卡片" in text
+
+
+def test_the_same_problem_is_not_pushed_every_round(ivyea_home, monkeypatch):
+    """一条持续一周没处理的断货，不节流就是一周 168 张一模一样的卡。"""
+    from ivyea_agent import patrol_push, schedule
+
+    _l1_result(monkeypatch, [_Fx()])
+    calls = []
+    monkeypatch.setattr(patrol_push, "push_result",
+                        lambda res, **kw: calls.append(len(res.findings)) or
+                        {"ok": True, "message_id": "om", "approvals": []})
+    args = {"sid": 1, "notify": True, "channel": "feishu_app"}
+    schedule.run_task("store_l1", args)
+    _, text = schedule.run_task("store_l1", args)
+    assert calls == [1]                       # 第二轮没有再推
+    assert "持续中的异常已静默" in text
+
+
+def test_recovery_gets_its_own_card(ivyea_home, monkeypatch):
+    from ivyea_agent import notify, patrol_push, schedule
+
+    _l1_result(monkeypatch, [_Fx()])
+    monkeypatch.setattr(patrol_push, "push_result",
+                        lambda res, **kw: {"ok": True, "message_id": "om", "approvals": []})
+    schedule.run_task("store_l1", {"sid": 1, "notify": True, "channel": "feishu_app"})
+
+    _l1_result(monkeypatch, [])
+    sent = []
+    monkeypatch.setattr(notify, "send_alert",
+                        lambda text, **kw: sent.append(kw.get("title")) or {"ok": True})
+    ok, _t = schedule.run_task("store_l1", {"sid": 1, "notify": True,
+                                            "channel": "feishu_app"})
+    assert ok and sent == ["异常已恢复"]
+
+
+def test_a_data_gap_does_not_announce_a_fake_recovery(ivyea_home, monkeypatch):
+    """取数失败那一轮 findings 天然为空。照常判恢复的话，
+    你会在断货最严重的那天收到一屏「✅ 已恢复」。"""
+    from ivyea_agent import notify, patrol_push, schedule
+
+    _l1_result(monkeypatch, [_Fx()])
+    monkeypatch.setattr(patrol_push, "push_result",
+                        lambda res, **kw: {"ok": True, "message_id": "om", "approvals": []})
+    schedule.run_task("store_l1", {"sid": 1, "notify": True, "channel": "feishu_app"})
+
+    _l1_result(monkeypatch, [], gaps=["领星超时"])
+    sent = []
+    monkeypatch.setattr(notify, "send_alert",
+                        lambda text, **kw: sent.append(kw.get("title")) or {"ok": True})
+    schedule.run_task("store_l1", {"sid": 1, "notify": True, "channel": "feishu_app"})
+    assert "异常已恢复" not in sent

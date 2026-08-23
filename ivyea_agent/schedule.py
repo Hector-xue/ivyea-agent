@@ -420,13 +420,99 @@ def _store_task_body(task: str, args: dict[str, Any], sid: Any,
         reliability.record_success(health_key)
 
     text = store_health.render(result)
-    # 静默规则：无异常且无数据缺口时不推送，避免每 20 分钟刷屏。
-    # 早报例外——用户要的就是"每天确认一眼"。
-    quiet = (task != "store_daily" and not result.findings and not result.gaps)
-    if args.get("notify") and not quiet:
+    if not args.get("notify"):
+        return True, text
+
+    channel = str(args.get("channel") or "stdout")
+    chat_id = str(args.get("chat_id") or "")
+
+    # ── 异常告警：发现即推，不等早报；但同一条问题只在"变成异常的那一刻"报 ──
+    # 之前这里走的是 notify.send 纯文本，既没有批准按钮（要动手得等第二天早报），
+    # 又每轮重推一次（一个持续一周没处理的断货 = 168 张一模一样的卡，
+    # 人的反应是把群静音，然后真出事的那张也看不见了）。
+    # 早报不参与节流：它是**汇总**，用户要的就是每天确认一眼，
+    # 拿"这条昨天报过了"去删它的内容，早报就残了。节流只管即时告警那条路。
+    if task == "store_daily":
         r = notify.send(text, title=str(args.get("title") or f"店铺巡检 {result.layer}"),
-                        channel=str(args.get("channel") or "stdout"),
-                        webhook_url=str(args.get("webhook_url") or ""))
+                        channel=channel, webhook_url=str(args.get("webhook_url") or ""))
         if not r.get("ok"):
             return False, f"{text}{notify.render_result(r)}\n"
-    return True, text
+        return True, text
+
+    from . import alert_state
+
+    tri = alert_state.triage(sid, result.layer, result.findings,
+                             clean=not result.gaps)
+    lines = [text]
+    if tri.ongoing:
+        lines.append(f"（{len(tri.ongoing)} 条持续中的异常已静默，不重复推送）\n")
+
+    if channel == "feishu_app":
+        return _push_alerts(result, tri, args, sid, store_name, chat_id, lines)
+
+    # 非飞书通道（stdout / webhook）：纯文本照旧，但同样只推新增与恢复
+    if tri.should_push or result.gaps:
+        body = text
+        if tri.resolved:
+            body += _resolved_text(tri.resolved)
+        r = notify.send(body, title=str(args.get("title") or f"店铺巡检 {result.layer}"),
+                        channel=channel, webhook_url=str(args.get("webhook_url") or ""))
+        if not r.get("ok"):
+            return False, f"{text}{notify.render_result(r)}\n"
+    return True, "".join(lines)
+
+
+def _resolved_text(resolved: list[dict[str, Any]]) -> str:
+    """恢复通知的正文。**必须发**——只报坏消息的系统，人无法判断问题有没有解决。"""
+    rows = "\n".join(f"- {r.get('message') or r.get('code')}" for r in resolved[:10])
+    more = f"\n…另有 {len(resolved) - 10} 条" if len(resolved) > 10 else ""
+    return f"\n✅ 已恢复 {len(resolved)} 条：\n{rows}{more}\n"
+
+
+def _push_alerts(result: Any, tri: Any, args: dict[str, Any], sid: Any,
+                 store_name: str, chat_id: str, lines: list[str]) -> tuple[bool, str]:
+    """把本轮**新增**的异常推成带按钮的卡片，恢复的另发一条。
+
+    只拿 ``tri.fresh`` 去建审批项：持续中的异常若每轮都建一条 approval，
+    同一个目标会攒出一堆待办，批哪条都说不清改的是哪一次。
+    """
+    from . import feishu_card, patrol_push
+
+    ok = True
+    if tri.fresh:
+        # 只把新增的那几条装进卡片；result 的其余字段（sid/layer/gaps）照用
+        subset = _result_subset(result, tri.fresh)
+        pushed = patrol_push.push_result(subset, chat_id=chat_id, store_name=store_name,
+                                         channel="feishu_app")
+        if pushed.get("ok"):
+            lines.append(f"已推送异常卡片：message_id={pushed['message_id']} "
+                         f"新增 {len(tri.fresh)} 条，待决定 {len(pushed['approvals'])} 条\n")
+        else:
+            ok = False
+            lines.append(f"异常卡片推送失败：{pushed.get('error')}\n")
+
+    if tri.resolved:
+        body = "\n".join(f"- {r.get('message') or r.get('code')}"
+                          for r in tri.resolved[:10])
+        sent = notify.send_alert(
+            _resolved_text(tri.resolved),
+            card=feishu_card.build_text_card(
+                f"✅ 已恢复 {len(tri.resolved)} 条 · {store_name}", body, template="green"),
+            chat_id=chat_id, title="异常已恢复")
+        if not sent.get("ok"):
+            ok = False
+            lines.append(f"恢复通知推送失败：{sent.get('error')}\n")
+
+    return ok, "".join(lines)
+
+
+def _result_subset(result: Any, findings: list[Any]) -> Any:
+    """同一个 CheckResult 的浅拷贝，只换掉 findings。
+
+    不直接改 result.findings：调用方后面还要用完整结果渲染正文与统计。
+    """
+    import copy
+
+    subset = copy.copy(result)
+    subset.findings = list(findings)
+    return subset
