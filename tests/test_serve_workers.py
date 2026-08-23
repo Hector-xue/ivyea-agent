@@ -175,3 +175,33 @@ def test_builtin_is_recognised_on_platforms_without_systemd(ivyea_home, monkeypa
     sw._note("scheduler", running=True)
     assert feishu_setup._relay_status()["running"] is True
     assert host_services.schedule_status()["running"] is True
+
+
+def test_a_blocked_worker_still_gets_a_heartbeat(ivyea_home, monkeypatch):
+    """长连接线程连上后就一直阻塞在 SDK 里，永远不会再上报。
+    没有独立心跳的话，900 秒后别的进程会把它判成"没在跑"，
+    然后催用户去装一个**其实正在跑**的服务——线上实测踩到过。"""
+    import threading
+    import time
+
+    sw = _reload(monkeypatch)
+    monkeypatch.setattr(sw, "_HEARTBEAT_SECONDS", 0.05)
+    stop = threading.Event()
+    alive = threading.Thread(target=lambda: stop.wait(5), daemon=True)
+    alive.start()
+    threading.Thread(target=sw._heartbeat_loop, args=(stop, {"relay": alive}),
+                     daemon=True).start()
+    try:
+        time.sleep(0.2)
+        first = sw.status()["relay"]["ts"]
+        time.sleep(0.2)
+        assert sw.status()["relay"]["ts"] > first, "心跳没有在续"
+        assert sw.status()["relay"]["running"] is True
+    finally:
+        stop.set()
+
+
+def test_heartbeat_is_faster_than_the_staleness_window(ivyea_home, monkeypatch):
+    """续得比过期慢的话，等于自己把自己续成过期。"""
+    sw = _reload(monkeypatch)
+    assert sw._HEARTBEAT_SECONDS < sw._STATE_TTL / 2

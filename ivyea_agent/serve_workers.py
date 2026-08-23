@@ -48,6 +48,8 @@ _LOCK_TTL = 900.0
 _STATE_FILE = config.IVYEA_DIR / "serve-workers.json"
 #: 心跳超过这个岁数就当它没了（serve 被 kill -9 时没机会清理文件）
 _STATE_TTL = TICK_SECONDS * 3
+#: 续心跳的间隔。必须明显小于 _STATE_TTL，否则自己把自己续成过期。
+_HEARTBEAT_SECONDS = TICK_SECONDS / 2
 
 _state: dict[str, Any] = {"scheduler": {}, "relay": {}}
 _lock = threading.Lock()
@@ -147,6 +149,18 @@ def _relay_loop(stop: threading.Event) -> None:
     _note("relay", running=False, detail="已停止")
 
 
+def _heartbeat_loop(stop: threading.Event, threads: dict[str, threading.Thread]) -> None:
+    """替**阻塞中的**工人续心跳。
+
+    长连接线程一旦连上就一直阻塞在 SDK 里，永远不会再调 `_note`。心跳因此变陈旧，
+    900 秒后别的进程就把它判成"没在跑"，然后催用户去装一个其实正在跑的服务
+    ——线上实测踩到过。所以由这条独立的短循环按"线程还活着吗"来续。
+    """
+    while not stop.wait(_HEARTBEAT_SECONDS):
+        for name, th in threads.items():
+            _note(name, running=th.is_alive())
+
+
 def _note(worker: str, **fields: Any) -> None:
     with _lock:
         _state[worker] = {**_state.get(worker, {}), **fields, "ts": time.time(),
@@ -181,6 +195,7 @@ def start_all(stop: Optional[threading.Event] = None) -> dict[str, Any]:
     """
     stop = stop or threading.Event()
     out: dict[str, Any] = {}
+    threads: dict[str, threading.Thread] = {}
 
     mode = _setting("scheduler")
     if mode == "off":
@@ -189,8 +204,9 @@ def start_all(stop: Optional[threading.Event] = None) -> dict[str, Any]:
         # 跑两份 = 同一份早报推两遍
         out["scheduler"] = {"started": False, "reason": "系统 timer 已在跑，进程内不重复"}
     else:
-        threading.Thread(target=_scheduler_loop, args=(stop,), daemon=True,
-                         name="ivyea-scheduler").start()
+        threads["scheduler"] = threading.Thread(
+            target=_scheduler_loop, args=(stop,), daemon=True, name="ivyea-scheduler")
+        threads["scheduler"].start()
         out["scheduler"] = {"started": True, "running": True,
                             "reason": f"每 {TICK_SECONDS:.0f} 秒唤醒一次"}
 
@@ -207,11 +223,15 @@ def start_all(stop: Optional[threading.Event] = None) -> dict[str, Any]:
         # 跑两份 = 同一次按钮点击可能被执行两遍（去重表是进程内的）
         out["relay"] = {"started": False, "reason": "独立 relay 服务已在跑，进程内不重复"}
     else:
-        threading.Thread(target=_relay_loop, args=(stop,), daemon=True,
-                         name="ivyea-feishu-relay").start()
+        threads["relay"] = threading.Thread(
+            target=_relay_loop, args=(stop,), daemon=True, name="ivyea-feishu-relay")
+        threads["relay"].start()
         out["relay"] = {"started": True, "running": True,
                         "reason": "飞书长连接已在 serve 内建立"}
 
+    if threads:
+        threading.Thread(target=_heartbeat_loop, args=(stop, threads), daemon=True,
+                         name="ivyea-worker-heartbeat").start()
     for k, v in out.items():
         if not v.get("started"):
             # 清残留：这一轮没启动，就不能让上一轮落盘的 running=True 继续骗人
