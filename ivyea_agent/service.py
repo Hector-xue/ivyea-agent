@@ -2118,6 +2118,9 @@ def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, api_token: s
 
 
 def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, api_token: str = "") -> None:
+    from .stdio_utf8 import force_utf8
+    force_utf8()   # 下面这些 print 里有 ✓ 和中文；stdout 被重定向到文件/NUL 时
+                   # Windows 默认按 GBK 编码，编不出来就整个进程崩在这儿。
     server = make_server(host, port, api_token=api_token)
     actual_host, actual_port = server.server_address
     print(f"Ivyea Agent API listening on http://{actual_host}:{actual_port}")

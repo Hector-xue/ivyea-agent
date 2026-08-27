@@ -10,6 +10,18 @@
 
 ---
 
+## [Unreleased]
+
+### 修复
+
+- **Windows 上服务起不来**（升级到 v1.15.x 后出现）：`serve` 崩在开场白的一个 `✓` 上 ——
+  `UnicodeEncodeError: 'gbk' codec can't encode character '\u2713'`。IvyeaOps 起 serve 时
+  把输出重定向到日志文件 / NUL，此时 Windows 的 Python 不再用 UTF-8 而是退回系统代码页
+  （中文机器 = GBK），编不出这个字符就整个进程退出，工作台那边只看得到
+  "All connection attempts failed"。现在每个入口都会先把 stdout/stderr 钉成 UTF-8
+  （见 [ADR-0023](./docs/decisions/0023-stdio-is-utf8-on-every-entry-point.md)）。
+  英文版 Windows 同理受益 —— cp437 连中文日志都编不出来。
+
 ## [v1.15.16] - 2026-08-24
 
 ### 新增
