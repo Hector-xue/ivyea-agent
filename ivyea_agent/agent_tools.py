@@ -36,6 +36,9 @@ class ToolContext:
     session_id: str = ""                                   # 用于运行时间线
     turn_id: str = ""                                      # 当前用户轮次
     task_id: str = ""                                      # 绑定长任务，用于自动记录续跑/阻塞点
+    # 本轮自动召回了哪几条记忆。运行时填、展示层读——**指示器必须是确定性的**：
+    # 用户凭它知道"记忆起作用了"，而不是靠模型在回答里顺口提一句（模型经常不提）。
+    memory_recall: dict[str, Any] = field(default_factory=dict)
     ops_bridge: dict[str, Any] = field(default_factory=dict)  # IvyeaOps 嵌入模式工具桥接
     ops_context: dict[str, Any] = field(default_factory=dict)  # 当前 Ops 页面/板块上下文
     provider: Any = None                                       # 当前主脑 provider（供 dispatch_subagent）
@@ -603,14 +606,21 @@ def _t_recall(args: dict, ctx: ToolContext) -> str:
     query = str(args.get("query") or "")
     blocks: list[str] = []
 
+    # 检索本身走 memory.recall_core —— **每轮自动召回用的是同一个函数**。
+    # 两条路各写一份的话早晚漂移，而漂移的那条不会有人发现，直到某天发现
+    # "工具查得到、自动召回查不到"。
+    # record=True：这是用户/模型主动发起的一次回忆，算作"这条记忆被用到了";
+    # 自动召回那边则必须 record=False，否则每轮都跑会把遗忘打分刷成一片热门。
+    core = memory.recall_core(query, limit=4, episodes=6, record=True)
+
     # 1) 分类记忆优先：它是提炼过的结论，比原始对话片段密度高得多
-    curated = memory_store.search(query, limit=4)
+    curated = core["curated"]
     if curated:
         blocks.append("【分类记忆】（用 memory_read 取全文）\n" + "\n".join(
             f"  · [{h['category']}/{h['name']}] {h['description'] or h['body'][:60]}" for h in curated))
 
     # 2) 情景记忆：原始片段，用于"上次聊到的那个…"这类模糊回忆
-    hits = memory.search(query, limit=6)
+    hits = core["episodes"]
     if hits:
         import time as _t
         blocks.append("【历史记录】\n" + "\n".join(

@@ -506,6 +506,47 @@ def find_similar(text: str, exclude: str = "", scope: str = "") -> Optional[Tupl
     return None
 
 
+# 索引层缓存。key = (limit, scope)，value = (签名, 结果)。
+#
+# **为什么必须缓存**：index_digest 每轮都被拼进 system prompt，而它内部要
+# ① 扫目录逐个解析 markdown（list_entries）② 跑一遍遗忘打分（memory_decay.rank）。
+# 打分依赖命中计数和时间衰减 —— 也就是说**一条记忆都没写，跨一天、或某条被检索
+# 命中一次，排序就可能变**，system 前缀跟着变，前缀缓存白白失效。
+#
+# 签名刻意只看"目录里的文件"和"今天是哪天"，不看命中计数：命中计数每轮都在变，
+# 把它算进去等于没缓存。代价是热度变化要等到隔天或下次写入才反映到索引层排序里，
+# 这对一份"目录"来说完全可以接受。
+_DIGEST_CACHE: Dict[tuple, tuple] = {}
+
+
+def _digest_signature() -> tuple:
+    """记忆目录的廉价指纹：条数 + 最新 mtime + 总字节 + 当天日期。
+
+    只 stat 不读内容，几十条记忆时是微秒级；真有写入时三个值里必有一个变。
+    """
+    count = 0
+    newest = 0
+    total = 0
+    root = mem_dir()
+    try:
+        for cat in CATEGORIES:
+            d = root / cat
+            if not d.is_dir():
+                continue
+            with os.scandir(d) as it:
+                for entry in it:
+                    if not entry.name.endswith(".md"):
+                        continue
+                    st = entry.stat()
+                    count += 1
+                    total += st.st_size
+                    newest = max(newest, st.st_mtime_ns)
+    except OSError:
+        # 目录读不了就返回一个不可复用的签名，退化成"每次重算"而不是"返回错的"
+        return (time.time_ns(),)
+    return (count, newest, total, time.strftime("%Y-%m-%d"))
+
+
 def index_digest(limit: int = MAX_INDEX_CHARS, *, scope: str = "") -> str:
     """索引层：每条一行，全量注入 system prompt。
 
@@ -515,8 +556,15 @@ def index_digest(limit: int = MAX_INDEX_CHARS, *, scope: str = "") -> str:
     `scope` 非空时只列该作用域 + 全局（空 scope）的记忆，见 Entry.matches_scope。
     用于把不同项目/店铺的记忆隔开，互不干扰。
     """
+    key = (limit, scope)
+    sig = _digest_signature()
+    cached = _DIGEST_CACHE.get(key)
+    if cached is not None and cached[0] == sig:
+        return cached[1]
+
     entries = list_entries(scope=scope)
     if not entries:
+        _DIGEST_CACHE[key] = (sig, "")
         return ""
 
     # 按"用得多不多 / 最近用没用过 / 可不可信"排序并剔除冷门，而不是按时间。
@@ -550,7 +598,9 @@ def index_digest(limit: int = MAX_INDEX_CHARS, *, scope: str = "") -> str:
     hidden = truncated + archived_count
     if hidden:
         parts.append(f"（另有 {hidden} 条不常用的记忆未列出，用 memory_search 仍可检索到）")
-    return "\n".join(parts)
+    out = "\n".join(parts)
+    _DIGEST_CACHE[key] = (sig, out)
+    return out
 
 
 # ── 写入：add / update / delete / noop ───────────────────────────────────────

@@ -2403,6 +2403,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         from . import hooks as _hooks
         _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
         messages[0] = _sys_msg()
+        user_content = _inject_recall(args, ctx, line, user_content, messages, narrate)
         _snapshot(line)   # /rewind 检查点（本轮之前的对话+代码状态）
         messages.append({"role": "user", "content": _mentions.build_user_content(user_content, _mention_imgs)})
         mcfg = cfg.get_model_config()
@@ -2588,6 +2589,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             from . import hooks as _hooks
             _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
             messages[0] = _sys_msg()   # 每轮刷新 system：注入真实当前日期，续接旧会话/跨天也不过时
+            user_content = _inject_recall(args, ctx, line, user_content, messages, print)
             _snapshot(line)   # /rewind 检查点（本轮之前的对话+代码状态）
             messages.append({"role": "user", "content": _mentions.build_user_content(user_content, _mention_imgs)})
             try:
@@ -2655,6 +2657,38 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         _auto_reflect(cfg, narrate=not _oneshot)
         _hooks.fire("session_end", {"session_id": sid or "", "turns": meter.turns,
                                     "cost": round(meter.cost, 6)})
+
+
+def _inject_recall(args, ctx, line: str, user_content: str, messages: list, tell) -> str:
+    """CLI 侧的每轮自动召回。返回加了召回块的 user_content。
+
+    和 serve 走同一套函数（memory.auto_recall_text / already_recalled），
+    只是展示层不同：这边打一行灰字，那边发一个 SSE 事件。
+
+    `--no-memory` 只关写不关读，所以这里**不看**它 —— 用户说"这段别记"
+    要的是内容不进库，不是放弃已有记忆。
+    """
+    try:
+        from . import memory, task_scope
+        said = task_scope._user_said(line)
+        if memory.is_trivial_prompt(said):
+            return user_content
+        prev = ""
+        for msg in reversed(messages or []):
+            if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+                prev = task_scope._user_said(msg["content"])
+                break
+        query = f"{said}\n{prev}"[:600] if prev else said
+        body, names = memory.auto_recall_text(
+            query, exclude=memory.already_recalled(messages),
+            limit=int(config.get_setting("memory_auto_recall_limit", 4) or 4))
+        if not body:
+            return user_content
+        ctx.memory_recall = {"count": len(names), "names": names}
+        tell(ui.message("muted", f"🧠 已回忆 {len(names)} 条相关记忆"))
+        return user_content + memory.recall_block(body)
+    except Exception:  # noqa: BLE001 —— 召回失败就当没召回
+        return user_content
 
 
 def _record_turn_memory(args, user_text: str, assistant_text: str, sid: str) -> None:

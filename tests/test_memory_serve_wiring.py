@@ -129,3 +129,76 @@ def test_scope_from_workspace_when_enabled(wired):
     config.set_setting("memory_scope_from_workspace", True)
     assert service._memory_scope(_ctx(service, workspace="/root/ivyea-ops")) == "ivyea-ops"
     assert service._memory_scope(_ctx(service, workspace="")) == ""
+
+
+# ── 每轮自动召回（P1）────────────────────────────────────────────────────────
+def _user_content(service, payload, ctx, route=None):
+    messages, _c, _b = service._chat_messages(
+        str(payload.get("message") or "x"), payload, ctx, route)
+    return str(messages[-1].get("content") or "")
+
+
+def test_auto_recall_injected_as_suffix(wired):
+    """注入形态必须是**后缀**（拼在用户这句话尾巴上），和 [Ivyea 本地知识检索] 并排。
+
+    独立消息是"门禁类"注入的形态，要走 transcript.gate_text + _USER_MARKERS；
+    上下文类走后缀 + 展示端截断。选错约定的后果是用户在 IvyeaOps 里
+    看到自己"发"了一大段记忆。
+    """
+    from ivyea_agent import memory
+    service = wired
+    ctx = _ctx(service, session_id="r1")
+    content = _user_content(service, {"message": "领星广告怎么优化"}, ctx)
+    assert content.startswith("领星广告怎么优化")          # 用户原话在最前
+    assert memory.RECALL_MARKER in content
+    assert "领星广告方法论" in content
+    assert ctx.memory_recall.get("count") == 1            # 指示器有数
+
+
+def test_auto_recall_skips_trivial_prompt(wired):
+    """"好的"查不出东西，还会把上个话题的残留带进来。"""
+    from ivyea_agent import memory
+    service = wired
+    ctx = _ctx(service, session_id="r2")
+    content = _user_content(service, {"message": "好的"}, ctx)
+    assert memory.RECALL_MARKER not in content
+    assert not ctx.memory_recall
+
+
+def test_auto_recall_respects_opt_out(wired):
+    from ivyea_agent import memory
+    service = wired
+    for extra in ({"no_memory": True}, {"task_id": "t9"}, {"inject_retrieval": False}):
+        ctx = _ctx(service, session_id="r3")
+        content = _user_content(service, {"message": "领星广告怎么优化", **extra}, ctx)
+        assert memory.RECALL_MARKER not in content, extra
+
+
+def test_auto_recall_dedupes_across_turns(wired):
+    """第二轮问同一件事时不该再注入同一条 —— 召回块是跟着落盘的，会堆起来。"""
+    from ivyea_agent import memory
+    service = wired
+    ctx = _ctx(service, session_id="r4")
+    messages, _c, _b = service._chat_messages("领星广告怎么优化", {"message": "x"}, ctx)
+    assert memory.RECALL_MARKER in str(messages[-1]["content"])
+    # 把这一轮当成历史，再问一次
+    messages.append({"role": "assistant", "content": "好的。"})
+    payload = {"message": "y", "history": []}
+    ctx2 = _ctx(service, session_id="r4")
+    import ivyea_agent.sessions as sessions
+    sessions.save("r4", messages)
+    content2 = _user_content(service, {**payload, "message": "领星广告怎么优化"}, ctx2)
+    assert memory.RECALL_MARKER not in content2
+
+
+def test_trivial_prompt_also_skips_knowledge_retrieval(wired, monkeypatch):
+    """顺手收掉的一笔浪费：说一句"好的"，此前照样跑一次知识证据检索。"""
+    from ivyea_agent import knowledge
+    service = wired
+    calls = []
+    monkeypatch.setattr(knowledge, "evidence_context",
+                        lambda *a, **k: calls.append(a) or {"text": "", "citations": []})
+    _user_content(service, {"message": "好的"}, _ctx(service, session_id="r5"))
+    assert calls == []
+    _user_content(service, {"message": "帮我看看广告结构"}, _ctx(service, session_id="r6"))
+    assert calls

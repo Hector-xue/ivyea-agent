@@ -19,7 +19,7 @@ from . import (
     __version__, ads_evidence, agent_loop, code_agent, config, context, knowledge, knowledge_evidence,
     knowledge_governance, knowledge_quality, knowledge_sync, live_turn, memory, memory_reflect, models,
     progress_reporting, retrieval, routing, security, self_manage, sessions, skills, stream_json,
-    task_runner, traces, transcript, workspace,
+    task_runner, task_scope, traces, transcript, workspace,
 )
 from .agent_tools import ToolContext
 
@@ -1613,6 +1613,8 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
     }
     if ctx.vision_tier:
         result["vision_tier"] = dict(ctx.vision_tier)
+    if ctx.memory_recall:
+        result["memory_recall"] = dict(ctx.memory_recall)
     if ctx.task_id:
         try:
             result["task"] = task_runner.load(ctx.task_id)
@@ -1799,6 +1801,10 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
         narrate(note)
     if ctx.vision_tier:
         send("vision_tier", dict(ctx.vision_tier))
+    # 召回指示器：**确定性地**告诉用户记忆起作用了。
+    # 不能指望模型在回答里顺口提一句——它经常不提，于是用户以为记忆没生效。
+    if ctx.memory_recall:
+        send("memory_recall", dict(ctx.memory_recall))
 
     # 本轮的执行步骤，按 call_id 收口成"每个调用只留最终态"（running → ok/error 合并，
     # 与前端 mergeStep 同一语义）。轮次收尾时落盘 —— 此前它们只流给前端就扔了，
@@ -2993,6 +2999,26 @@ def _memory_scope(ctx: ToolContext) -> str:
     return os.path.basename(os.path.normpath(ws))[:64]
 
 
+def _recall_query(said: str, messages: list[dict[str, Any]]) -> str:
+    """拼检索用的查询：这一句 + 上一句用户说的话。
+
+    这是最便宜的指代消解。"这个再改改""刚才那个方案"里没有任何可检索的实词，
+    双路 RRF 再强也召不回东西 —— 缺的不是检索能力，是上下文。
+    （方案里的 LLM 改写留到后面再上：每轮多一次模型调用，得先看这一步够不够。）
+    """
+    prev = ""
+    for msg in reversed(messages or []):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            prev = task_scope._user_said(content)
+        break
+    if not prev:
+        return said
+    return f"{said}\n{prev}"[:600]
+
+
 def _memory_read_on(payload: dict[str, Any], ctx: ToolContext) -> bool:
     """要不要把记忆注入这一轮的上下文。
 
@@ -3146,9 +3172,14 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext,
     user_content = message
     if route is not None and route.is_board:
         user_content += routing.board_hint(route)
+    # 用户真正打的那句话（切掉历史注入块）—— 检索判据只能看人说的话。
+    said = task_scope._user_said(message)
+    trivial = memory.is_trivial_prompt(said)
     # 闲聊不查知识库：问候语检索不出东西，白跑一趟；万一检索到了，反而是给
     # 「你好」配上几百字亚马逊证据。
-    if payload.get("inject_retrieval", True) and not (route is not None and route.is_chat):
+    # `trivial` 是同一个道理再往前一步：连"好的""收到"这种应答也别查。
+    # 它本来就白跑一趟，此前一直在跑。
+    if payload.get("inject_retrieval", True) and not trivial and not (route is not None and route.is_chat):
         evidence = knowledge.evidence_context(message, limit=4)
         ctx.knowledge_citations = list(evidence.get("citations") or [])
         ctx.knowledge_retrieval_expected = bool(evidence.get("should_retrieve"))
@@ -3165,6 +3196,26 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext,
         ctx.knowledge_retrieval_expected = False
         ctx.knowledge_risk = "none"
         ctx.knowledge_query = message
+    # ── 每轮自动召回：把 model-driven 改成 runtime-driven ──────────────────
+    #
+    # P0 让模型**知道**记忆里有什么（索引层进 system），这一步让它**不必想起来去查**。
+    # 注入形态跟着上面的知识检索走（后缀），不另起一套机制。
+    #
+    # 三道门：① 记忆读开关（自动化轮次/临时会话在这里就被挡掉）；
+    # ② trivial —— "好的"查不出东西，还会把上个话题的残留带进来；
+    # ③ 去重 —— 召回块跟着 user 消息一起落盘，不去重会在长会话里堆成山。
+    if _memory_read_on(payload, ctx) and not trivial:
+        try:
+            body, names = memory.auto_recall_text(
+                _recall_query(said, messages),
+                exclude=memory.already_recalled(messages),
+                scope=_memory_scope(ctx),
+                limit=int(config.get_setting("memory_auto_recall_limit", 4) or 4))
+            if body:
+                user_content += memory.recall_block(body)
+                ctx.memory_recall = {"count": len(names), "names": names}
+        except Exception:  # noqa: BLE001 —— 召回失败就当没召回，绝不能拖垮这一轮
+            pass
     user_content += _attachments_note(payload)
     # 本轮起点：这之前都是历史，这之后（含这条 user 和后续工具/回答）才是本轮新增。
     # 落盘时只写这一段，见 sessions.append_turn —— 整份覆盖会吃掉并发的另一轮。
