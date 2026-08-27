@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 
 def _episodes(n: int) -> None:
     from ivyea_agent import memory

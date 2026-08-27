@@ -1850,6 +1850,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         _checkpoints.append({"n": len(_checkpoints) + 1, "msg_len": len(messages),
                              "cp": cp, "label": (line or "")[:50]})
     memory.sync_markdown_index()                           # 策展 markdown → FTS，修手改/重装漂移
+    memory.maybe_prune_episodes()                          # 过期对话行清理（一天一次，失败自吞）
     instructions = memory.load_instructions(os.getcwd())   # USER.md/AGENTS.md 持久指令
     profile_key = getattr(args, "asin", None) or "default"
     profile_context = profiles.context_text(profiles.resolve(asin=getattr(args, "asin", "") or ""), label=profile_key)

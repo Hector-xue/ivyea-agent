@@ -36,6 +36,9 @@ class ToolContext:
     session_id: str = ""                                   # 用于运行时间线
     turn_id: str = ""                                      # 当前用户轮次
     task_id: str = ""                                      # 绑定长任务，用于自动记录续跑/阻塞点
+    # 本轮记忆写入连续失败了几次（熔断用）。记成 (turn_id, 次数)，
+    # 换一轮自动归零 —— 不需要谁去主动 reset。
+    memory_write_fails: tuple = ("", 0)
     # 本轮自动召回了哪几条记忆。运行时填、展示层读——**指示器必须是确定性的**：
     # 用户凭它知道"记忆起作用了"，而不是靠模型在回答里顺口提一句（模型经常不提）。
     memory_recall: dict[str, Any] = field(default_factory=dict)
@@ -445,6 +448,34 @@ def _t_remember(args: dict, ctx: ToolContext) -> str:
     return memory.remember(args.get("text", ""), args.get("asin") or ctx.asin)
 
 
+# 同一轮里记忆写入连续失败几次就停手。
+#
+# **记忆是副作用，副作用失败绝不能吃掉用户的回答。** 没有这道闸的话，
+# 一次查重冲突或超上限会让模型反复重试同一个写入，把这一轮的工具预算耗光，
+# 用户等了半天什么都没等到——而它本来只是想顺手记一笔。
+MEMORY_WRITE_FAIL_LIMIT = 3
+
+_MEMORY_CIRCUIT_MSG = (
+    "记忆写入在这一轮已经连续失败 {n} 次。**别再重试了**——先把回答给用户，"
+    "这条以后再存。"
+)
+
+
+def _memory_write_outcome(ctx: ToolContext, ok: bool, message: str) -> str:
+    """记一次记忆写入的成败，必要时熔断。返回给模型看的文本。"""
+    turn = str(getattr(ctx, "turn_id", "") or "")
+    prev_turn, n = getattr(ctx, "memory_write_fails", ("", 0)) or ("", 0)
+    n = int(n) if prev_turn == turn else 0        # 换轮归零
+    if ok:
+        ctx.memory_write_fails = (turn, 0)        # 成功即清零：熔断数的是**连续**失败
+        return message
+    n += 1
+    ctx.memory_write_fails = (turn, n)
+    if n >= MEMORY_WRITE_FAIL_LIMIT:
+        return _MEMORY_CIRCUIT_MSG.format(n=n)
+    return message
+
+
 def _t_memory_write(args: dict, ctx: ToolContext) -> str:
     res = memory_store.apply(
         (args.get("operation") or "").strip(),
@@ -458,7 +489,7 @@ def _t_memory_write(args: dict, ctx: ToolContext) -> str:
         valid_from=args.get("valid_from") or "",
         valid_until=args.get("valid_until") or "",
     )
-    return res.get("message", "")
+    return _memory_write_outcome(ctx, bool(res.get("ok")), res.get("message", ""))
 
 
 def _t_memory_search(args: dict, ctx: ToolContext) -> str:
@@ -506,7 +537,11 @@ def _t_core_memory_edit(args: dict, ctx: ToolContext) -> str:
         args.get("content") or "",
         args.get("old") or "",
     )
-    return res.get("message", "")
+    # 漂移拒绝**不计入熔断**：那是"你该重新 view 一遍再写"，正是我们希望模型去做的事，
+    # 把它算成失败会让第三次重试被熔断掉，反而拦住了正确的补救动作。
+    if res.get("drift"):
+        return res.get("message", "")
+    return _memory_write_outcome(ctx, bool(res.get("ok")), res.get("message", ""))
 
 
 def _t_knowledge_search(args: dict, ctx: ToolContext) -> str:

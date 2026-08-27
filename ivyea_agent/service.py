@@ -2225,6 +2225,11 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, api_token: str = "")
         memory.sync_markdown_index()
     except Exception:  # noqa: BLE001 —— 索引对齐失败不该让服务起不来
         pass
+    # 情景记忆保留策略：serve 每轮都会往 search_fts 加两行，只进不出的话
+    # 索引会一直涨、每轮都要跑的自动召回会越来越慢。一天最多真扫一次。
+    _pruned = memory.maybe_prune_episodes()
+    if _pruned.get("deleted"):
+        print(f"  · memory: {_pruned.get('message', '')}")
     if api_token:
         print("Auth: Bearer token required.")
     print("Endpoints: /health, /v1/manifest, /v1/capabilities, /v1/knowledge/search, /v1/retrieval/search, /v1/tasks")

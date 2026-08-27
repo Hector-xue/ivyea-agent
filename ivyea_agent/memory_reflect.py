@@ -78,6 +78,11 @@ _SYS = """你是一个记忆巩固器。输入是一段时间内的零散经历�
   也许每次他都单独批准过，也许那三次恰好都到了发版节点。
 - 用户两次让你用中文回答 → 如果他明说了"以后都用中文"，那是偏好；如果只是那两次用了中文，
   那只是发生过。
+
+**涉及用户的规矩、红线、纪律（category=user / feedback）时，只有他明确说过的才算数。**
+从你观察到的行为序列反推出来的"他大概是这么要求的"一律不作数——你看到的是他做了什么，
+不是他要求什么，这两者经常相反（他可能每次都单独批准过，也可能正在纠正你）。
+这类推断照样写出来，但要在 description 里写清"这是从行为推断的，未经他确认"。
 判据很简单：**用户有没有说过表达长期意图的话**（"以后都""一律""永远""每次都要"）？
 说过 → 可以写成规则。没说过 → 只写"观察到 X 发生过 N 次"，别替他总结成习惯或偏好。
 拿不准就不写，漏记一条的代价远小于让我按错误的"偏好"行事。
@@ -194,7 +199,16 @@ def reflect(provider, *, force: bool = False, limit: int = MAX_EPISODES) -> Dict
     if not isinstance(data, dict):
         return {"ok": False, "applied": [], "skipped": [], "message": "反思返回的不是可解析的 JSON。"}
 
-    ops = data.get("operations")
+    # 时间水位线推进到本批最后一条：即便这次一条都没落盘，也不该下次再嚼同一批经历。
+    config.set_setting(_LAST_TS_KEY, float(rows[-1].get("ts") or time.time()))
+    config.set_setting(_LAST_RUN_KEY, time.time())        # 节流用的墙钟时间
+    return _apply_ops(data.get("operations"), rows)
+
+def _apply_ops(ops: Any, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """把模型给的操作列表落盘。reflect()（情景经历）和 reflect_on_text()
+    （压缩摘要）共用这一段 —— 两条路各写一份的话，证据门槛、待定区、
+    "不许覆盖用户亲口定的规矩"这几道闸早晚只剩一条路上有。
+    """
     if not isinstance(ops, list):
         ops = []
 
@@ -214,6 +228,31 @@ def reflect(provider, *, force: bool = False, limit: int = MAX_EPISODES) -> Dict
         # 拿证据数去卡它们反而会让过时的记忆改不掉。
         if action == "add" and evidence < MIN_EVIDENCE:
             skipped.append(f"{name}（仅 {evidence} 条证据，未达 {MIN_EVIDENCE} 条门槛）")
+            continue
+
+        # **反思不得覆盖用户亲口说过的规矩。**
+        #
+        # 新增走待定区（下面那段）已经挡住了"凭空捏一条规矩"，但没挡住更隐蔽的一种：
+        # 用 update 去改一条**用户自己定的** user/feedback 记忆。实测翻过车的正是这个
+        # 形状——用户的规矩是"未经批准绝不发版"，而反思从几次行为里总结出"他习惯
+        # 开发完就发版"，一旦让它 update 上去，用户的原话就被自己的行为记录改写了。
+        #
+        # 判据是 source：user/manual 是人写的，reflection 是推断的。推断不许改人写的。
+        existing = memory_store.get(name) if name else None
+        if (existing is not None and existing.category in ("user", "feedback")
+                and existing.source != "reflection" and action in ("add", "update", "delete")):
+            pres = memory_store.add_pending(
+                name, str(op.get("content") or "") or existing.body,
+                category=existing.category,
+                description=("（反思建议修改一条你亲口定的规矩，需你确认）"
+                             + str(op.get("description") or "")),
+                keywords=str(op.get("keywords") or ""),
+                scope=existing.scope,
+                evidence=_evidence_note(evidence, rows),
+                confidence=min(memory_store.REFLECTION_MAX_CONFIDENCE,
+                               0.35 + 0.07 * max(0, evidence)))
+            held.append(f"{name}（涉及你亲口定的规矩，改动已挂起待确认）"
+                        if pres.get("ok") else f"{name}：{pres.get('message', '')}")
             continue
 
         # 新洞察一律先进**待定区**，不直接落成正式记忆。
@@ -254,10 +293,6 @@ def reflect(provider, *, force: bool = False, limit: int = MAX_EPISODES) -> Dict
         (applied if res.get("ok") else skipped).append(
             res.get("message", name) if res.get("ok") else f"{name}：{res.get('message', '')}")
 
-    # 时间水位线推进到本批最后一条：即便这次一条都没落盘，也不该下次再嚼同一批经历。
-    config.set_setting(_LAST_TS_KEY, float(rows[-1].get("ts") or time.time()))
-    config.set_setting(_LAST_RUN_KEY, time.time())        # 节流用的墙钟时间
-
     bits = []
     if applied:
         bits.append(f"沉淀 {len(applied)} 条")
@@ -270,6 +305,7 @@ def reflect(provider, *, force: bool = False, limit: int = MAX_EPISODES) -> Dict
         msg += "待定记忆还没生效，用 ivyea memory pending 查看、confirm 确认。"
     return {"ok": True, "applied": applied, "skipped": skipped, "pending": held,
             "message": msg, "episodes": len(rows)}
+
 
 
 def _evidence_note(count: int, rows: List[Dict[str, Any]]) -> str:
@@ -383,6 +419,64 @@ def maybe_reflect_async(*, on_done=None) -> bool:
         return True
     except Exception:  # noqa: BLE001
         _RUNNING = False
+        return False
+
+
+_SUMMARY_SYS = _SYS + """
+
+这一批输入不是零散经历，而是**一次上下文压缩的摘要**——它已经是提炼过的内容。
+所以：宁缺毋滥，只挑那些"下次开新会话也该知道"的结论；过程细节、这次任务特有的
+中间状态一律不要。"""
+
+
+def reflect_on_text(text: str, provider=None) -> Dict[str, Any]:
+    """从一段文本（当前用途：上下文压缩的摘要）里提炼记忆。
+
+    **为什么用摘要而不是原始消息**：compact 已经为压缩调过一次模型生成 summary
+    （context.py:119）。再把原始 old 消息喂一遍等于同一段对话付两次钱，而且摘要
+    本身就是提炼过的，比逐字对话更适合做巩固输入。
+
+    不动两个水位线：经历水位线（读到哪条）和节流水位线（上次跑完是什么时候）都属于
+    情景记忆那条常规路径，压缩是另一条独立触发的路，不该互相干扰。
+    """
+    text = (text or "").strip()
+    if not text:
+        return {"ok": True, "applied": [], "skipped": [], "message": "空摘要，无可提炼。"}
+    provider = provider or _default_provider()
+    if provider is None:
+        return {"ok": False, "applied": [], "skipped": [], "message": "没有可用的模型配置。"}
+    index = memory_store.index_digest() or "（当前没有任何分类记忆）"
+    user = f"# 现有记忆索引\n{index}\n\n# 这次要巩固的会话摘要\n{text[:6000]}"
+    try:
+        raw = provider.complete(_SUMMARY_SYS, user, json_mode=True, temperature=0.2, timeout=120.0)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "applied": [], "skipped": [], "message": f"反思调用失败：{e}"}
+    data = _extract_json(raw)
+    if not isinstance(data, dict):
+        return {"ok": False, "applied": [], "skipped": [], "message": "反思返回的不是可解析的 JSON。"}
+    return _apply_ops(data.get("operations"), [])
+
+
+def reflect_summary_async(text: str) -> bool:
+    """压缩收尾时调用：后台把摘要里的结论沉淀下来。绝不阻塞压缩本身。"""
+    if not (text or "").strip():
+        return False
+    if not config.get_setting("memory_reflect_on_compact", True):
+        return False
+
+    def _work() -> None:
+        try:
+            from . import memory_lock
+            with memory_lock.reflect_lock(timeout=0.0) as got:
+                if got:
+                    reflect_on_text(text)
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        threading.Thread(target=_work, name="ivyea-memory-compact-reflect", daemon=True).start()
+        return True
+    except Exception:  # noqa: BLE001
         return False
 
 

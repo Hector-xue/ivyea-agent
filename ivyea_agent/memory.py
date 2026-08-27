@@ -267,6 +267,88 @@ def episodes_since(ts: float = 0.0, limit: int = 200) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+# ── 情景记忆的保留策略 ──────────────────────────────────────────────────────
+#
+# serve 接进来之后，**每一轮对话都会往 search_fts 里加两行**（user + assistant）。
+# 在此之前这张表只进不出：索引越来越大、检索越来越慢，而自动召回是每轮都要跑的，
+# 最后表现为"用久了 agent 变迟钝"，而那时已经很难联想到是这里。
+#
+# 只收 [对话:*]。[会话摘要] / [决策] / [巡检] 一律留着 —— 它们本身就是提炼过的、
+# 密度高，而且决策记录是"上次已经否过这个词"这类护栏的唯一数据源。
+EPISODE_RETENTION_DAYS = 180
+_PRUNE_TS_KEY = "memory_last_prune_ts"
+_PRUNE_INTERVAL_S = 20 * 3600      # 一天最多清一次；挂在启动路径上，别每次起进程都扫
+
+
+def _backup_db_once() -> str:
+    """第一次真删之前给 memory.db 留个整份备份。
+
+    这是整套记忆方案里**唯一不可逆**的一步。备份只做一次（认 .bak 存在就跳过）：
+    目的是"改错了能回去"，不是留一串历史版本。
+    """
+    src = DB_PATH
+    dst = src.with_name(src.name + ".bak")
+    if dst.exists() or not src.exists():
+        return str(dst) if dst.exists() else ""
+    try:
+        import shutil
+        shutil.copy2(str(src), str(dst))
+        return str(dst)
+    except OSError:
+        return ""
+
+
+def prune_episodes(days: int = 0, *, dry_run: bool = False) -> dict[str, Any]:
+    """删掉过期的对话行，并**同步清掉分词旁路索引**。
+
+    删 search_fts 却不删 search_tok 会留下一批 src 指向已消失 rowid 的孤儿行；
+    更糟的是 FTS5 删行后会复用 rowid，新行拿到旧 rowid 就会继承那条陈旧的分词内容
+    ——既不是孤儿也不是缺失，静默地把检索结果污染掉（这个坑踩过一次）。
+    """
+    if days <= 0:
+        try:
+            days = int(config.get_setting("memory_episode_retention_days",
+                                          EPISODE_RETENTION_DAYS))
+        except (TypeError, ValueError):
+            days = EPISODE_RETENTION_DAYS
+    if days <= 0:
+        return {"ok": True, "deleted": 0, "message": "保留期设为 0，未清理。"}
+    cutoff = time.time() - days * 86400.0
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT rowid FROM search_fts WHERE ts < ? AND text LIKE '[对话:%'",
+            (cutoff,)).fetchall()
+        ids = [r["rowid"] for r in rows]
+        if not ids or dry_run:
+            return {"ok": True, "deleted": 0, "candidates": len(ids),
+                    "message": (f"{len(ids)} 条对话行超过 {days} 天"
+                                + ("（dry-run，未删）" if dry_run else "，无需清理"))}
+        backup = _backup_db_once()
+        marks = ",".join("?" * len(ids))
+        if _TOK_OK:
+            conn.execute(f"DELETE FROM search_tok WHERE src IN ({marks})", ids)
+        conn.execute(f"DELETE FROM search_fts WHERE rowid IN ({marks})", ids)
+        conn.commit()
+        return {"ok": True, "deleted": len(ids), "days": days, "backup": backup,
+                "message": f"已清理 {len(ids)} 条超过 {days} 天的对话记录。"}
+    finally:
+        conn.close()
+
+
+def maybe_prune_episodes() -> dict[str, Any]:
+    """启动路径上调用：一天最多真扫一次。失败一律吞掉，绝不能让进程起不来。"""
+    try:
+        last = float(config.get_setting(_PRUNE_TS_KEY, 0.0) or 0.0)
+        if last and (time.time() - last) < _PRUNE_INTERVAL_S:
+            return {"ok": True, "deleted": 0, "message": "今天已清理过。"}
+        res = prune_episodes()
+        config.set_setting(_PRUNE_TS_KEY, time.time())
+        return res
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "deleted": 0, "message": f"清理失败（已忽略）：{e}"}
+
+
 def stats() -> dict[str, Any]:
     conn = _conn()
     d = conn.execute("SELECT COUNT(*) c, SUM(decision='approve') a, SUM(decision='reject') r FROM decisions").fetchone()

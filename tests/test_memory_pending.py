@@ -152,9 +152,13 @@ def test_failed_promotion_keeps_pending(ivyea_home):
 
 
 def test_update_of_existing_memory_bypasses_pending(ivyea_home):
-    """update 是对已有记忆的修正，本来就有依据，不该被留观拦住。"""
+    """update 是对已有记忆的修正，本来就有依据，不该被留观拦住。
+
+    例外见下一条：user/feedback 里**用户亲口定的**那些，反思不许直接改。
+    所以这里用 domain —— 打法结论被新证据推翻，就该当场改掉。
+    """
     from ivyea_agent import config, memory_reflect, memory_store
-    memory_store.apply("add", name="已有项", category="feedback",
+    memory_store.apply("add", name="已有项", category="domain",
                        description="旧描述", content="旧正文")
     _seed_episodes(20)
     config.set_setting(memory_reflect._LAST_TS_KEY, 0.0)
@@ -174,3 +178,39 @@ def test_add_pending_requires_content(ivyea_home):
     from ivyea_agent import memory_store
     assert not memory_store.add_pending("", "x")["ok"]
     assert not memory_store.add_pending("名字", "")["ok"]
+
+
+def test_reflection_cannot_overwrite_a_user_stated_rule(ivyea_home):
+    """反思不得覆盖用户亲口说过的规矩 —— 这是实测翻过车的形状。
+
+    用户的规矩是"未经批准绝不发版"，反思从几次行为里总结出"他习惯开发完就发版"。
+    统计上成立、证据门槛拦不住，一旦让它 update 上去，用户的原话就被自己的
+    行为记录改写了。这类改动一律挂进待定区等人点头。
+    """
+    from ivyea_agent import config, memory_reflect, memory_store
+    memory_store.apply("add", name="发版纪律", category="feedback",
+                       description="用户定的规矩", content="未经批准绝不发版。",
+                       source="user")
+    _seed_episodes(20)
+    config.set_setting(memory_reflect._LAST_TS_KEY, 0.0)
+    res = memory_reflect.reflect(FakeProvider({"operations": [{
+        "operation": "update", "name": "发版纪律", "category": "feedback",
+        "content": "用户习惯开发完就发版。", "evidence_count": 3}]}))
+    assert not res["applied"]
+    assert res["pending"]
+    assert "未经批准绝不发版" in memory_store.get("发版纪律").body   # 原话没被动
+    assert memory_store.get_pending("发版纪律") is not None          # 改动挂起了
+
+
+def test_reflection_may_update_its_own_earlier_inference(ivyea_home):
+    """反过来：反思改**自己**之前的推断是正常的自我修正，不该被拦。"""
+    from ivyea_agent import config, memory_reflect, memory_store
+    memory_store.apply("add", name="推断项", category="feedback",
+                       description="上次推断的", content="旧推断。", source="reflection")
+    _seed_episodes(20)
+    config.set_setting(memory_reflect._LAST_TS_KEY, 0.0)
+    res = memory_reflect.reflect(FakeProvider({"operations": [{
+        "operation": "update", "name": "推断项", "category": "feedback",
+        "content": "修正后的推断。", "evidence_count": 3}]}))
+    assert res["applied"]
+    assert "修正后" in memory_store.get("推断项").body
