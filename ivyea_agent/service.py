@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import (
     __version__, ads_evidence, agent_loop, code_agent, config, context, knowledge, knowledge_evidence,
-    knowledge_governance, knowledge_quality, knowledge_sync, live_turn, models,
+    knowledge_governance, knowledge_quality, knowledge_sync, live_turn, memory, memory_reflect, models,
     progress_reporting, retrieval, routing, security, self_manage, sessions, skills, stream_json,
     task_runner, traces, transcript, workspace,
 )
@@ -1627,6 +1627,8 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
             usage={},
             created=created_at,
         )
+        # 情景记忆跟着落盘走：调用方说了这一轮不留档，就不该偷偷记进记忆库。
+        _record_turn_memory(payload, ctx, message, text)
     return result
 
 
@@ -1870,6 +1872,14 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
                 steps=steps, skill_matches=skill_rows, turn_stat=turn_stat)
         except Exception:  # noqa: BLE001 —— 落盘失败不该再把这一轮也搭进去
             pass
+        # 情景记忆 + 够门槛就后台反思。取 new_messages 里最后一条 assistant 正文：
+        # 上面刚把"流到一半就报错、但用户已经看见"的那篇补进去了，这里跟着一起记。
+        _answer = ""
+        for _m in reversed(new_messages):
+            if _m.get("role") == "assistant" and str(_m.get("content") or "").strip():
+                _answer = str(_m.get("content") or "")
+                break
+        _record_turn_memory(payload, ctx, message, _answer)
 
     try:
         provider = provider or build_chain(model_cfg, api_key, narrate=narrate)
@@ -2202,6 +2212,13 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, api_token: str = "")
     for name, info in serve_workers.start_all().items():
         mark = "✓" if info.get("started") else "·"
         print(f"  {mark} {name}: {info.get('reason', '')}")
+    # 策展 markdown → FTS 索引对齐。CLI 启动时做（cli._sys_msg 之前那一行），
+    # serve 之前不做 —— 于是用户手改 MEMORY.md、或重装后 memory.db 丢了，
+    # 在 serve 这边就永远是"文件里有、检索不到"。
+    try:
+        memory.sync_markdown_index()
+    except Exception:  # noqa: BLE001 —— 索引对齐失败不该让服务起不来
+        pass
     if api_token:
         print("Auth: Bearer token required.")
     print("Endpoints: /health, /v1/manifest, /v1/capabilities, /v1/knowledge/search, /v1/retrieval/search, /v1/tasks")
@@ -2956,9 +2973,105 @@ def _model_requires_key(settings: dict[str, Any]) -> bool:
     return bool(settings.get("key_env") or auth in ("oauth_external", "oauth_device_code", "copilot"))
 
 
+# ── 记忆的三个开关 ────────────────────────────────────────────────────────────
+#
+# serve 这条路不只服务人机对话：定时巡检、任务台续跑、ad_audit 走的都是同一个
+# chat_run/_chat_stream。给机器的例行轮次注入用户画像有两个后果——结构化输出被偏好
+# 带偏（IvyeaOps 那边有消费方在解析），以及巡检记录被当成"用户的经历"喂给反思。
+#
+# 好在 opt-out 机制早就有了：知识检索用的 `inject_retrieval`，任务路径显式传 False
+# （见 task_continue），cli_code 也传 False。记忆挂同一个开关即可，不需要新机制。
+
+
+def _memory_scope(ctx: ToolContext) -> str:
+    """把 workspace 归一成记忆作用域。默认关——开了会让"以前想得起的现在想不起"。"""
+    if not config.get_setting("memory_scope_from_workspace", False):
+        return ""
+    ws = str(getattr(ctx, "workspace", "") or "").strip()
+    if not ws:
+        return ""
+    return os.path.basename(os.path.normpath(ws))[:64]
+
+
+def _memory_read_on(payload: dict[str, Any], ctx: ToolContext) -> bool:
+    """要不要把记忆注入这一轮的上下文。
+
+    **故意不看 route.is_chat**：知识检索在闲聊路由上跳过是对的（闲聊不需要引证），
+    但闲聊恰恰是记忆最该起作用的时候——"我是谁""我上次说的偏好"就是闲聊。
+    照抄那个排除条件的话，最能体现记忆价值的场景反而没有记忆。
+    """
+    if not config.get_setting("memory_serve_inject", True):
+        return False
+    if payload.get("no_memory"):
+        return False
+    if str(payload.get("task_id") or ""):
+        return False
+    return bool(payload.get("inject_retrieval", True))
+
+
+def _memory_write_on(payload: dict[str, Any], ctx: ToolContext) -> bool:
+    """要不要把这一轮记成情景记忆 / 允许它触发反思。
+
+    比读开关多两条：① 任务轮次不记（机器的例行输出不是"经历"）；
+    ② 不看 inject_retrieval —— 关掉检索注入的轮次（比如 ivyea code）仍然是
+    用户和 agent 之间真实发生过的事，值得记。
+    """
+    if not config.get_setting("memory_index_turns", True):
+        return False
+    if payload.get("no_memory"):
+        return False
+    if str(payload.get("task_id") or "") or str(getattr(ctx, "task_id", "") or ""):
+        return False
+    return True
+
+
+def _record_turn_memory(payload: dict[str, Any], ctx: ToolContext,
+                        user_text: str, assistant_text: str) -> None:
+    """轮末记忆收尾：情景入库 + 够门槛就后台反思。整体吞异常。
+
+    **中断判据只有"正文为空"**。绝不能拿 client_gone 当判据：serve 的既定设计是
+    "客户端断开不打断轮次"（用户关掉页面、这一轮照样跑完），那份回答是有效的、
+    该记的。拿断开当中断会把这类正常轮次全漏掉。
+    """
+    try:
+        if not _memory_write_on(payload, ctx):
+            return
+        assistant_text = (assistant_text or "").strip()
+        if not assistant_text:
+            return                      # 半截/空回答不是"发生过的事实"
+        user_text = (user_text or "").strip()
+        if user_text:
+            memory.index_turn("user", user_text, ctx.session_id or "")
+        memory.index_turn("assistant", assistant_text, ctx.session_id or "")
+        memory_reflect.maybe_reflect_async()
+    except Exception:  # noqa: BLE001 —— 记忆是副作用，绝不能吃掉这一轮的回答
+        pass
+
+
 def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext,
                    route: "routing.Route | None" = None) -> tuple[list[dict[str, Any]], float | None, int]:
     system = agent_loop.SYSTEM_PROMPT + agent_loop.runtime_context_note()
+    # 记忆注入。**位置刻意排在最前**：后面的审批档位、板块工具桥、Skill 都是
+    # 祈使句，谁离结尾近谁的约束力强，记忆是背景资料，不该把它们挤开。
+    #
+    # 这一段此前整个不存在 —— CLI 有（cli._sys_msg），serve 没有。后果是用户在
+    # IvyeaOps / 飞书 / 任务台里聊天时，模型根本不知道记忆库里有什么，也就不会去
+    # memory_search，等于"在网页端用 = 没有记忆"。
+    if _memory_read_on(payload, ctx):
+        try:
+            scope = _memory_scope(ctx)
+            # cwd 是**服务进程**的工作目录，不是用户项目目录；有 workspace 就用它，
+            # 否则拿不到项目级 AGENTS.md。
+            root = str(getattr(ctx, "workspace", "") or "") or os.getcwd()
+            instructions = memory.load_instructions(root)
+            if instructions:
+                system += "\n\n[长期指令/画像]\n" + instructions
+            digest = memory.load_memory_digest(scope=scope)
+            if digest:
+                system += ("\n\n[记忆摘要 / MEMORY.md（其余用 memory_search / memory_read 检索）]\n"
+                           + digest)
+        except Exception:  # noqa: BLE001 —— 记忆读失败不该让这一轮跑不成
+            pass
     if ctx.plan_mode:
         system += agent_loop.PLAN_NOTE
     # 这句必须跟着审批档位走。**曾经它是无条件拼上去的** —— 于是用户在界面上选了

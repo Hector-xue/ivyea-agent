@@ -348,7 +348,7 @@ def sync_markdown_index() -> None:
     rebuild_token_index()
 
 
-def load_memory_digest(limit: int = 3500) -> str:
+def load_memory_digest(limit: int = 3500, *, scope: str = "") -> str:
     """启动注入用：分类记忆**索引层** + 全局 MEMORY.md 摘要 + 账户记忆索引，
     让 agent 开箱就知道记忆里有什么、不必每次靠回忆检索
     （曾出现"文件里明明有、recall 却说没有"）。超长则截断，其余仍可用「回忆记忆」检索。
@@ -359,7 +359,7 @@ def load_memory_digest(limit: int = 3500) -> str:
     parts: list[str] = []
     try:
         from . import memory_store
-        index = memory_store.index_digest()
+        index = memory_store.index_digest(scope=scope)
         if index:
             parts.append("[分类记忆索引]（需要正文时用 memory_read/memory_search 取）\n" + index)
     except Exception:

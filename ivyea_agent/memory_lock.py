@@ -29,18 +29,22 @@ def lock_path():
     return config.IVYEA_DIR / "memory.lock"
 
 
+def reflect_lock_path():
+    config.ensure_dirs()
+    return config.IVYEA_DIR / "memory-reflect.lock"
+
+
 @contextmanager
-def memory_write_lock(timeout: float = LOCK_TIMEOUT):
-    """跨进程互斥。拿不到就等，超时则放行并记一笔（不阻断业务）。"""
-    path = str(lock_path())
+def _flock(path: str, timeout: float, *, note: str = ""):
+    """底层文件锁。拿到与否都 yield，由调用方决定拿不到时怎么办。"""
     fh = None
     acquired = False
     try:
         fh = open(path, "a+")
         acquired = _acquire(fh, timeout)
-        if not acquired:
+        if not acquired and note:
             from . import log
-            log.dbg("memory.lock", f"等待 {timeout}s 未获得记忆写锁，放行（可能产生重复条目）")
+            log.dbg("memory.lock", note)
         yield acquired
     finally:
         if fh is not None:
@@ -50,6 +54,29 @@ def memory_write_lock(timeout: float = LOCK_TIMEOUT):
                 fh.close()
             except OSError:
                 pass
+
+
+@contextmanager
+def memory_write_lock(timeout: float = LOCK_TIMEOUT):
+    """跨进程互斥。拿不到就等，超时则放行并记一笔（不阻断业务）。"""
+    with _flock(str(lock_path()), timeout,
+                note=f"等待 {timeout}s 未获得记忆写锁，放行（可能产生重复条目）") as got:
+        yield got
+
+
+@contextmanager
+def reflect_lock(timeout: float = 0.0):
+    """反思专用锁 —— **必须和写锁分开**。
+
+    反思里包着一次最长 120 秒的模型调用。如果它占的是 memory_write_lock，
+    这两分钟内所有 memory_write / core_memory_edit 全都要排队等它，
+    用户会看到"说了记住、半天没反应"。所以另开一把锁，只用来保证
+    "同一时刻全机器只有一次反思在跑"。
+
+    默认 timeout=0（试一次拿不到就走）：反思是周期性的，这次跑不上下次还有机会。
+    """
+    with _flock(str(reflect_lock_path()), timeout) as got:
+        yield got
 
 
 def _acquire(fh, timeout: float) -> bool:

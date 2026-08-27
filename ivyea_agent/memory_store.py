@@ -506,13 +506,16 @@ def find_similar(text: str, exclude: str = "", scope: str = "") -> Optional[Tupl
     return None
 
 
-def index_digest(limit: int = MAX_INDEX_CHARS) -> str:
+def index_digest(limit: int = MAX_INDEX_CHARS, *, scope: str = "") -> str:
     """索引层：每条一行，全量注入 system prompt。
 
     这是整个方案省 token 的核心——模型看着这份目录就知道"记忆里有什么"，
     需要哪条再 memory_read 取正文，而不是把所有正文都塞进上下文。
+
+    `scope` 非空时只列该作用域 + 全局（空 scope）的记忆，见 Entry.matches_scope。
+    用于把不同项目/店铺的记忆隔开，互不干扰。
     """
-    entries = list_entries()
+    entries = list_entries(scope=scope)
     if not entries:
         return ""
 
