@@ -17,7 +17,8 @@ from urllib.parse import parse_qs, urlparse
 
 from . import (
     __version__, ads_evidence, agent_loop, code_agent, config, context, knowledge, knowledge_evidence,
-    knowledge_governance, knowledge_quality, knowledge_sync, live_turn, memory, memory_reflect, models,
+    knowledge_governance, knowledge_quality, knowledge_sync, live_turn, memory, memory_reflect,
+    memory_store, models,
     progress_reporting, retrieval, routing, security, self_manage, sessions, skills, stream_json,
     task_runner, task_scope, traces, transcript, workspace,
 )
@@ -319,6 +320,19 @@ def manifest() -> dict[str, Any]:
             {"method": "GET", "path": "/v1/knowledge/search", "description": "query bundled and user knowledge"},
             {"method": "GET", "path": "/v1/retrieval/embeddings", "description": "local embedding backend status"},
             {"method": "GET", "path": "/v1/retrieval/status", "description": "persistent local retrieval index status"},
+            {"method": "GET", "path": "/v1/memory/list", "description": "list curated memories with decay ranking"},
+            {"method": "GET", "path": "/v1/memory/get", "description": "read one memory with provenance and links"},
+            {"method": "GET", "path": "/v1/memory/history", "description": "version history of one memory"},
+            {"method": "GET", "path": "/v1/memory/pending", "description": "unconfirmed inferences awaiting review"},
+            {"method": "GET", "path": "/v1/memory/stats", "description": "memory store, core blocks and reflection status"},
+            {"method": "GET", "path": "/v1/memory/core", "description": "read always-resident core memory blocks"},
+            {"method": "GET", "path": "/v1/memory/episodes", "description": "search raw conversation episodes"},
+            {"method": "POST", "path": "/v1/memory/write", "description": "human add/update/delete of a curated memory"},
+            {"method": "POST", "path": "/v1/memory/confirm", "description": "promote a pending inference (human confirmed)"},
+            {"method": "POST", "path": "/v1/memory/reject", "description": "reject a pending inference"},
+            {"method": "POST", "path": "/v1/memory/core", "description": "edit a core memory block"},
+            {"method": "POST", "path": "/v1/memory/reflect", "description": "run consolidation now (async)"},
+            {"method": "POST", "path": "/v1/memory/prune", "description": "prune expired conversation episodes"},
             {"method": "POST", "path": "/v1/retrieval/search", "description": "unified local retrieval over knowledge and memory"},
             {"method": "POST", "path": "/v1/retrieval/embeddings", "description": "configure local embedding backend"},
             {"method": "POST", "path": "/v1/retrieval/embeddings/probe", "description": "probe configured local embedding backend"},
@@ -1955,6 +1969,158 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
     return data
 
 
+# ── 记忆的读写端点 ──────────────────────────────────────────────────────────
+#
+# 在此之前，记忆**只能从命令行看**（`ivyea memory list/show/pending`）。
+# 而记忆里装的正是"这个人是谁、他定过什么规矩、我从他身上推断出了什么" ——
+# 看不见就不敢信，不敢信就不会用；推断错了也没有地方去改。
+#
+# 这些端点只做**透出**，不新造逻辑：全部落在 memory_store / memory_core /
+# memory_reflect 已有的函数上，界面上的写入和 agent 自己的写入走同一条路
+# （同一套查重、冲突消解、历史归档）。
+#
+# 权限：serve 只绑 127.0.0.1 + token；"读要登录、写要管理员"这层由 IvyeaOps 把关。
+
+
+def _entry_row(e: Any, *, body: bool = False) -> dict[str, Any]:
+    row = e.to_dict()
+    row["uncertain"] = bool(e.uncertain)
+    if not body:
+        row.pop("body", None)
+    return row
+
+
+def memory_list(*, scope: str = "", include_expired: bool = False) -> dict[str, Any]:
+    from . import memory_decay
+    entries = memory_store.list_entries(include_expired=include_expired, scope=scope)
+    # 顺带把遗忘打分带上：界面要能回答"这条为什么没进上下文" ——
+    # 冷门条目退出索引层但仍可检索，不说清楚的话看起来就像记忆丢了。
+    ranked = {id(e): sc for e, sc in memory_decay.rank(entries)}
+    rows = []
+    for e in entries:
+        row = _entry_row(e)
+        sc = ranked.get(id(e)) or {}
+        row["decay"] = {"score": sc.get("score"), "in_index": bool(sc.get("keep", True))}
+        rows.append(row)
+    return {"ok": True, "entries": rows, "total": len(rows)}
+
+
+def memory_get(name: str, category: str = "") -> dict[str, Any]:
+    e = memory_store.get(name, category)
+    if not e:
+        return {"ok": False, "error": "not_found", "message": f"没有找到记忆 {name!r}。"}
+    row = _entry_row(e, body=True)
+    row["history_count"] = len(memory_store.history(e.name, e.category))
+    row["links"] = [x.name for x in memory_store.expand_linked([e], max_linked=8) if x.name != e.name]
+    row["backlinks"] = [x.name for x in memory_store.backlinks(e.name)]
+    return {"ok": True, "entry": row}
+
+
+def memory_history(name: str, category: str = "") -> dict[str, Any]:
+    rows = memory_store.history(name, category)
+    return {"ok": True, "versions": [_entry_row(e, body=True) for e in rows], "total": len(rows)}
+
+
+def memory_pending_list() -> dict[str, Any]:
+    from . import memory_reflect
+    rows = []
+    for e in memory_store.list_pending():
+        row = _entry_row(e, body=True)
+        seen = 0
+        for k in (e.keywords or "").split(","):
+            if k.strip().startswith("sightings="):
+                seen = _int(k.split("=", 1)[1], 0)
+        row["sightings"] = seen
+        row["promote_after"] = memory_reflect.PROMOTE_AFTER_SIGHTINGS
+        rows.append(row)
+    return {"ok": True, "pending": rows, "total": len(rows)}
+
+
+def memory_stats() -> dict[str, Any]:
+    from . import memory_core, memory_reflect
+    return {"ok": True, "store": memory_store.stats(), "core": memory_core.status(),
+            "reflect": memory_reflect.status(), "episodes": memory.stats(),
+            "running": memory_reflect.is_running()}
+
+
+def memory_core_read(block: str = "") -> dict[str, Any]:
+    from . import memory_core
+    if block:
+        if block not in memory_core.BLOCKS:
+            return {"ok": False, "error": "unknown_block", "message": f"未知记忆块 {block!r}。"}
+        return {"ok": True, "block": block, "text": memory_core.view(block),
+                "limit": memory_core.MAX_BLOCK_CHARS}
+    return {"ok": True, "limit": memory_core.MAX_BLOCK_CHARS,
+            "blocks": [{"block": b, "file": memory_core.BLOCKS[b][0],
+                        "hint": memory_core.BLOCKS[b][1], "text": memory_core.view(b)}
+                       for b in memory_core.BLOCKS]}
+
+
+def memory_episodes(query: str = "", limit: int = 30) -> dict[str, Any]:
+    """情景记忆检索：给"上次聊到的那个…"用。分类记忆答不上来的都在这儿。"""
+    hits = memory.search(query, limit=limit) if query.strip() else []
+    return {"ok": True, "episodes": hits, "total": len(hits)}
+
+
+def memory_write(payload: dict[str, Any]) -> dict[str, Any]:
+    """界面上的人工增改。source 固定为 user —— 人在界面上敲的就是他亲口说的，
+    满置信，并且从此不再允许反思去改它（见 memory_reflect 的护栏）。"""
+    op = str(payload.get("operation") or "").strip()
+    if op not in ("add", "update", "delete"):
+        return {"ok": False, "message": "operation 只能是 add / update / delete。"}
+    res = memory_store.apply(
+        op,
+        name=str(payload.get("name") or ""),
+        content=str(payload.get("content") or ""),
+        category=str(payload.get("category") or ""),
+        description=str(payload.get("description") or ""),
+        keywords=str(payload.get("keywords") or ""),
+        links=str(payload.get("links") or ""),
+        scope=str(payload.get("scope") or ""),
+        valid_from=str(payload.get("valid_from") or ""),
+        valid_until=str(payload.get("valid_until") or ""),
+        source="user", confidence=1.0)
+    return {"ok": bool(res.get("ok")), **res}
+
+
+def memory_pending_decide(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    name = str(payload.get("name") or "")
+    if not name:
+        return {"ok": False, "message": "需要 name。"}
+    # confirmed_by_user=True 是**唯一**能让置信度越过不确定线的路径：
+    # 自动攒够观察次数也只是转正，仍然标着"推断"。人点头才算数。
+    res = (memory_store.promote_pending(name, confirmed_by_user=True) if action == "confirm"
+           else memory_store.reject_pending(name))
+    return {"ok": bool(res.get("ok")), **res}
+
+
+def memory_core_write(payload: dict[str, Any]) -> dict[str, Any]:
+    from . import memory_core
+    res = memory_core.edit(str(payload.get("block") or ""),
+                           str(payload.get("operation") or ""),
+                           str(payload.get("content") or ""),
+                           str(payload.get("old") or ""))
+    return {"ok": bool(res.get("ok")), **res}
+
+
+def memory_reflect_now(payload: dict[str, Any]) -> dict[str, Any]:
+    """立即整理一次。**异步**：反思里包着一次最长 120 秒的模型调用，
+    同步等会把 HTTP 连接和用户一起挂在那儿。界面按完刷统计看结果。"""
+    from . import memory_reflect
+    if memory_reflect.is_running():
+        return {"ok": True, "started": False, "message": "已经在整理了，稍等一下。"}
+    started = memory_reflect.maybe_reflect_async(force=bool(payload.get("force", True)))
+    return {"ok": True, "started": bool(started),
+            "message": "已开始在后台整理记忆，稍后刷新查看。" if started
+                       else "当前没有可整理的新经历。"}
+
+
+def memory_prune(payload: dict[str, Any]) -> dict[str, Any]:
+    """手动清理过期对话行。默认 dry-run —— 这是记忆里唯一不可逆的一步。"""
+    return {"ok": True, **memory.prune_episodes(days=_int(payload.get("days"), 0),
+                                                dry_run=bool(payload.get("dry_run", True)))}
+
+
 def chat_session_list(limit: int = 20) -> dict[str, Any]:
     return {"ok": True, "sessions": [_public_session(row) for row in sessions.listing(limit=limit)]}
 
@@ -2446,6 +2612,28 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/knowledge/evidence":
             self._json(200, knowledge_evidence_list(limit=_int(_first(qs, "limit"), 100)))
             return
+        if parsed.path == "/v1/memory/list":
+            self._json(200, memory_list(scope=_first(qs, "scope"),
+                                        include_expired=_first(qs, "include_expired") in ("1", "true")))
+            return
+        if parsed.path == "/v1/memory/get":
+            self._json(200, memory_get(_first(qs, "name"), _first(qs, "category")))
+            return
+        if parsed.path == "/v1/memory/history":
+            self._json(200, memory_history(_first(qs, "name"), _first(qs, "category")))
+            return
+        if parsed.path == "/v1/memory/pending":
+            self._json(200, memory_pending_list())
+            return
+        if parsed.path == "/v1/memory/stats":
+            self._json(200, memory_stats())
+            return
+        if parsed.path == "/v1/memory/core":
+            self._json(200, memory_core_read(_first(qs, "block")))
+            return
+        if parsed.path == "/v1/memory/episodes":
+            self._json(200, memory_episodes(_first(qs, "query"), _int(_first(qs, "limit"), 30)))
+            return
         if parsed.path == "/v1/knowledge/evidence/schema":
             self._json(200, {"ok": True, "schema": knowledge_evidence.schema()})
             return
@@ -2744,6 +2932,24 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/system/service/autostart":
             self._json(200, system_service_autostart(body))
             return
+        if parsed.path == "/v1/memory/write":
+            self._json(200, memory_write(body))
+            return
+        if parsed.path == "/v1/memory/confirm":
+            self._json(200, memory_pending_decide(body, "confirm"))
+            return
+        if parsed.path == "/v1/memory/reject":
+            self._json(200, memory_pending_decide(body, "reject"))
+            return
+        if parsed.path == "/v1/memory/core":
+            self._json(200, memory_core_write(body))
+            return
+        if parsed.path == "/v1/memory/reflect":
+            self._json(200, memory_reflect_now(body))
+            return
+        if parsed.path == "/v1/memory/prune":
+            self._json(200, memory_prune(body))
+            return
         if parsed.path == "/v1/retrieval/search":
             result = retrieval.search(
                 str(body.get("query") or ""),
@@ -2927,7 +3133,27 @@ class _Handler(BaseHTTPRequestHandler):
 
 def _first(qs: dict[str, list[str]], key: str) -> str:
     vals = qs.get(key) or []
-    return vals[0] if vals else ""
+    return _repair_latin1(vals[0]) if vals else ""
+
+
+def _repair_latin1(text: str) -> str:
+    """把"UTF-8 字节被当成 latin-1 读进来"的乱码修回去。
+
+    http.server 用 iso-8859-1 解 request line（Python 标准库的行为）。浏览器一定会做
+    百分号编码、不受影响；没编码的客户端大多在 HTTP 层就被 400 掉了，但实测确实见过
+    乱码形态抵达 handler 的情况，而它失败的样子是 `not_found` —— 看起来像"这条记忆
+    没了"，比报错还难查。所以留这一道，代价是六行且对正确输入完全无副作用。
+
+    修复是保守的：只有当整串都落在 latin-1 范围内、且重新按 UTF-8 解得通时才动它。
+    正常的中文参数（已正确解码）含 U+4E00 以上的字符，encode('latin-1') 直接抛错，
+    原样返回；真正的 latin-1 文本（café）单字节也不是合法 UTF-8，同样原样返回。
+    """
+    if not text or text.isascii():
+        return text
+    try:
+        return text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
 
 
 def _operation_id(method: str, path: str) -> str:

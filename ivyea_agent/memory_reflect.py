@@ -371,7 +371,7 @@ def is_running() -> bool:
     return _RUNNING
 
 
-def maybe_reflect_async(*, on_done=None) -> bool:
+def maybe_reflect_async(*, on_done=None, force: bool = False) -> bool:
     """够门槛就在后台跑一次反思。返回是否真的起了线程。
 
     三层互斥，缺一不可：
@@ -384,7 +384,7 @@ def maybe_reflect_async(*, on_done=None) -> bool:
     """
     global _RUNNING
     try:
-        if _RUNNING or not should_reflect():
+        if _RUNNING or not (force or should_reflect()):
             return False
         with _RUN_LOCK:
             if _RUNNING:
@@ -398,12 +398,14 @@ def maybe_reflect_async(*, on_done=None) -> bool:
                 # timeout=0：拿不到就走人。反思是周期性的，这次不跑下次还有机会，
                 # 排队等锁只会让线程堆积。
                 with memory_lock.reflect_lock(timeout=0.0) as got:
-                    if not got or not should_reflect():
+                    if not got or not (force or should_reflect()):
                         return
                     provider = _default_provider()
                     if provider is None:
                         return
-                    res = reflect(provider)
+                    # force 来自"用户在界面上按了立即整理"——显著性门槛是替他省钱的，
+                    # 他自己按了就不该再拦。证据门槛不受影响（那道闸防的是错误信念）。
+                    res = reflect(provider, force=force)
                     if on_done:
                         try:
                             on_done(res)
