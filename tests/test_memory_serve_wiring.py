@@ -202,3 +202,13 @@ def test_trivial_prompt_also_skips_knowledge_retrieval(wired, monkeypatch):
     assert calls == []
     _user_content(service, {"message": "帮我看看广告结构"}, _ctx(service, session_id="r6"))
     assert calls
+
+
+def test_auto_recall_can_be_switched_off(wired):
+    """默认值纪律：CHANGELOG 里承诺的开关必须真的存在且真的能关掉。"""
+    from ivyea_agent import config, memory
+    service = wired
+    config.set_setting("memory_auto_recall", False)
+    content = _user_content(service, {"message": "领星广告怎么优化"},
+                            _ctx(service, session_id="r7"))
+    assert memory.RECALL_MARKER not in content

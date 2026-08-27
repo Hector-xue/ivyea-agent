@@ -3204,7 +3204,8 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext,
     # 三道门：① 记忆读开关（自动化轮次/临时会话在这里就被挡掉）；
     # ② trivial —— "好的"查不出东西，还会把上个话题的残留带进来；
     # ③ 去重 —— 召回块跟着 user 消息一起落盘，不去重会在长会话里堆成山。
-    if _memory_read_on(payload, ctx) and not trivial:
+    if (_memory_read_on(payload, ctx) and not trivial
+            and config.get_setting("memory_auto_recall", True)):
         try:
             body, names = memory.auto_recall_text(
                 _recall_query(said, messages),

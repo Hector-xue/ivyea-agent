@@ -2669,6 +2669,8 @@ def _inject_recall(args, ctx, line: str, user_content: str, messages: list, tell
     要的是内容不进库，不是放弃已有记忆。
     """
     try:
+        if not config.get_setting("memory_auto_recall", True):
+            return user_content
         from . import memory, task_scope
         said = task_scope._user_said(line)
         if memory.is_trivial_prompt(said):
