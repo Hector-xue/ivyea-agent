@@ -128,6 +128,16 @@ def compact(messages: list[dict], provider, *, keep_system: bool = True,
                 "content": transcript.gate_text(transcript.COMPACT_SUMMARY, f"\n{summary.strip()}")})
     new.append({"role": "assistant", "content": transcript.COMPACT_ACK})
     new.extend(recent)
+    # 压缩前把这段对话里值得长期记住的东西捞出来。
+    #
+    # **不压缩就丢了**：被压掉的那一段往往正是"结论是怎么来的"，而摘要只进这一条
+    # 会话的上下文、换个会话就没了。这里复用刚生成的 summary 而不是把 old 消息再
+    # 喂一遍模型 —— 同一段对话没必要付两次钱，而且摘要本身已经提炼过。
+    try:
+        from . import memory_reflect
+        memory_reflect.reflect_summary_async(summary.strip())
+    except Exception:  # noqa: BLE001 —— 记忆是锦上添花，压缩绝不能因它失败
+        pass
     return new, summary.strip()
 
 

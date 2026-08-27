@@ -10,11 +10,12 @@
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from typing import Any, Optional
 
-from . import config, textseg
+from . import config, memory_store, textseg
 
 DB_PATH = config.IVYEA_DIR / "memory.db"
 _FTS_OK: Optional[bool] = None
@@ -266,6 +267,88 @@ def episodes_since(ts: float = 0.0, limit: int = 200) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+# ── 情景记忆的保留策略 ──────────────────────────────────────────────────────
+#
+# serve 接进来之后，**每一轮对话都会往 search_fts 里加两行**（user + assistant）。
+# 在此之前这张表只进不出：索引越来越大、检索越来越慢，而自动召回是每轮都要跑的，
+# 最后表现为"用久了 agent 变迟钝"，而那时已经很难联想到是这里。
+#
+# 只收 [对话:*]。[会话摘要] / [决策] / [巡检] 一律留着 —— 它们本身就是提炼过的、
+# 密度高，而且决策记录是"上次已经否过这个词"这类护栏的唯一数据源。
+EPISODE_RETENTION_DAYS = 180
+_PRUNE_TS_KEY = "memory_last_prune_ts"
+_PRUNE_INTERVAL_S = 20 * 3600      # 一天最多清一次；挂在启动路径上，别每次起进程都扫
+
+
+def _backup_db_once() -> str:
+    """第一次真删之前给 memory.db 留个整份备份。
+
+    这是整套记忆方案里**唯一不可逆**的一步。备份只做一次（认 .bak 存在就跳过）：
+    目的是"改错了能回去"，不是留一串历史版本。
+    """
+    src = DB_PATH
+    dst = src.with_name(src.name + ".bak")
+    if dst.exists() or not src.exists():
+        return str(dst) if dst.exists() else ""
+    try:
+        import shutil
+        shutil.copy2(str(src), str(dst))
+        return str(dst)
+    except OSError:
+        return ""
+
+
+def prune_episodes(days: int = 0, *, dry_run: bool = False) -> dict[str, Any]:
+    """删掉过期的对话行，并**同步清掉分词旁路索引**。
+
+    删 search_fts 却不删 search_tok 会留下一批 src 指向已消失 rowid 的孤儿行；
+    更糟的是 FTS5 删行后会复用 rowid，新行拿到旧 rowid 就会继承那条陈旧的分词内容
+    ——既不是孤儿也不是缺失，静默地把检索结果污染掉（这个坑踩过一次）。
+    """
+    if days <= 0:
+        try:
+            days = int(config.get_setting("memory_episode_retention_days",
+                                          EPISODE_RETENTION_DAYS))
+        except (TypeError, ValueError):
+            days = EPISODE_RETENTION_DAYS
+    if days <= 0:
+        return {"ok": True, "deleted": 0, "message": "保留期设为 0，未清理。"}
+    cutoff = time.time() - days * 86400.0
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT rowid FROM search_fts WHERE ts < ? AND text LIKE '[对话:%'",
+            (cutoff,)).fetchall()
+        ids = [r["rowid"] for r in rows]
+        if not ids or dry_run:
+            return {"ok": True, "deleted": 0, "candidates": len(ids),
+                    "message": (f"{len(ids)} 条对话行超过 {days} 天"
+                                + ("（dry-run，未删）" if dry_run else "，无需清理"))}
+        backup = _backup_db_once()
+        marks = ",".join("?" * len(ids))
+        if _TOK_OK:
+            conn.execute(f"DELETE FROM search_tok WHERE src IN ({marks})", ids)
+        conn.execute(f"DELETE FROM search_fts WHERE rowid IN ({marks})", ids)
+        conn.commit()
+        return {"ok": True, "deleted": len(ids), "days": days, "backup": backup,
+                "message": f"已清理 {len(ids)} 条超过 {days} 天的对话记录。"}
+    finally:
+        conn.close()
+
+
+def maybe_prune_episodes() -> dict[str, Any]:
+    """启动路径上调用：一天最多真扫一次。失败一律吞掉，绝不能让进程起不来。"""
+    try:
+        last = float(config.get_setting(_PRUNE_TS_KEY, 0.0) or 0.0)
+        if last and (time.time() - last) < _PRUNE_INTERVAL_S:
+            return {"ok": True, "deleted": 0, "message": "今天已清理过。"}
+        res = prune_episodes()
+        config.set_setting(_PRUNE_TS_KEY, time.time())
+        return res
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "deleted": 0, "message": f"清理失败（已忽略）：{e}"}
+
+
 def stats() -> dict[str, Any]:
     conn = _conn()
     d = conn.execute("SELECT COUNT(*) c, SUM(decision='approve') a, SUM(decision='reject') r FROM decisions").fetchone()
@@ -348,7 +431,7 @@ def sync_markdown_index() -> None:
     rebuild_token_index()
 
 
-def load_memory_digest(limit: int = 3500) -> str:
+def load_memory_digest(limit: int = 3500, *, scope: str = "") -> str:
     """启动注入用：分类记忆**索引层** + 全局 MEMORY.md 摘要 + 账户记忆索引，
     让 agent 开箱就知道记忆里有什么、不必每次靠回忆检索
     （曾出现"文件里明明有、recall 却说没有"）。超长则截断，其余仍可用「回忆记忆」检索。
@@ -359,7 +442,7 @@ def load_memory_digest(limit: int = 3500) -> str:
     parts: list[str] = []
     try:
         from . import memory_store
-        index = memory_store.index_digest()
+        index = memory_store.index_digest(scope=scope)
         if index:
             parts.append("[分类记忆索引]（需要正文时用 memory_read/memory_search 取）\n" + index)
     except Exception:
@@ -479,3 +562,156 @@ def annotate(actions: list, asin: str, stability_days: int = 5) -> list:
             if d is not None and d < stability_days:
                 a.blocked, a.block_reason = True, f"记忆：{stability_days} 天稳定期内（{d:.1f} 天前刚调过），不重复调"
     return actions
+
+# ── 每轮自动召回（runtime-driven）────────────────────────────────────────────
+#
+# 此前记忆是 **model-driven** 的：模型得自己想起来去调 memory_search。
+# 于是"想不起来"成了最常见的失败模式——而这正是 ChatGPT / Hermes 用起来"记性好"
+# 的原因：它们由**运行时**在每轮开口前先查一遍，模型根本没有"忘了查"的机会。
+#
+# 注入形态刻意选择**后缀**（拼在用户这句话尾巴上），和 `[Ivyea 本地知识检索]`
+# 并排 —— serve 每轮自动注入知识证据的那套管道已经在生产上跑了很久、验证过了，
+# 记忆只是换一个检索源挂进去，没必要另起一套独立消息 + 门禁的机制。
+
+RECALL_MARKER = "[Ivyea 记忆召回]"
+
+# 召回块整体上限。它每轮都进上下文，不限长就会和知识证据一起把窗口吃光。
+RECALL_MAX_CHARS = 1200
+
+# 没有语义信号的话：寒暄、应答、纯标点、斜杠命令。
+# 锚定 + 只允许尾随标点，所以"行不行"不会被"行"命中、"好的方案是什么"不会被"好的"命中。
+# 中文这半边是 ivyea 自己加的：Hermes 那份只有英文，直接抄过来的话
+# "好的""继续""收到"全都漏网，而中文对话里它们占了相当大比例。
+_TRIVIAL_RE = re.compile(
+    r"^(?:"
+    r"yes|no|ok|okay|sure|thanks|thank you|y|n|yep|nope|yeah|nah|"
+    r"hi|hey|hello|yo|sup|continue|go ahead|do it|proceed|got it|cool|nice|great|done|next|lgtm|k"
+    r"|好|好的|好吧|行|行吧|可以|嗯|嗯嗯|哦|噢|是|对|对的|没问题|收到|知道了|明白|懂了"
+    r"|继续|接着|然后呢|下一步|开始|你好|在吗|在么|嗨|谢谢|谢了|多谢|辛苦了|麻烦了"
+    r"|不用|不用了|算了|停|停下|等一下|稍等"
+    r")"
+    r"[\s!?.:;,、。！？；：·…~\u2018\u2019\u201c\u201d\u2014\u2013()\[\]{}<>*&^%$#@+=`\u00a0'\"]*$",
+    re.IGNORECASE,
+)
+
+
+def is_trivial_prompt(text: str) -> bool:
+    """这句话值不值得为它跑一次检索。
+
+    空输入、斜杠命令、纯寒暄/应答一律不值得：检索要花时间和 token，而"好的"这种话里
+    没有任何可供检索的信号；更糟的是拿它去查，召回的会是上一个话题的残留，
+    把一句本该一行带过的回答带偏。
+    """
+    t = (text or "").strip()
+    if not t:
+        return True
+    if t.startswith("/"):
+        return True
+    return bool(_TRIVIAL_RE.match(t))
+
+
+def recall_core(query: str, *, limit: int = 4, episodes: int = 6, scope: str = "",
+                record: bool = False) -> dict[str, Any]:
+    """记忆检索的**唯一**核心。`recall` 工具和每轮自动召回都走这里。
+
+    两条召回路径各写一份的话，早晚会漂移——而漂移的那条不会有人发现，直到某天
+    发现"工具查得到、自动召回查不到"。
+
+    `record=False` 是默认值，且自动召回**必须**用它：自动召回每轮都跑，
+    把它计入"这条记忆被用到了"会让遗忘打分彻底失真（冷门记忆全变成热门）。
+    """
+    query = (query or "").strip()
+    if not query:
+        return {"curated": [], "episodes": []}
+    try:
+        curated = memory_store.search(query, limit=limit, scope=scope, record=record)
+    except Exception:  # noqa: BLE001
+        curated = []
+    try:
+        eps = search(query, limit=episodes)
+    except Exception:  # noqa: BLE001
+        eps = []
+    return {"curated": curated, "episodes": eps}
+
+
+def already_recalled(messages: list[dict[str, Any]]) -> set[str]:
+    """本会话此前已经注入过哪些记忆条目。
+
+    **为什么必须去重**：召回块是拼在用户消息里、跟着一起落盘的（resume 要靠它复原
+    现场）。不去重的话 30 轮对话就堆 30 份召回，同一条记忆被反复注入——token 白烧，
+    更糟的是**已经被 delete / 被推翻的记忆仍然留在历史里继续影响模型**。
+
+    直接从对话里反查，不额外维护状态：这样续接会话、换进程、compact 之后都自动正确。
+    """
+    seen: set[str] = set()
+    for msg in messages or []:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or RECALL_MARKER not in content:
+            continue
+        for m in re.finditer(r"·\s*\[([^\]/]+)/([^\]]+)\]", content):
+            seen.add(f"{m.group(1).strip()}/{m.group(2).strip()}")
+    return seen
+
+
+def auto_recall_text(query: str, *, exclude=None, scope: str = "",
+                     limit: int = 4):
+    """本轮要注入的召回正文 + 命中的条目名。没有新东西可注入时返回 ("", [])。
+
+    只回**记忆**，不带知识卡：serve 每轮已经单独注入过知识证据了，再带一份是重复；
+    而且知识卡的正文必须经 knowledge_search 走一遍才会登记引证键，
+    这里连指针都不给，就彻底不存在"拿没登记的 [K?] 去标注结论"的风险。
+    """
+    exclude = exclude or set()
+    # 候选窗口就是 limit，**不为去重扩窗**。
+    #
+    # 扩窗（limit + len(exclude)）看着更"充分利用配额"，实测是坏的：第二轮问同一件
+    # 事时，前 4 条都被去重挡掉，于是拿第 5~7 条来补位 —— 那些是勉强过了词法地板的
+    # 边缘条目，和这一轮基本无关。结果就是"聊得越久，注进去的记忆越离题"。
+    # 宁可这一轮什么都不注（模型手里还有索引层和 memory_search），也不注垃圾。
+    hit = recall_core(query, limit=limit, scope=scope, record=False)
+    lines: list[str] = []
+    names: list[str] = []
+    for h in hit["curated"]:
+        # **自动召回必须比 recall 工具苛刻**：只收有真实词法重合的条目。
+        #
+        # 语义那一路是**没有相似度地板**的（刻意的：实测 bge 正确匹配只有 0.41~0.55、
+        # 错配 0.29~0.55，按直觉设的阈值会把正确结果静默杀光）。于是它对任何查询
+        # 都会按余弦返回前 N 条 —— 用户问一句跟记忆毫无关系的话，照样能排出"最相似
+        # 的四条"。对 recall 工具这没问题（人主动要求回忆，给个最佳猜测是对的），
+        # 但自动召回是**每轮无条件注入**：没有地板就等于每轮往上下文里塞四条随机记忆，
+        # 把一句本该一行带过的回答带偏。
+        #
+        # 词法重合是这里唯一可信的信号。代价是纯语义命中（口语化提问）进不了自动召回 ——
+        # 那类查询交给 memory_search 工具，以及后面要上的 LLM 查询改写
+        # （它把"这个再改改"改写成带实词的问句，正好把词法信号还回来）。
+        if float(h.get("score") or 0.0) <= 0.0:
+            continue
+        key = f"{h['category']}/{h['name']}"
+        if key in exclude:
+            continue                      # 这条本会话早注入过了，别再占一次位置
+        desc = (h.get("description") or (h.get("body") or "")[:60]).replace("\n", " ")
+        # 置信度低的要标出来：反思推断出来的东西和用户亲口说的不该被同等对待
+        mark = " ⚠推断" if float(h.get("confidence", 1.0)) < memory_store.UNCERTAIN_BELOW else ""
+        lines.append(f"  · [{key}]{mark} {desc}")
+        names.append(key)
+        if len(names) >= limit:
+            break
+    body = "\n".join(lines)
+    if len(body) > RECALL_MAX_CHARS:
+        body = body[:RECALL_MAX_CHARS].rstrip() + "\n  …（更多用 memory_search 查）"
+    if not body:
+        return "", []
+    return body, names
+
+
+def recall_block(body: str) -> str:
+    """把召回正文包成注入块。
+
+    那句"不是用户本轮输入"是必须的：不写的话模型会把召回内容当成用户刚说的话，
+    然后一本正经地回应记忆里的旧话题。
+    """
+    return (f"\n\n{RECALL_MARKER}\n{body}\n"
+            "（以上是你的长期记忆，不是用户本轮输入；相关就用，无关就忽略，不要复述。"
+            "需要全文用 memory_read。）")

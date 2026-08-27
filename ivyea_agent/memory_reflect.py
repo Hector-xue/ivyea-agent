@@ -23,13 +23,16 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
 from . import config, memory, memory_store
 
-# 攒够多少条新情景记忆才值得跑一次反思
-MIN_EPISODES = 12
+# 攒够多少条新情景记忆才值得跑一次反思。
+# 12 → 8：反思改成异步之后，它不再卡在退出路径上占用户的时间（见 maybe_reflect_async），
+# 门槛就不必再替"等待感"买单，只需替 token 成本买单。
+MIN_EPISODES = 8
 # 一条洞察至少要有几条情景记忆支撑才准进待定区
 MIN_EVIDENCE = 2
 # 待定记忆被**独立观察到**几次才自动转正。
@@ -42,7 +45,15 @@ MAX_EPISODES = 120
 # 单条情景记忆截断长度：反思要的是"发生过什么"，不需要逐字全文
 EPISODE_CHARS = 400
 
+# 两次反思之间至少隔多久。显著性门槛管"够不够本"，这条管"别扎堆"：
+# serve 是长驻进程，一段密集对话可能几分钟内就反复越过显著性门槛。
+MIN_INTERVAL_S = 600.0
+
 _LAST_TS_KEY = "memory_last_reflect_ts"
+# 反思**实际跑完**的墙钟时间。注意和 _LAST_TS_KEY 不是一回事：后者是"经历读到哪条"
+# 的水位线（取自最后一条经历的 ts），一批陈年经历会让它停在很久以前，拿它做节流会
+# 让节流永远失效。
+_LAST_RUN_KEY = "memory_last_reflect_run_ts"
 
 _SYS = """你是一个记忆巩固器。输入是一段时间内的零散经历（对话片段、决策、巡检记录），
 你的任务是从中提炼出**值得长期记住的规律与结论**，写进分类记忆。
@@ -67,6 +78,11 @@ _SYS = """你是一个记忆巩固器。输入是一段时间内的零散经历�
   也许每次他都单独批准过，也许那三次恰好都到了发版节点。
 - 用户两次让你用中文回答 → 如果他明说了"以后都用中文"，那是偏好；如果只是那两次用了中文，
   那只是发生过。
+
+**涉及用户的规矩、红线、纪律（category=user / feedback）时，只有他明确说过的才算数。**
+从你观察到的行为序列反推出来的"他大概是这么要求的"一律不作数——你看到的是他做了什么，
+不是他要求什么，这两者经常相反（他可能每次都单独批准过，也可能正在纠正你）。
+这类推断照样写出来，但要在 description 里写清"这是从行为推断的，未经他确认"。
 判据很简单：**用户有没有说过表达长期意图的话**（"以后都""一律""永远""每次都要"）？
 说过 → 可以写成规则。没说过 → 只写"观察到 X 发生过 N 次"，别替他总结成习惯或偏好。
 拿不准就不写，漏记一条的代价远小于让我按错误的"偏好"行事。
@@ -98,10 +114,33 @@ def pending(limit: int = MAX_EPISODES) -> List[Dict[str, Any]]:
     return memory.episodes_since(last_reflect_ts(), limit=limit)
 
 
+def last_run_ts() -> float:
+    try:
+        return float(config.get_setting(_LAST_RUN_KEY, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _min_interval() -> float:
+    try:
+        return max(0.0, float(config.get_setting("memory_reflect_min_interval_s", MIN_INTERVAL_S)))
+    except (TypeError, ValueError):
+        return MIN_INTERVAL_S
+
+
 def should_reflect() -> bool:
-    """显著性门槛：够不够本。不够就别烧那次 LLM 调用。"""
+    """两道闸门：够不够本（显著性）+ 是不是刚跑过（节流）。
+
+    顺序是刻意的：先读两个 settings（内存/小文件），最后才查库。
+    这个函数在 serve 上是**每轮都调**的，把 SQL 放在最便宜的判断后面。
+    """
     if not config.get_setting("memory_auto_reflect", True):
         return False
+    interval = _min_interval()
+    if interval > 0:
+        last = last_run_ts()
+        if last and (time.time() - last) < interval:
+            return False
     return len(pending()) >= _min_episodes()
 
 
@@ -151,13 +190,25 @@ def reflect(provider, *, force: bool = False, limit: int = MAX_EPISODES) -> Dict
     try:
         raw = provider.complete(_SYS, user, json_mode=True, temperature=0.2, timeout=120.0)
     except Exception as e:  # noqa: BLE001
+        # 失败也要推进节流水位线：模型欠费/网络断的时候，经历只会越攒越多、
+        # 显著性门槛永远满足，不推进的话就变成**每一轮**都去重试一次 LLM 调用。
+        config.set_setting(_LAST_RUN_KEY, time.time())
         return {"ok": False, "applied": [], "skipped": [], "message": f"反思调用失败：{e}"}
 
     data = _extract_json(raw)
     if not isinstance(data, dict):
         return {"ok": False, "applied": [], "skipped": [], "message": "反思返回的不是可解析的 JSON。"}
 
-    ops = data.get("operations")
+    # 时间水位线推进到本批最后一条：即便这次一条都没落盘，也不该下次再嚼同一批经历。
+    config.set_setting(_LAST_TS_KEY, float(rows[-1].get("ts") or time.time()))
+    config.set_setting(_LAST_RUN_KEY, time.time())        # 节流用的墙钟时间
+    return _apply_ops(data.get("operations"), rows)
+
+def _apply_ops(ops: Any, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """把模型给的操作列表落盘。reflect()（情景经历）和 reflect_on_text()
+    （压缩摘要）共用这一段 —— 两条路各写一份的话，证据门槛、待定区、
+    "不许覆盖用户亲口定的规矩"这几道闸早晚只剩一条路上有。
+    """
     if not isinstance(ops, list):
         ops = []
 
@@ -177,6 +228,31 @@ def reflect(provider, *, force: bool = False, limit: int = MAX_EPISODES) -> Dict
         # 拿证据数去卡它们反而会让过时的记忆改不掉。
         if action == "add" and evidence < MIN_EVIDENCE:
             skipped.append(f"{name}（仅 {evidence} 条证据，未达 {MIN_EVIDENCE} 条门槛）")
+            continue
+
+        # **反思不得覆盖用户亲口说过的规矩。**
+        #
+        # 新增走待定区（下面那段）已经挡住了"凭空捏一条规矩"，但没挡住更隐蔽的一种：
+        # 用 update 去改一条**用户自己定的** user/feedback 记忆。实测翻过车的正是这个
+        # 形状——用户的规矩是"未经批准绝不发版"，而反思从几次行为里总结出"他习惯
+        # 开发完就发版"，一旦让它 update 上去，用户的原话就被自己的行为记录改写了。
+        #
+        # 判据是 source：user/manual 是人写的，reflection 是推断的。推断不许改人写的。
+        existing = memory_store.get(name) if name else None
+        if (existing is not None and existing.category in ("user", "feedback")
+                and existing.source != "reflection" and action in ("add", "update", "delete")):
+            pres = memory_store.add_pending(
+                name, str(op.get("content") or "") or existing.body,
+                category=existing.category,
+                description=("（反思建议修改一条你亲口定的规矩，需你确认）"
+                             + str(op.get("description") or "")),
+                keywords=str(op.get("keywords") or ""),
+                scope=existing.scope,
+                evidence=_evidence_note(evidence, rows),
+                confidence=min(memory_store.REFLECTION_MAX_CONFIDENCE,
+                               0.35 + 0.07 * max(0, evidence)))
+            held.append(f"{name}（涉及你亲口定的规矩，改动已挂起待确认）"
+                        if pres.get("ok") else f"{name}：{pres.get('message', '')}")
             continue
 
         # 新洞察一律先进**待定区**，不直接落成正式记忆。
@@ -217,9 +293,6 @@ def reflect(provider, *, force: bool = False, limit: int = MAX_EPISODES) -> Dict
         (applied if res.get("ok") else skipped).append(
             res.get("message", name) if res.get("ok") else f"{name}：{res.get('message', '')}")
 
-    # 时间水位线推进到本批最后一条：即便这次一条都没落盘，也不该下次再嚼同一批经历。
-    config.set_setting(_LAST_TS_KEY, float(rows[-1].get("ts") or time.time()))
-
     bits = []
     if applied:
         bits.append(f"沉淀 {len(applied)} 条")
@@ -232,6 +305,7 @@ def reflect(provider, *, force: bool = False, limit: int = MAX_EPISODES) -> Dict
         msg += "待定记忆还没生效，用 ivyea memory pending 查看、confirm 确认。"
     return {"ok": True, "applied": applied, "skipped": skipped, "pending": held,
             "message": msg, "episodes": len(rows)}
+
 
 
 def _evidence_note(count: int, rows: List[Dict[str, Any]]) -> str:
@@ -260,3 +334,161 @@ def status() -> Dict[str, Any]:
         "threshold": _min_episodes(),
         "ready": len(rows) >= _min_episodes(),
     }
+
+
+# ── 异步反思：让"沉淀"发生在对话进行中，而不是退出时 ──────────────────────
+#
+# 改造前：只有 CLI 的退出路径会反思（cli._auto_reflect），而且是**同步**的——
+# 于是 ① serve（IvyeaOps / 飞书 / 任务台）永远不反思，用户主力入口的记忆根本不长；
+# ② CLI 想反思就得让用户在退出时干等一次 LLM 调用，这也是门槛不得不设到 12 的原因。
+#
+# 改造后：每轮结束顺手问一句"够不够本"，够就**后台线程**跑，永不阻塞回答。
+_RUN_LOCK = threading.Lock()       # 进程内：同一进程不并发跑两次
+_RUNNING = False                   # 进程内：是否有一次反思在飞
+
+
+def _default_provider():
+    """反思用的模型。
+
+    **绝不能复用本轮请求带来的 model/api_key**：ops 每轮都可能在 payload 里覆盖模型，
+    而后台线程真正跑起来时那个请求早就结束了，密钥可能是临时的、也可能属于别人的档位。
+    一律取服务端自己的配置；另外允许单独配一个便宜档（memory_reflect_model），
+    巩固记忆这种后台活不值得用主脑跑。
+    """
+    from . import config as cfg
+    from .providers import from_settings
+    ak = cfg.get_active_key()
+    if not ak:
+        return None
+    model_cfg = dict(cfg.get_model_config() or {})
+    override = str(cfg.get_setting("memory_reflect_model", "") or "").strip()
+    if override:
+        model_cfg["model"] = override
+    return from_settings(model_cfg, ak)
+
+
+def is_running() -> bool:
+    return _RUNNING
+
+
+def maybe_reflect_async(*, on_done=None, force: bool = False) -> bool:
+    """够门槛就在后台跑一次反思。返回是否真的起了线程。
+
+    三层互斥，缺一不可：
+      1. `_RUNNING`  —— 同一进程内两轮挨得近，别起两个线程；
+      2. 跨进程文件锁 —— CLI 和 serve 同时在用同一个 ~/.ivyea，两边都会调这个函数；
+      3. `should_reflect()` 的节流 —— 拿到锁之后**再查一次**，因为等锁期间
+         别的进程可能刚跑完（经典的双重检查）。
+
+    任何异常都吞掉：记忆是锦上添花，绝不能让一轮对话因为它失败。
+    """
+    global _RUNNING
+    try:
+        if _RUNNING or not (force or should_reflect()):
+            return False
+        with _RUN_LOCK:
+            if _RUNNING:
+                return False
+            _RUNNING = True
+
+        def _work() -> None:
+            global _RUNNING
+            try:
+                from . import memory_lock
+                # timeout=0：拿不到就走人。反思是周期性的，这次不跑下次还有机会，
+                # 排队等锁只会让线程堆积。
+                with memory_lock.reflect_lock(timeout=0.0) as got:
+                    if not got or not (force or should_reflect()):
+                        return
+                    provider = _default_provider()
+                    if provider is None:
+                        return
+                    # force 来自"用户在界面上按了立即整理"——显著性门槛是替他省钱的，
+                    # 他自己按了就不该再拦。证据门槛不受影响（那道闸防的是错误信念）。
+                    res = reflect(provider, force=force)
+                    if on_done:
+                        try:
+                            on_done(res)
+                        except Exception:  # noqa: BLE001
+                            pass
+            except Exception:  # noqa: BLE001 —— 后台线程里抛异常没人接得住
+                pass
+            finally:
+                _RUNNING = False
+
+        t = threading.Thread(target=_work, name="ivyea-memory-reflect", daemon=True)
+        t.start()
+        return True
+    except Exception:  # noqa: BLE001
+        _RUNNING = False
+        return False
+
+
+_SUMMARY_SYS = _SYS + """
+
+这一批输入不是零散经历，而是**一次上下文压缩的摘要**——它已经是提炼过的内容。
+所以：宁缺毋滥，只挑那些"下次开新会话也该知道"的结论；过程细节、这次任务特有的
+中间状态一律不要。"""
+
+
+def reflect_on_text(text: str, provider=None) -> Dict[str, Any]:
+    """从一段文本（当前用途：上下文压缩的摘要）里提炼记忆。
+
+    **为什么用摘要而不是原始消息**：compact 已经为压缩调过一次模型生成 summary
+    （context.py:119）。再把原始 old 消息喂一遍等于同一段对话付两次钱，而且摘要
+    本身就是提炼过的，比逐字对话更适合做巩固输入。
+
+    不动两个水位线：经历水位线（读到哪条）和节流水位线（上次跑完是什么时候）都属于
+    情景记忆那条常规路径，压缩是另一条独立触发的路，不该互相干扰。
+    """
+    text = (text or "").strip()
+    if not text:
+        return {"ok": True, "applied": [], "skipped": [], "message": "空摘要，无可提炼。"}
+    provider = provider or _default_provider()
+    if provider is None:
+        return {"ok": False, "applied": [], "skipped": [], "message": "没有可用的模型配置。"}
+    index = memory_store.index_digest() or "（当前没有任何分类记忆）"
+    user = f"# 现有记忆索引\n{index}\n\n# 这次要巩固的会话摘要\n{text[:6000]}"
+    try:
+        raw = provider.complete(_SUMMARY_SYS, user, json_mode=True, temperature=0.2, timeout=120.0)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "applied": [], "skipped": [], "message": f"反思调用失败：{e}"}
+    data = _extract_json(raw)
+    if not isinstance(data, dict):
+        return {"ok": False, "applied": [], "skipped": [], "message": "反思返回的不是可解析的 JSON。"}
+    return _apply_ops(data.get("operations"), [])
+
+
+def reflect_summary_async(text: str) -> bool:
+    """压缩收尾时调用：后台把摘要里的结论沉淀下来。绝不阻塞压缩本身。"""
+    if not (text or "").strip():
+        return False
+    if not config.get_setting("memory_reflect_on_compact", True):
+        return False
+
+    def _work() -> None:
+        try:
+            from . import memory_lock
+            with memory_lock.reflect_lock(timeout=0.0) as got:
+                if got:
+                    reflect_on_text(text)
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        threading.Thread(target=_work, name="ivyea-memory-compact-reflect", daemon=True).start()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def wait_for_idle(timeout: float = 5.0) -> bool:
+    """等在飞的反思落地，最多等 timeout 秒。退出路径上用。
+
+    对标 Hermes 的 _SYNC_DRAIN_TIMEOUT_S=5：给它一点时间把已经花掉的那次模型调用
+    变成实际写入，但**绝不无限等**——线程是 daemon，等不到就随进程一起走。
+    """
+    deadline = time.time() + max(0.0, timeout)
+    while _RUNNING and time.time() < deadline:
+        time.sleep(0.05)
+    return not _RUNNING

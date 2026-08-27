@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -58,10 +59,38 @@ def _atomic_write(path: Path, text: str) -> None:
     os.replace(str(tmp), str(path))
 
 
+# 上一次 view() 看到的样子：block -> (mtime_ns, sha1)。
+#
+# **为什么需要它**：核心记忆是用户会亲手编辑的文件（USER.md / AGENTS.md 就摆在
+# ~/.ivyea 下，说明书也在教用户去改）。而模型的写入是"先 view 看一眼、再据此改"
+# —— 中间那段时间里用户改了，模型仍按它看到的老样子去 replace/remove，
+# 就会把用户刚写的东西抹掉。
+#
+# 只在**本进程 view 过**的前提下才判漂移：没有基线就谈不上检测，
+# 那种情况（模型没看就写）本来也不会覆盖别人的内容（append 是追加、
+# replace 要求在当前正文里唯一命中）。
+_SEEN: Dict[str, Tuple[int, str]] = {}
+
+
+def _fingerprint(path: Path) -> Tuple[int, str]:
+    """(mtime_ns, 内容 sha1)。只看 mtime 不够——同一秒内的两次写会看起来没变。"""
+    try:
+        st = path.stat()
+        data = path.read_bytes()
+    except OSError:
+        return (0, "")
+    return (st.st_mtime_ns, hashlib.sha1(data).hexdigest())
+
+
 def view(block: str) -> str:
-    """读一个核心记忆块的全文（不存在则返回空串）。"""
+    """读一个核心记忆块的全文（不存在则返回空串）。
+
+    顺手记下"这次看到的是什么样"，作为后续写入的漂移基线。
+    """
     p = block_path(block)
-    return p.read_text(encoding="utf-8") if p.exists() else ""
+    text = p.read_text(encoding="utf-8") if p.exists() else ""
+    _SEEN[block] = _fingerprint(p)
+    return text
 
 
 def _usage(text: str) -> Dict[str, Any]:
@@ -85,6 +114,22 @@ def edit(block: str, operation: str, content: str = "", old: str = "") -> Dict[s
         return {"ok": False, "message": f"未知的记忆块 {block!r}，可选：{', '.join(BLOCKS)}"}
     op = (operation or "").strip().lower()
     path = block_path(block)
+
+    # 漂移检查必须发生在**读正文之前**，而且要拿同一次读到的指纹去比。
+    # Hermes 在这里踩过一次：它在检测时又读了一遍文件，两次读之间被人改掉的话，
+    # 后面的写入仍然基于第一次那份陈旧快照，照样把新内容抹掉。
+    baseline = _SEEN.get(block)
+    if baseline is not None:
+        current = _fingerprint(path)
+        if current != baseline:
+            bak = _backup(path)
+            _SEEN[block] = current          # 基线对齐到现状，模型重新 view 后即可写
+            return {"ok": False, "drift": True, "backup": bak,
+                    "message": (f"{BLOCKS[block][0]} 在你上次查看之后被**外部修改**过"
+                                f"（用户手改或另一个会话写入）。本次写入已拒绝，"
+                                f"当前内容已备份到 {bak or '（备份失败）'}。"
+                                f"请先用 core_memory_view 重新看一遍，再基于新内容改。")}
+
     text = view(block) or _SEED.get(block, "")
 
     if op == "append":
@@ -123,11 +168,28 @@ def edit(block: str, operation: str, content: str = "", old: str = "") -> Dict[s
                             "核心记忆每轮都占上下文，请先合并或删掉过时条目，再写入。")}
 
     _atomic_write(path, new_text)
+    # 自己写完要把基线对齐，否则下一次写入会把"我自己刚改的"当成外部漂移。
+    _SEEN[block] = _fingerprint(path)
     usage = _usage(new_text)
     msg = f"已更新核心记忆 {BLOCKS[block][0]}（{usage['chars']}/{MAX_BLOCK_CHARS} 字）。下一轮起生效。"
     if usage["crowded"]:
         msg += " 提醒：该块已接近上限，建议合并同类条目。"
     return {"ok": True, "message": msg, "block": block, "path": str(path), **usage}
+
+
+def _backup(path: Path) -> str:
+    """漂移时给当前磁盘内容留一份 .bak.<时间戳>，让人能取回被改的版本。
+
+    只在**真的检测到漂移**时写，不是每次写入都备份——否则 ~/.ivyea 很快堆满。
+    """
+    if not path.exists():
+        return ""
+    bak = path.with_name(f"{path.name}.bak.{int(time.time())}")
+    try:
+        bak.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        return str(bak)
+    except OSError:
+        return ""
 
 
 def describe() -> str:

@@ -1850,6 +1850,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         _checkpoints.append({"n": len(_checkpoints) + 1, "msg_len": len(messages),
                              "cp": cp, "label": (line or "")[:50]})
     memory.sync_markdown_index()                           # 策展 markdown → FTS，修手改/重装漂移
+    memory.maybe_prune_episodes()                          # 过期对话行清理（一天一次，失败自吞）
     instructions = memory.load_instructions(os.getcwd())   # USER.md/AGENTS.md 持久指令
     profile_key = getattr(args, "asin", None) or "default"
     profile_context = profiles.context_text(profiles.resolve(asin=getattr(args, "asin", "") or ""), label=profile_key)
@@ -2403,6 +2404,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         from . import hooks as _hooks
         _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
         messages[0] = _sys_msg()
+        user_content = _inject_recall(args, ctx, line, user_content, messages, narrate)
         _snapshot(line)   # /rewind 检查点（本轮之前的对话+代码状态）
         messages.append({"role": "user", "content": _mentions.build_user_content(user_content, _mention_imgs)})
         mcfg = cfg.get_model_config()
@@ -2417,8 +2419,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
         if c:
             pricing.add_spend(c)
-        memory.index_turn("user", line, sid)
-        memory.index_turn("assistant", out.get("text", ""), sid)
+        _record_turn_memory(args, line, out.get("text", ""), sid)
         _hooks.fire("stop", {"session_id": sid or "", "turn_id": ctx.turn_id,
                              "text_len": len(out.get("text") or "")})
         if ctx.todos:                        # 供 TUI 在轮末渲染计划面板（与行式对齐）
@@ -2589,6 +2590,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             from . import hooks as _hooks
             _hooks.fire("user_prompt", {"prompt": line, "session_id": sid or "", "turn_id": ctx.turn_id})
             messages[0] = _sys_msg()   # 每轮刷新 system：注入真实当前日期，续接旧会话/跨天也不过时
+            user_content = _inject_recall(args, ctx, line, user_content, messages, print)
             _snapshot(line)   # /rewind 检查点（本轮之前的对话+代码状态）
             messages.append({"role": "user", "content": _mentions.build_user_content(user_content, _mention_imgs)})
             try:
@@ -2631,9 +2633,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 if ctx.todos:
                     print(panels.render_todos(ctx.todos, color=_isatty(sys.stdout)))
                 print()
-                # 记忆：会话转录入库 + 自策展提示
-                memory.index_turn("user", line, sid)
-                memory.index_turn("assistant", out.get("text", ""), sid)
+                # 记忆：会话转录入库 + 够门槛就后台反思 + 自策展提示
+                _record_turn_memory(args, line, out.get("text", ""), sid)
                 _hooks.fire("stop", {"session_id": sid or "", "turn_id": ctx.turn_id,
                                      "text_len": len(out.get("text") or "")})
                 hint = memory.nudge_hint(out.get("text", ""))
@@ -2659,6 +2660,67 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                                     "cost": round(meter.cost, 6)})
 
 
+def _inject_recall(args, ctx, line: str, user_content: str, messages: list, tell) -> str:
+    """CLI 侧的每轮自动召回。返回加了召回块的 user_content。
+
+    和 serve 走同一套函数（memory.auto_recall_text / already_recalled），
+    只是展示层不同：这边打一行灰字，那边发一个 SSE 事件。
+
+    `--no-memory` 只关写不关读，所以这里**不看**它 —— 用户说"这段别记"
+    要的是内容不进库，不是放弃已有记忆。
+    """
+    try:
+        if not config.get_setting("memory_auto_recall", True):
+            return user_content
+        from . import memory, task_scope
+        said = task_scope._user_said(line)
+        if memory.is_trivial_prompt(said):
+            return user_content
+        prev = ""
+        for msg in reversed(messages or []):
+            if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+                prev = task_scope._user_said(msg["content"])
+                break
+        query = f"{said}\n{prev}"[:600] if prev else said
+        body, names = memory.auto_recall_text(
+            query, exclude=memory.already_recalled(messages),
+            limit=int(config.get_setting("memory_auto_recall_limit", 4) or 4))
+        if not body:
+            return user_content
+        ctx.memory_recall = {"count": len(names), "names": names}
+        tell(ui.message("muted", f"🧠 已回忆 {len(names)} 条相关记忆"))
+        return user_content + memory.recall_block(body)
+    except Exception:  # noqa: BLE001 —— 召回失败就当没召回
+        return user_content
+
+
+def _record_turn_memory(args, user_text: str, assistant_text: str, sid: str) -> None:
+    """轮末记忆收尾：情景入库 + 够门槛就在后台反思。
+
+    `--no-memory` 只关**写**、不关**读**：用户说"这段别记"的时候，他要的是
+    这次的内容不进库，而不是放弃已有记忆带来的上下文。
+
+    空正文不记 —— 半截回答（模型报错、被 Ctrl-C 打断）不是"发生过的事实"，
+    记进去只会污染以后的召回和反思。
+    """
+    try:
+        if getattr(args, "no_memory", False):
+            return
+        if not config.get_setting("memory_index_turns", True):
+            return
+        from . import memory        # cli 里 memory 一律局部导入（模块级只有 config/ui）
+        assistant_text = (assistant_text or "").strip()
+        if not assistant_text:
+            return
+        if (user_text or "").strip():
+            memory.index_turn("user", user_text, sid)
+        memory.index_turn("assistant", assistant_text, sid)
+        from . import memory_reflect
+        memory_reflect.maybe_reflect_async()
+    except Exception:  # noqa: BLE001 —— 记忆是副作用，绝不能吃掉这一轮
+        pass
+
+
 def _auto_reflect(cfg, *, narrate: bool = True) -> None:
     """会话结束时把本次攒下的经历巩固进分类记忆。
 
@@ -2668,6 +2730,10 @@ def _auto_reflect(cfg, *, narrate: bool = True) -> None:
     """
     try:
         from . import memory_reflect
+        # 轮末已经起过后台反思了，先给它 5 秒把已经花掉的那次模型调用变成实际写入
+        # （对标 Hermes 的 5 秒排空）。它落地之后 should_reflect() 自然为假，
+        # 也就不会在退出时再烧一次。
+        memory_reflect.wait_for_idle(5.0)
         if not memory_reflect.should_reflect():
             return
         ak = cfg.get_active_key()
@@ -4059,6 +4125,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--resume", nargs="?", const=True, help="裸 ivyea：续接会话（留空=最近）")
     p.add_argument("--continue", dest="cont", action="store_true", help="裸 ivyea：续接最近会话")
     p.add_argument("--raw", action="store_true", help="裸 ivyea：原始流式输出")
+    p.add_argument("--no-memory", action="store_true",
+                   help="裸 ivyea：临时会话，本次对话不写入记忆（仍会读已有记忆）")
     sub = p.add_subparsers(dest="command")  # 无子命令 → 默认进对话模式(见 main)
 
     pc = sub.add_parser("config", help="配置向导（无参=交互式）/ show / set / edit")
@@ -4606,6 +4674,8 @@ def build_parser() -> argparse.ArgumentParser:
     pch.add_argument("--resume", nargs="?", const=True, help="续接会话：留空=最近一个，或指定会话ID")
     pch.add_argument("--continue", dest="cont", action="store_true", help="续接最近一个会话")
     pch.add_argument("--raw", action="store_true", help="原始流式输出（默认 Markdown 渲染）")
+    pch.add_argument("--no-memory", action="store_true",
+                     help="临时会话：本次对话不写入记忆（仍会读已有记忆）")
     pch.add_argument("-p", "--print", dest="print_prompt", metavar="PROMPT",
                      help="非交互一次性：跑一轮该提示、把结果打到 stdout 后退出（供 IvyeaOps 等做 runner）")
     pch.add_argument("--approve-all", action="store_true",

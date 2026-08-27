@@ -215,6 +215,7 @@ _INJECTED_MARKERS = (
     "[用户附图",
     "[角色设定",
     "[任务范围锁定",                # prepare_messages 自己贴回去的范围契约
+    "[ivyea 记忆召回",              # service._chat_messages / cli 的每轮自动召回
     "[记忆摘要",                    # cli 注入的 MEMORY.md 摘要
     "[长期指令/画像]",              # cli 注入的长期指令
 )
