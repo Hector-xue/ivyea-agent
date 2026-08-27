@@ -189,6 +189,9 @@ _TOOL_VERBS = {
     "bash_output": "查看后台输出", "kill_bash": "终止后台任务",
     "web_search": "联网搜索", "web_fetch": "抓取网页",
     "knowledge_search": "查知识库", "skill_search": "查 skill", "recall": "回忆记忆",
+    # 记忆那一组：两边（这里和 IvyeaOps 的 lib/stepLabels）必须同步，见文件头。
+    "memory_write": "记住", "memory_search": "翻记忆", "memory_read": "读记忆",
+    "core_memory_view": "看核心记忆", "core_memory_edit": "改核心记忆",
     "todo_write": "更新计划",
     "progress_update": "汇报进度",
 }

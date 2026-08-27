@@ -10,6 +10,34 @@
 
 ---
 
+## [v1.15.17] - 2026-08-27
+
+### 新增
+
+- **正在跑的那一轮，别的地方也能看见**：新增 `GET /v1/chat/sessions/{id}/live`
+  —— 任何客户端随时接进来，先回放这一轮已经发生的过程，再实时跟着往下跑。会话详情
+  多回一行 `live`，说明这条会话现在有没有活轮。
+  工作台据此修好了"切走再切回来 / 刷新 / 换台机器，执行过程整块消失"的老毛病
+  （见 [ADR-0024](./docs/decisions/0024-a-running-turn-is-a-server-side-fact.md)）。
+- 记忆那一组工具（`memory_write` / `memory_search` / `memory_read` /
+  `core_memory_*`）终于有了中文名。此前界面上显示的是英文原名，还被那一列的定宽
+  截成 `memory...`。
+
+### 修复
+
+- **模型在收尾阶段报错时，已经流出去的正文不再丢失**。此前落盘只写在"正常收尾"
+  那一条路径上：额度用尽 / 断流时直接走人，用户眼前明明有一整篇回答，刷新之后
+  一片空白，会话文件里也确实没有。现在正常收尾、模型报错、任意异常，一律先把
+  已经产生的消息和步骤落盘。
+
+- **Windows 上服务起不来**（升级到 v1.15.x 后出现）：`serve` 崩在开场白的一个 `✓` 上 ——
+  `UnicodeEncodeError: 'gbk' codec can't encode character '\u2713'`。IvyeaOps 起 serve 时
+  把输出重定向到日志文件 / NUL，此时 Windows 的 Python 不再用 UTF-8 而是退回系统代码页
+  （中文机器 = GBK），编不出这个字符就整个进程退出，工作台那边只看得到
+  "All connection attempts failed"。现在每个入口都会先把 stdout/stderr 钉成 UTF-8
+  （见 [ADR-0023](./docs/decisions/0023-stdio-is-utf8-on-every-entry-point.md)）。
+  英文版 Windows 同理受益 —— cp437 连中文日志都编不出来。
+
 ## [v1.15.16] - 2026-08-24
 
 ### 新增

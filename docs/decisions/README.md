@@ -40,6 +40,8 @@ git log 记得住「改了什么」，记不住「为什么不选另一条路」
 | [0020](./0020-cadence-tiers-review-reports-and-rules-without-data.md) | 节奏改 1h/12h/日/周/月；周报只回顾不派活；没数据也照写规则 | 2026-08-23 |
 | [0021](./0021-amazon-official-api-built-before-the-account.md) | 亚马逊官方 API 先建好，不等某台机器有账号；契约逐条来自官方文件 | 2026-08-23 |
 | [0022](./0022-promotion-rules-without-a-write-channel.md) | 促销规则只报不改（没有写接口），且必须先报「数据还能不能信」 | 2026-08-23 |
+| [0023](./0023-stdio-is-utf8-on-every-entry-point.md) | 每个入口先把 stdout 钉成 UTF-8（Windows 重定向后默认 GBK，一个 ✓ 崩掉 serve） | 2026-08-27 |
+| [0024](./0024-a-running-turn-is-a-server-side-fact.md) | 正在跑的那一轮是服务端的事实：活轮事件日志 + 任何退出路径都落盘 | 2026-08-27 |
 
 相关的工作台侧决策见
 [IvyeaOps 的 ADR 目录](https://github.com/Hector-xue/IvyeaOps/tree/main/docs/decisions)，

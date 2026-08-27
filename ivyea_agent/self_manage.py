@@ -254,6 +254,9 @@ def service_start(
     env = os.environ.copy()
     if token:
         env["IVYEA_API_TOKEN"] = token
+    # 日志落文件 = stdout 不是控制台 = Windows 默认按系统代码页(GBK)编码，
+    # 而日志通篇中文。子进程自己也会 force_utf8()，这里是第二道保险。
+    env.setdefault("PYTHONUTF8", "1")
     log_path = _service_log_file()
     log_fh = log_path.open("ab")
     creationflags = 0

@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import (
     __version__, ads_evidence, agent_loop, code_agent, config, context, knowledge, knowledge_evidence,
-    knowledge_governance, knowledge_quality, knowledge_sync, models,
+    knowledge_governance, knowledge_quality, knowledge_sync, live_turn, models,
     progress_reporting, retrieval, routing, security, self_manage, sessions, skills, stream_json,
     task_runner, traces, transcript, workspace,
 )
@@ -1630,10 +1630,37 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
     return result
 
 
-def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
+def chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | None = None,
                 client_gone: "threading.Event | None" = None) -> dict[str, Any]:
-    """Run one embedded agent turn and emit SSE-style events through send(event, data)."""
+    """Run one embedded agent turn and emit SSE-style events through send(event, data).
+
+    每条事件在发给这个客户端的同时，**也记进这条会话的活轮日志**（live_turn）。
+    那份日志是"别人也能看到进度"的唯一凭据：切走再回来、刷新、换台机器打开同一
+    条会话，都从它那里把执行过程接上（`GET /v1/chat/sessions/{id}/live`）。
+    只发给一个连接的话，那份进度就只属于那一个标签页 —— 而那正是要修的毛病。
+
+    这层薄壳只做一件事：**无论这一轮怎么结束，都把活轮日志封存**。不封存的话，
+    所有跟随者会一直挂在那儿等一个永远不来的 final。
+    """
+    holder: dict[str, Any] = {}
+    try:
+        return _chat_stream(payload, send_to_client, provider, client_gone, holder)
+    finally:
+        live = holder.get("live")
+        if live is not None:
+            live.end()
+
+
+def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | None,
+                 client_gone: "threading.Event | None",
+                 holder: dict[str, Any]) -> dict[str, Any]:
     from .providers import LLMError, build_chain
+
+    def send(event: str, data: dict[str, Any]) -> None:
+        live = holder.get("live")
+        if live is not None:
+            live.record(event, data)
+        send_to_client(event, data)
 
     message = str(payload.get("message") or payload.get("input") or "").strip()
     if not message:
@@ -1718,6 +1745,10 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         data = {"ok": False, "error": str(exc)}
         send("error", data)
         return data
+    # 会话 id 到手就开活轮日志 —— 从 start 这条事件起，所有事件都同时记一份，
+    # 别的连接（切回来的页面、刷新后的页面、另一台机器）据此把进度接上。
+    if payload.get("persist", True):
+        holder["live"] = live_turn.begin(ctx.session_id)
     send("start", {"ok": True, "session_id": ctx.session_id, "read_only": bool(plan_mode),
                    "approval": approval_mode,
                    "lane": route.lane, "lane_reason": route.reason,
@@ -1791,6 +1822,55 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
         elif kind == "skill_match" and ev.get("skills"):
             turn_skills.append(dict(ev))
 
+    def _persist(usage: dict[str, Any] | None) -> None:
+        """把**已经跑出来的东西**落盘。
+
+        正常收尾、模型报错、任何异常，都必须走这一步 —— 此前只有正常收尾那一条
+        路会落盘，于是"模型在收尾阶段报错"（额度用尽、引证重写时断流）等于把
+        用户眼前已经流出来的整篇回答连同执行过程一起丢掉：界面上明明有字，
+        刷新之后一片空白，会话文件里也确实没有。用户原话：
+        "有时候会话结束显示了完整的输出结果，但是刷新之后输出的结果就不见了"。
+
+        落盘失败绝不能反过来打断这一轮（最坏退回改动前的行为）。
+        """
+        if not payload.get("persist", True):
+            return
+        steps = list(turn_steps.values())
+        new_messages = list(messages[turn_base:])
+        # **已经流到用户眼前的字就是事实，必须留住。**
+        # 模型在流到一半时报错（额度用尽、连接断），agent_loop 还没来得及把这段
+        # 正文 append 进 messages —— 但用户屏幕上明明白白有一整篇。此前那一篇
+        # 就这么没了。活轮日志里存着它，拿它补上。
+        live = holder.get("live")
+        drafted = str(getattr(live, "text", "") or "").strip()
+        if drafted and not any(m.get("role") == "assistant" and str(m.get("content") or "").strip()
+                               for m in new_messages):
+            new_messages.append({"role": "assistant", "content": drafted})
+        if not new_messages and not steps:
+            return                      # 一个字、一步都没产生，没什么可落的
+        # 技能命中锚在本轮第一个 call_id 上 —— 详情按轮分页时靠它认出"这批技能属于哪一轮"。
+        # 一轮里一个工具都没调时它没有锚点，也就没有执行过程可显示，技能行随之省略。
+        anchor = steps[0].get("id") if steps else ""
+        skill_rows = ([{"anchor": anchor, "skills": turn_skills[-1].get("skills") or []}]
+                      if steps and turn_skills else [])
+        # 这一轮的账：挂钟时间、真正干活的步数、模型回报的用量。
+        # **必须落盘**——它们此前只在流里飘过一次，前端记在内存里；刷新或换台机器
+        # 打开这条会话，"用时/输入/输出"就全没了，统计条只剩一句"几轮几步"。
+        turn_stat = {
+            "ms": int(max(0.0, time.time() - turn_started) * 1000),
+            "steps": sum(1 for st in steps if str(st.get("phase") or "") not in ("plan", "note")),
+            "usage": usage or {},
+        }
+        try:
+            sessions.append_turn(
+                ctx.session_id,
+                str(messages[0].get("content") or "") if messages else "",
+                new_messages,
+                model=model_cfg.get("model", ""), usage={}, created=created_at,
+                steps=steps, skill_matches=skill_rows, turn_stat=turn_stat)
+        except Exception:  # noqa: BLE001 —— 落盘失败不该再把这一轮也搭进去
+            pass
+
     try:
         provider = provider or build_chain(model_cfg, api_key, narrate=narrate)
         out = agent_loop.run_turn_stream(
@@ -1824,31 +1904,18 @@ def chat_stream(payload: dict[str, Any], send: Any, provider: Any | None = None,
                 "answer_reset", {"reason": str(reason), "session_id": ctx.session_id}),
         )
     except LLMError as exc:
+        # 模型报错：**先落盘再报错**。已经流出去的正文和执行过程是真跑出来的，
+        # 不能因为收尾那一下失败就整轮蒸发。
+        _persist(None)
         data = {"ok": False, "error": "model_error", "detail": str(exc)}
         send("error", data)
         return data
+    except BaseException:
+        # 断流、被中止、任何没预料到的异常 —— 同上，先把跑出来的东西留住。
+        _persist(None)
+        raise
 
-    if payload.get("persist", True):
-        steps = list(turn_steps.values())
-        # 技能命中锚在本轮第一个 call_id 上 —— 详情按轮分页时靠它认出"这批技能属于哪一轮"。
-        # 一轮里一个工具都没调时它没有锚点，也就没有执行过程可显示，技能行随之省略。
-        anchor = steps[0].get("id") if steps else ""
-        skill_rows = ([{"anchor": anchor, "skills": turn_skills[-1].get("skills") or []}]
-                      if steps and turn_skills else [])
-        # 这一轮的账：挂钟时间、真正干活的步数、模型回报的用量。
-        # **必须落盘**——它们此前只在流里飘过一次，前端记在内存里；刷新或换台机器
-        # 打开这条会话，"用时/输入/输出"就全没了，统计条只剩一句"几轮几步"。
-        turn_stat = {
-            "ms": int(max(0.0, time.time() - turn_started) * 1000),
-            "steps": sum(1 for st in steps if str(st.get("phase") or "") not in ("plan", "note")),
-            "usage": out.get("usage") or {},
-        }
-        sessions.append_turn(
-            ctx.session_id,
-            str(messages[0].get("content") or "") if messages else "",
-            messages[turn_base:],
-            model=model_cfg.get("model", ""), usage={}, created=created_at,
-            steps=steps, skill_matches=skill_rows, turn_stat=turn_stat)
+    _persist(out.get("usage") or {})
     data = {
         "ok": True,
         "session_id": ctx.session_id,
@@ -1881,7 +1948,11 @@ def chat_session_detail(session_id: str, *, turns: int = _DETAIL_TURNS_DEFAULT,
     data = sessions.load(session_id)
     if not data:
         raise FileNotFoundError(f"会话不存在：{session_id}")
-    return {"ok": True, "session": _public_session_detail(data, turns=turns, before=before)}
+    return {"ok": True,
+            "session": _public_session_detail(data, turns=turns, before=before),
+            # 这条会话现在有没有一轮正在跑。前端据此决定要不要接进活轮日志把进度
+            # 补上 —— 没有这一行，切回来的页面只能看到磁盘上那份（还没写呢）。
+            "live": live_turn.status(session_id)}
 
 
 def chat_session_delete(session_id: str) -> dict[str, Any]:
@@ -2118,6 +2189,9 @@ def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, api_token: s
 
 
 def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, api_token: str = "") -> None:
+    from .stdio_utf8 import force_utf8
+    force_utf8()   # 下面这些 print 里有 ✓ 和中文；stdout 被重定向到文件/NUL 时
+                   # Windows 默认按 GBK 编码，编不出来就整个进程崩在这儿。
     server = make_server(host, port, api_token=api_token)
     actual_host, actual_port = server.server_address
     print(f"Ivyea Agent API listening on http://{actual_host}:{actual_port}")
@@ -2217,6 +2291,32 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/v1/feishu/approval/"):
             code, data = feishu_approval_get(parsed.path.rsplit("/", 1)[-1])
             self._json(code, data)
+            return
+        if parsed.path.startswith("/v1/chat/sessions/") and parsed.path.endswith("/live"):
+            # 接进"正在跑的那一轮"：先把已经发生过的事件回放一遍，再实时跟随。
+            # 这条路由必须排在下面那条 rsplit 分支**之前** —— 那条会把 "live"
+            # 当成会话 id。
+            session_id = parsed.path[len("/v1/chat/sessions/"):-len("/live")]
+            live = live_turn.get(session_id)
+            if live is None:
+                self._json(404, {"ok": False, "error": "no_live_turn"})
+                return
+            self._sse_begin()
+            gone = threading.Event()
+            try:
+                for event, data in live.follow(_int(_first(qs, "from"), 0),
+                                               alive=lambda: not gone.is_set()):
+                    try:
+                        if event == "ping":
+                            self.wfile.write(b": ping\n\n")
+                            self.wfile.flush()
+                        else:
+                            self._sse_send(event, data)
+                    except Exception:
+                        gone.set()      # 客户端走了。轮次照跑，别的跟随者也不受影响。
+                        return
+            except Exception:
+                return
             return
         if parsed.path.startswith("/v1/chat/sessions/"):
             session_id = parsed.path.rsplit("/", 1)[-1]

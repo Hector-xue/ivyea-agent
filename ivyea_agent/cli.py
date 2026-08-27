@@ -4626,6 +4626,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .stdio_utf8 import force_utf8
+    force_utf8()   # 输出被重定向时 Windows 会退回 GBK，一个 ✓ 就能崩掉 serve
     config.load_env()
     parser = build_parser()
     args = parser.parse_args(argv)
