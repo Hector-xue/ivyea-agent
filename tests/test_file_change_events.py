@@ -106,5 +106,6 @@ def test_serve_forwards_file_change_to_the_browser():
 
     from ivyea_agent import service
 
-    src = inspect.getsource(service.chat_stream)
+    # 放行名单在 _chat_stream 里（chat_stream 现在是层薄壳，只负责封存活轮日志）。
+    src = inspect.getsource(service._chat_stream)
     assert '"file_change"' in src, "file_change 不在 serve 的事件放行名单里，前端永远收不到"
