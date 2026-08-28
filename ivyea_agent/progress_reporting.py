@@ -50,6 +50,14 @@ def _dedupe(*groups: list[str], limit: int = 30) -> list[str]:
 
 def reset(ctx: Any, *, clear_todos: bool = True) -> None:
     """Reset one task's reporting state without disturbing session scope."""
+    if clear_todos:
+        try:
+            from . import plan_store
+            plan_store.reset(getattr(ctx, "session_id", "") or "",
+                             query=_text(getattr(ctx, "progress_query", "")),
+                             task_id=getattr(ctx, "task_id", "") or "")
+        except Exception:  # noqa: BLE001
+            pass
     ctx.progress_started = False
     ctx.progress_start = {}
     ctx.progress_active_phase = 0
@@ -125,6 +133,24 @@ def _phase_index(args: dict[str, Any], ctx: Any) -> int:
         return 0
 
 
+def _plan_record_start(ctx: Any, objective: str, scope: list[str], criteria: list[str]) -> None:
+    """把 start 汇报里的目标/范围/完成标准写进计划台账（best-effort）。"""
+    try:
+        from . import plan_store
+        plan_store.record_start(getattr(ctx, "session_id", "") or "",
+                                objective=objective, scope=scope, success_criteria=criteria)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _plan_attach_evidence(ctx: Any, index: int, evidence: list[str]) -> None:
+    try:
+        from . import plan_store
+        plan_store.attach_evidence(getattr(ctx, "session_id", "") or "", index, evidence)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _failure(message: str) -> dict[str, Any]:
     return {"ok": False, "text": "⚠ " + message, "event": {}}
 
@@ -181,6 +207,7 @@ def apply_update(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
         started.add(index)
         ctx.progress_started_phases = started
         ctx.progress_last_event = event
+        _plan_record_start(ctx, objective, scope, criteria)
         return _success(event)
 
     if kind == "phase_start":
@@ -242,6 +269,7 @@ def apply_update(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
         ctx.progress_active_phase = 0
         ctx.progress_final = {}
         ctx.progress_last_event = event
+        _plan_attach_evidence(ctx, index, evidence)
         return _success(event)
 
     # final

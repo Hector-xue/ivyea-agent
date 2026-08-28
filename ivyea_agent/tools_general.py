@@ -898,6 +898,18 @@ def t_todo_write(args: dict, ctx) -> str:
     if clean != list(getattr(ctx, "todos", []) or []):
         ctx.progress_final = {}
     ctx.todos = clean
+    # 计划同时落台账：ctx.todos 只是缓存，掉电即失，而计划要能扛住压缩、重启和续跑。
+    # 没有 session_id（只读子 agent、裸 ToolContext）时 plan_store 整个空转，行为不变。
+    try:
+        from . import plan_store
+        plan_store.sync_todos(
+            getattr(ctx, "session_id", "") or "", clean,
+            task_id=getattr(ctx, "task_id", "") or "",
+            query=getattr(ctx, "progress_query", "") or "",
+            plan_mode=bool(getattr(ctx, "plan_mode", False)),
+        )
+    except Exception:  # noqa: BLE001 —— 台账写不进去不该让计划更新失败
+        pass
     if not clean:
         return "计划已清空。"
     done = sum(1 for t in clean if t["status"] == "completed")

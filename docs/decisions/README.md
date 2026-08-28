@@ -43,6 +43,7 @@ git log 记得住「改了什么」，记不住「为什么不选另一条路」
 | [0023](./0023-stdio-is-utf8-on-every-entry-point.md) | 每个入口先把 stdout 钉成 UTF-8（Windows 重定向后默认 GBK，一个 ✓ 崩掉 serve） | 2026-08-27 |
 | [0024](./0024-a-running-turn-is-a-server-side-fact.md) | 正在跑的那一轮是服务端的事实：活轮事件日志 + 任何退出路径都落盘 | 2026-08-27 |
 | [0025](./0025-memory-is-runtime-driven.md) | 记忆由运行时驱动，不等模型想起来去查 | 2026-08-27 |
+| [0026](./0026-the-plan-is-runtime-state.md) | 计划是运行时状态，不是模型的记忆 | 2026-08-28 |
 
 相关的工作台侧决策见
 [IvyeaOps 的 ADR 目录](https://github.com/Hector-xue/IvyeaOps/tree/main/docs/decisions)，

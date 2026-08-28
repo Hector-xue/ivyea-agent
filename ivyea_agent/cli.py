@@ -1639,7 +1639,7 @@ SLASH_COMMANDS = [
     ("/memory", "记忆：状态/分类记忆/核心记忆；/memory <词> 检索"),
     ("/reflect", "把最近的零散经历提炼成分类记忆（会话结束也会自动跑）"),
     ("/profile", "查看/配置运营画像（目标 ACoS/保护词/核心词）"),
-    ("/plan", "进入/退出计划模式（只读，不写入）"),
+    ("/plan", "进入/退出计划模式（只读，不写入）；/plan show 看当前计划"),
     ("/approve", "批准并退出计划模式，继续执行"),
     ("/cost", "本会话 token 用量与成本估算"),
     ("/compact", "压缩上下文；/compact auto on|off 控制自动压缩"),
@@ -2007,6 +2007,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         """Shift+Tab 循环：普通 → 自动接受编辑 → 计划模式 → 普通。返回新模式名。"""
         if ctx.plan_mode:
             ctx.plan_mode = False; ctx.perm.accept_edits = False; label = "普通"
+            _approve_plan_note()    # 手动切出计划模式同样视为批准（与 /plan 一致）
         elif ctx.perm.accept_edits:
             ctx.perm.accept_edits = False; ctx.plan_mode = True; label = "计划模式"
         else:
@@ -2044,21 +2045,42 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if on:
             return ui.message("info", "已进入计划模式（只读，不写入；说“退出计划模式”或 /approve 后执行）。"
                                       "复杂任务建议先 /model 切更强主脑。")
-        return ui.message("success", "已退出计划模式。")
+        # 用户亲手退出计划模式 = 认可这份计划。不这么算的话，待批准的计划会在下一次
+        # 写操作时被拦下，用户只会觉得"我明明已经让它出去干活了"。
+        return ui.message("success", "已退出计划模式。" + _approve_plan_note())
 
     def _set_plan_mode(on: bool) -> None:
         print(_set_plan_mode_msg(on))
 
     def _sh_plan(line):
+        if (line or "").split()[1:2] == ["show"]:
+            return _sh_plan_show(line)
         _set_plan_mode(not ctx.plan_mode); return True
+
+    def _approve_plan_note() -> str:
+        """给当前会话的计划盖批准戳，返回一句可以直接接在提示后面的说明。"""
+        from . import plan_store
+        plan = plan_store.approve(sid or "", by="user")
+        if not plan or not (plan.get("steps") or []):
+            return ""
+        path = plan_store.path_for(sid or "")
+        return f"计划已批准（{len(plan['steps'])} 步，{path}）。"
+
+    def _sh_plan_show(line):
+        from . import plan_store
+        print(plan_store.render_human(sid or ""))
+        return True
 
     def _sh_approve(line):
         if ctx.plan_mode:
             ctx.plan_mode = False
             messages[0] = _sys_msg()
-            print(ui.message("success", "已批准，退出计划模式。说“继续/执行”让我落地计划。"))
+            print(ui.message("success", "已批准，退出计划模式。说“继续/执行”让我落地计划。"
+                                        + _approve_plan_note()))
         else:
-            print(ui.message("warn", "当前不在计划模式。"))
+            note = _approve_plan_note()
+            print(ui.message("success", note) if note
+                  else ui.message("warn", "当前不在计划模式，也没有待批准的计划。"))
         return True
 
     def _sh_cost(line):

@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import (config, context, knowledge, panels, progress_reporting, stream_json, task_scope,
-               traces, transcript, ui)
+from . import (config, context, knowledge, loop_guard, panels, plan_store, progress_reporting,
+               stream_json, task_scope, traces, transcript, ui)
 from .agent_tools import PARALLEL_SAFE, TOOL_SCHEMAS, ToolContext, ToolResult, dispatch_result
 from .providers import LLMProvider
 
@@ -70,11 +70,40 @@ def runtime_context_note(now: datetime | None = None) -> str:
 DEFAULT_MAX_TOOL_STEPS = 200
 DEFAULT_TOOL_WARNING_REMAINING = 8
 CODE_WRITE_TOOLS = {"write_file", "edit_file", "code_apply_patch"}   # 触发完成前自验证门禁的写工具
+# 「写了东西」不等于「改了行为」。文档/说明/纯数据文件没有任何可运行的行为可验证，
+# 对它们要求"跑一遍真实运行路径"是纯误报——一个被判成 behavioral 的任务（问句里带
+# "界面/显示/输出/颜色"等词就会命中），哪怕这一轮只写了一份 .md 报告，也会被逼着
+# 去 run_command。行为门禁因此只认真正的代码/配置文件。
+_NON_CODE_SUFFIXES = frozenset({
+    ".md", ".markdown", ".mdx", ".rst", ".txt", ".text", ".adoc",
+    ".csv", ".tsv", ".log", ".patch", ".diff",
+})
 _VERIFY_CAP = 2                                                       # 门禁最多逼修复几轮，防失控
 _NAVIGATION_TOOLS = {"grep", "glob", "code_search", "code_symbols", "code_impact"}
 _PROJECT_MUTATION_TOOLS = CODE_WRITE_TOOLS | {"run_command", "run_python", "run_tests"}
 _RUNTIME_VALIDATION_TOOLS = {"run_command", "run_python", "bash_output"}
 _MAX_NAVIGATION_WITHOUT_READ = 8
+
+
+def _written_paths(args: dict | None) -> list[str]:
+    """从写工具的参数里取出这次落盘的路径。`code_apply_patch` 是一次多文件。"""
+    args = args or {}
+    paths = [str(args.get("path") or "")]
+    for op in args.get("ops") or []:
+        if isinstance(op, dict):
+            paths.append(str(op.get("path") or ""))
+    return [p for p in paths if p.strip()]
+
+
+def _wrote_code_files(args: dict | None) -> bool:
+    """这次写入里有没有真正的代码/配置文件。
+
+    拿不到路径时**按代码算**（保守方向：宁可多验证一次，不可漏过真代码改动）。
+    """
+    paths = _written_paths(args)
+    if not paths:
+        return True
+    return any(Path(p).suffix.lower() not in _NON_CODE_SUFFIXES for p in paths)
 
 
 @dataclass
@@ -83,7 +112,8 @@ class TurnStatus:
     warning_remaining: int = DEFAULT_TOOL_WARNING_REMAINING
     warned: bool = False
     tool_calls: int = 0
-    wrote_code: bool = False       # 本轮是否动过源码（决定收尾前是否走自验证门禁）
+    wrote_code: bool = False       # 本轮是否写过文件（决定收尾前是否走自验证门禁）
+    wrote_code_files: bool = False # 本轮是否写过**真正的代码/配置**（行为门禁只认它，文档不算）
     verify_rounds: int = 0         # 已触发的自验证逼修复轮数
     behavioral_task: bool = False  # UI/输出/行为任务：测试之外还需要运行路径证据
     runtime_validated: bool = False
@@ -103,7 +133,7 @@ class TurnStatus:
     def record_tool_call(self) -> None:
         self.tool_calls += 1
 
-    def observe_tool_result(self, name: str, result: ToolResult) -> None:
+    def observe_tool_result(self, name: str, result: ToolResult, args: dict | None = None) -> None:
         text = result.text or ""
         if name in CODE_WRITE_TOOLS:
             blocked = any(marker in text for marker in (
@@ -111,6 +141,8 @@ class TurnStatus:
             ))
             if result.ok and not blocked:
                 self.wrote_code = True
+                if _wrote_code_files(args):
+                    self.wrote_code_files = True
                 self.runtime_validated = False
                 self.behavior_gate_rounds = 0
             return
@@ -127,6 +159,21 @@ def _resolve_max_steps(value: int | None, setting_key: str) -> int:
         return max(1, int(config.get_setting(setting_key, DEFAULT_MAX_TOOL_STEPS)))
     except (TypeError, ValueError):
         return DEFAULT_MAX_TOOL_STEPS
+
+
+def _new_loop_guard() -> "loop_guard.LoopGuard":
+    """按设置造一轮的打转守卫。两个阈值都可调，设 0 即关掉对应检测。"""
+    def _num(key: str, default: int) -> int:
+        try:
+            return int(config.get_setting(key, default))
+        except (TypeError, ValueError):
+            return default
+    repeat = _num("loop_guard_repeat_limit", loop_guard.DEFAULT_REPEAT_LIMIT)
+    stall = _num("loop_guard_stall_limit", loop_guard.DEFAULT_STALL_LIMIT)
+    return loop_guard.LoopGuard(
+        repeat_limit=repeat if repeat > 0 else 10 ** 6,
+        stall_limit=stall if stall > 0 else 10 ** 6,
+    )
 
 
 def _limit_text(max_steps: int) -> str:
@@ -206,9 +253,25 @@ def _tool_path(ctx: ToolContext, raw: str) -> Path:
     return path.resolve()
 
 
-def _guard_tool_call(ctx: ToolContext, tc: dict) -> ToolResult | None:
+def _guard_tool_call(ctx: ToolContext, tc: dict,
+                     guard: "loop_guard.LoopGuard | None" = None) -> ToolResult | None:
     """Enforce scope/search recovery even when the model ignores prompt instructions."""
     name = tc.get("name") or ""
+    if guard is not None:
+        repeated = guard.check(name, tc.get("arguments"))
+        if repeated:
+            return ToolResult(False, repeated)
+        if progress_reporting.is_substantive_tool(name):
+            stalled = guard.stall_feedback()
+            if stalled:
+                plan_store.mark_replan(getattr(ctx, "session_id", ""), "连续多步没有新证据，疑似在原地打转")
+                return ToolResult(False, stalled)
+    # 计划模式下产出的计划还没被用户批准就跑到执行档来写东西 —— 拦住。
+    # 正常对话不会命中：只有真的走过 `/plan` 且没 `/approve` 的会话才有待批准的计划。
+    if name in _PROJECT_MUTATION_TOOLS and not getattr(ctx, "plan_mode", False):
+        if plan_store.awaiting_approval(getattr(ctx, "session_id", "")):
+            return ToolResult(False, "已拦截：当前计划还没有得到用户批准。"
+                                     "请把计划完整讲清楚，等用户 /approve 之后再执行写操作。")
     if getattr(ctx, "scope_ambiguous", False) and name in (_NAVIGATION_TOOLS | _PROJECT_MUTATION_TOOLS):
         return ToolResult(False, "已拦截：当前任务同时指向多个项目，目标尚未锁定。请先向用户确认要修改哪个项目。")
     if getattr(ctx, "progress_required", False) and progress_reporting.is_substantive_tool(name):
@@ -268,8 +331,14 @@ def _observe_tool_discipline(ctx: ToolContext, tc: dict, res: ToolResult) -> Non
 def _record_tool_result(ctx: ToolContext, messages: list, tc: dict, res, duration_ms: int,
                         narrate: Callable[[str], None],
                         emit: Callable[[dict], None] | None = None, seq: int = 0,
-                        blocked: bool = False) -> None:
+                        blocked: bool = False,
+                        guard: "loop_guard.LoopGuard | None" = None) -> None:
     _observe_tool_discipline(ctx, tc, res)
+    # 被护栏拦下的调用**也要记**：反复撞同一道护栏（范围未锁定、先列计划…）同样是
+    # 原地打转，而且它既不是"工具失败"也不产生新证据，此前一条守卫都不管它。
+    if guard is not None:
+        guard.observe(tc.get("name") or "", tc.get("arguments"),
+                      res.ok and not blocked, res.text or "")
     progress_reporting.observe_tool_result(ctx, tc.get("name") or "", res)
     result = res.text
     payload = {"arguments": tc.get("arguments") or {}}
@@ -305,7 +374,7 @@ def _record_tool_result(ctx: ToolContext, messages: list, tc: dict, res, duratio
     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
 
 
-def _run_one(tc: dict, ctx: ToolContext):
+def _run_one(tc: dict, ctx: ToolContext, guard: "loop_guard.LoopGuard | None" = None):
     """执行一个工具调用，返回 (结果, 耗时ms, 是否被前置护栏拦下)。
 
     "被护栏拦下"和"工具真的失败了"对模型是一回事（都要改做法），对用户不是：
@@ -313,14 +382,15 @@ def _run_one(tc: dict, ctx: ToolContext):
     一次正常的流程纠偏画成红叉。
     """
     started = time.time()
-    guarded = _guard_tool_call(ctx, tc)
+    guarded = _guard_tool_call(ctx, tc, guard)
     res = guarded or dispatch_result(tc["name"], tc["arguments"], ctx)
     return res, int((time.time() - started) * 1000), guarded is not None
 
 
 def _dispatch_tool_calls(ctx: ToolContext, messages: list, status: TurnStatus, tool_calls: list,
                          step_idx: int, max_steps: int, narrate: Callable[[str], None],
-                         emit: Callable[[dict], None] | None = None) -> None:
+                         emit: Callable[[dict], None] | None = None,
+                         guard: "loop_guard.LoopGuard | None" = None) -> None:
     """派发本步所有工具调用：叙述、执行、记 trace、把结果按原顺序回灌到 messages。
     当本步全部是只读且并行安全的工具时并发执行（降延迟）；否则顺序执行（保留审批/写入语义）。"""
     parallel = len(tool_calls) > 1 and all(tc["name"] in PARALLEL_SAFE for tc in tool_calls)
@@ -344,16 +414,18 @@ def _dispatch_tool_calls(ctx: ToolContext, messages: list, status: TurnStatus, t
         # 收尾按原调用顺序回灌，与结果顺序保持一致。
         seqs = [announce(tc) for tc in tool_calls]
         with ThreadPoolExecutor(max_workers=min(len(tool_calls), 8)) as ex:
-            outcomes = list(ex.map(lambda tc: _run_one(tc, ctx), tool_calls))
+            outcomes = list(ex.map(lambda tc: _run_one(tc, ctx, guard), tool_calls))
         for tc, (res, dur, blocked), seq in zip(tool_calls, outcomes, seqs):
-            _record_tool_result(ctx, messages, tc, res, dur, narrate, emit=emit, seq=seq, blocked=blocked)
-            status.observe_tool_result(tc["name"], res)
+            _record_tool_result(ctx, messages, tc, res, dur, narrate, emit=emit, seq=seq,
+                                blocked=blocked, guard=guard)
+            status.observe_tool_result(tc["name"], res, tc.get("arguments"))
         return
     for tc in tool_calls:
         seq = announce(tc)
-        res, dur, blocked = _run_one(tc, ctx)
-        _record_tool_result(ctx, messages, tc, res, dur, narrate, emit=emit, seq=seq, blocked=blocked)
-        status.observe_tool_result(tc["name"], res)
+        res, dur, blocked = _run_one(tc, ctx, guard)
+        _record_tool_result(ctx, messages, tc, res, dur, narrate, emit=emit, seq=seq,
+                            blocked=blocked, guard=guard)
+        status.observe_tool_result(tc["name"], res, tc.get("arguments"))
 
 
 def _finalize_limit(ctx: ToolContext, messages: list, status: TurnStatus, max_steps: int,
@@ -376,7 +448,8 @@ def _verify_gate_feedback(ctx: ToolContext, status: TurnStatus,
     非代码轮/非 git 仓/门禁关/已达上限 → None。异常一律放行，绝不因门禁卡死主流程。"""
     if not status.wrote_code:
         return None
-    if status.behavioral_task and not status.runtime_validated and status.behavior_gate_rounds < 1:
+    if (status.behavioral_task and status.wrote_code_files
+            and not status.runtime_validated and status.behavior_gate_rounds < 1):
         status.behavior_gate_rounds += 1
         narrate(ui.message("warn", "行为类改动尚未验证真实运行路径，不能直接收尾。"))
         return transcript.gate_text(
@@ -442,15 +515,52 @@ def _finalize_citations(ctx: ToolContext, content: str) -> str:
     return rendered.rstrip() + "\n\n引用校验：知识已检索，但回答未完整绑定到有效引用，相关结论需人工复核。"
 
 
-def _maybe_compact(messages: list, provider, step_idx: int, narrate: Callable[[str], None]) -> None:
+def _plan_note(ctx: ToolContext) -> str:
+    """当前会话的 `[当前计划]` 文本。没有会话 id / 没有计划时返回空串。"""
+    try:
+        return plan_store.render_note(getattr(ctx, "session_id", "") or "")
+    except Exception:   # noqa: BLE001 —— 计划台账坏了不能连累这一轮
+        return ""
+
+
+def _inject_plan_note(ctx: ToolContext, messages: list) -> None:
+    """把计划注回最后一条 user 消息。
+
+    与 `task_scope.prepare_messages` 同一个机制、同一个位置：追加到用户消息尾部，
+    而不是新开一条 system —— 多条 system 在 Anthropic 那条路上会被 `_split_messages`
+    切走，各家 provider 行为不一致，而追加到 user 是所有 provider 都保真的做法。
+    """
+    note = _plan_note(ctx)
+    if not note:
+        return
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        text = content if isinstance(content, str) else str(content or "")
+        if plan_store.PLAN_NOTE_MARKER in text:
+            return
+        if isinstance(content, list):
+            msg["content"] = list(content) + [{"type": "text", "text": note}]
+        else:
+            msg["content"] = (text + "\n\n" + note) if text else note
+        return
+
+
+def _maybe_compact(messages: list, provider, step_idx: int, narrate: Callable[[str], None],
+                   ctx: ToolContext | None = None) -> None:
     """步边界上的轮内压缩守卫：此处 tool_call↔tool 已配对完整，整段替换安全。
-    仅在估算 token 越过硬上限（防溢出）或开了自动压缩到软阈值时触发。"""
+    仅在估算 token 越过硬上限（防溢出）或开了自动压缩到软阈值时触发。
+
+    压缩会把"我原本打算干几件事、干到第几件"一并摘要掉。计划不能交给摘要来保管 ——
+    它是结构化状态，摘要是散文。所以这里把计划**原样**接在摘要后面一起保留。"""
     if step_idx == 0:
         return
     est = context.estimate_tokens(messages)
     if not context.should_compact_midturn(est):
         return
-    new, summary = context.compact(messages, provider)
+    new, summary = context.compact(messages, provider,
+                                   extra_note=_plan_note(ctx) if ctx is not None else "")
     if summary:
         messages[:] = new
         narrate(ui.message("info", f"上下文已自动压缩（约 {est} tok）以防溢出，继续。"))
@@ -463,11 +573,13 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
     tools 可传受限工具子集（如只读子 agent）；传 [] = 不挂工具（纯文本生成）；
     None = 全量 TOOL_SCHEMAS。"""
     task_scope.prepare_messages(ctx, messages)
+    _inject_plan_note(ctx, messages)
     tool_schemas = TOOL_SCHEMAS if tools is None else tools
     max_steps = _resolve_max_steps(max_steps, "chat_max_tool_steps")
     status = TurnStatus(max_steps=max_steps, behavioral_task=bool(getattr(ctx, "behavioral_task", False)))
+    guard = _new_loop_guard()
     for step_idx in range(max_steps):
-        _maybe_compact(messages, provider, step_idx, narrate)
+        _maybe_compact(messages, provider, step_idx, narrate, ctx)
         status.before_model_step(step_idx, narrate)
         msg = provider.chat(messages, tools=tool_schemas)
         tool_calls = msg.get("tool_calls") or []
@@ -486,7 +598,8 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
             messages[-1]["content"] = content
             return content
         _append_tool_call_msg(messages, msg.get("content"), tool_calls)
-        _dispatch_tool_calls(ctx, messages, status, tool_calls, step_idx, max_steps, narrate)
+        _dispatch_tool_calls(ctx, messages, status, tool_calls, step_idx, max_steps, narrate,
+                             guard=guard)
     return _finalize_limit(ctx, messages, status, max_steps)
 
 
@@ -519,6 +632,7 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
     调用方（serve → 网页）会收到边界，把气泡清空重画；不给（CLI）则一个字都不变。
     reason: tool_call | gate:verify | gate:progress | gate:citation。"""
     task_scope.prepare_messages(ctx, messages)
+    _inject_plan_note(ctx, messages)
     tool_schemas = TOOL_SCHEMAS if tools is None else tools
     render = render or (lambda s: print(s, end="", flush=True))
     render_reasoning = render_reasoning or (lambda s: None)
@@ -557,10 +671,11 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
 
     max_steps = _resolve_max_steps(max_steps, "chat_max_tool_steps")
     status = TurnStatus(max_steps=max_steps, behavioral_task=bool(getattr(ctx, "behavioral_task", False)))
+    guard = _new_loop_guard()
     for step_idx in range(max_steps):
         if cancel_check():
             raise KeyboardInterrupt
-        _maybe_compact(messages, provider, step_idx, narrate)
+        _maybe_compact(messages, provider, step_idx, narrate, ctx)
         status.before_model_step(step_idx, narrate)
         final = {"content": "", "tool_calls": [], "usage": {}}
         printed_any = False
@@ -629,6 +744,7 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
         # 这一步的正文是"工具前的开场白"。它不是答案，等下一稿开始时该让位。
         superseded_by = "tool_call"
         _append_tool_call_msg(messages, final.get("content"), tool_calls)
-        _dispatch_tool_calls(ctx, messages, status, tool_calls, step_idx, max_steps, narrate, emit=emit)
+        _dispatch_tool_calls(ctx, messages, status, tool_calls, step_idx, max_steps, narrate,
+                             emit=emit, guard=guard)
     text = _finalize_limit(ctx, messages, status, max_steps, extra_payload={"usage": total_usage})
     return {"text": text, "usage": total_usage}

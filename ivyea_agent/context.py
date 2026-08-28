@@ -97,10 +97,13 @@ def _pair_safe_split(history: list[dict], keep_recent: int) -> int:
 
 
 def compact(messages: list[dict], provider, *, keep_system: bool = True,
-            keep_recent: Optional[int] = None) -> tuple[list[dict], str]:
+            keep_recent: Optional[int] = None, extra_note: str = "") -> tuple[list[dict], str]:
     """把旧历史压成摘要、保留最近 keep_recent 条消息原文（在 tool 配对边界切分）。
     返回 (新消息列表, 摘要文本)。失败则原样返回。
-    新列表 = [system?, {user: 摘要}, {assistant: 确认}] + 最近原文。keep_recent=0 即旧行为全量摘要。"""
+    新列表 = [system?, {user: 摘要}, {assistant: 确认}] + 最近原文。keep_recent=0 即旧行为全量摘要。
+
+    extra_note：**原样**接在摘要后面的结构化状态（当前用于任务计划）。摘要是散文、
+    会走样，而"计划到第几步了"是状态，压一次就该原样过一次，不能交给模型复述。"""
     if keep_recent is None:
         try:
             keep_recent = int(config.get_setting("compact_keep_recent", DEFAULT_KEEP_RECENT))
@@ -124,8 +127,11 @@ def compact(messages: list[dict], provider, *, keep_system: bool = True,
     new: list[dict] = []
     if system and keep_system:
         new.append(system)
+    body = summary.strip()
+    if extra_note.strip():
+        body += "\n\n" + extra_note.strip()
     new.append({"role": "user",
-                "content": transcript.gate_text(transcript.COMPACT_SUMMARY, f"\n{summary.strip()}")})
+                "content": transcript.gate_text(transcript.COMPACT_SUMMARY, f"\n{body}")})
     new.append({"role": "assistant", "content": transcript.COMPACT_ACK})
     new.extend(recent)
     # 压缩前把这段对话里值得长期记住的东西捞出来。

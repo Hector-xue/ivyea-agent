@@ -71,13 +71,35 @@ def test_ambiguous_scope_blocks_search_and_mutation(tmp_path):
 
 def test_behavioral_write_requires_runtime_validation(monkeypatch):
     ctx = ToolContext(workspace=".", behavioral_task=True)
-    status = agent_loop.TurnStatus(max_steps=10, behavioral_task=True, wrote_code=True)
+    status = agent_loop.TurnStatus(max_steps=10, behavioral_task=True,
+                                   wrote_code=True, wrote_code_files=True)
     feedback = agent_loop._verify_gate_feedback(ctx, status, lambda _s: None)
     assert "真实运行路径" in feedback
 
     status.runtime_validated = True
     monkeypatch.setattr("ivyea_agent.verify.gate", lambda *_a, **_k: {"ok": True})
     assert agent_loop._verify_gate_feedback(ctx, status, lambda _s: None) is None
+
+
+def test_doc_only_write_does_not_demand_runtime_proof(monkeypatch):
+    """只写文档的一轮不该被逼着"跑一遍真实运行路径" —— 文档没有运行路径。"""
+    ctx = ToolContext(workspace=".", behavioral_task=True)
+    status = agent_loop.TurnStatus(max_steps=10, behavioral_task=True)
+    status.observe_tool_result("write_file", ToolResult(True, "已写入 报告.md"),
+                               {"path": "reports/界面优化报告.md"})
+    assert status.wrote_code is True          # 自验证门禁照常覆盖
+    assert status.wrote_code_files is False   # 但行为门禁不该触发
+    monkeypatch.setattr("ivyea_agent.verify.gate", lambda *_a, **_k: {"ok": True})
+    assert agent_loop._verify_gate_feedback(ctx, status, lambda _s: None) is None
+
+
+def test_mixed_write_still_demands_runtime_proof():
+    """同一轮里只要碰过真代码，行为门禁照旧生效。"""
+    status = agent_loop.TurnStatus(max_steps=10, behavioral_task=True)
+    status.observe_tool_result(
+        "code_apply_patch", ToolResult(True, "已应用补丁"),
+        {"ops": [{"path": "docs/说明.md"}, {"path": "client/src/App.tsx"}]})
+    assert status.wrote_code_files is True
 
 
 def test_tests_do_not_count_as_behavior_runtime_evidence():
