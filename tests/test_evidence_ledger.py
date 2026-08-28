@@ -16,12 +16,25 @@ def test_only_verification_shaped_tools_are_recorded(ivyea_home):
 
 
 def test_exit_code_is_extracted(ivyea_home):
-    for text, want in (("[退出码 0]\nok", "退出码 0"),
-                       ("returncode=1", "退出码 1"),
-                       ("已结束（exit=137）", "退出码 137")):
+    """**只用代码库里真实存在的格式**。此前这里有一条 `已结束（exit=137）` ——
+    那个字符串本仓一次都没出现过，测的是我自己编的格式，等于什么也没测到。"""
+    for text, want in (("[退出码 0]\nok", "退出码 0"),                    # run_command / run_python
+                       ("b1 已结束（退出码 137）", "退出码 137"),           # bash_output 收尾
+                       ("ok=False returncode=1", "退出码 1")):            # self_manage
         evidence_ledger.record_tool("x", "t", "run_command", {"command": "c"}, True, text)
     assert [r["detail"] for r in evidence_ledger.rows(session_id="x")] == \
-        ["退出码 0", "退出码 1", "退出码 137"]
+        ["退出码 0", "退出码 137", "退出码 1"]
+
+
+def test_the_exit_code_formats_actually_exist_in_the_codebase():
+    """守住这次教训：正则里的每种格式，代码库里都得真有人在产出它。"""
+    import pathlib as _p
+    src = "\n".join(f.read_text(encoding="utf-8")
+                    for f in _p.Path("ivyea_agent").rglob("*.py")
+                    if f.name not in ("evidence_ledger.py", "agent_loop.py"))
+    assert "退出码 " in src
+    assert "returncode=" in src
+    assert "（exit=" not in src        # 编出来的那个格式，别再溜回来
 
 
 def test_blocked_and_rejected_calls_are_not_evidence(ivyea_home):

@@ -161,7 +161,10 @@ class TurnStatus:
             return
         if not self.wrote_code or name not in _RUNTIME_VALIDATION_TOOLS or not result.ok:
             return
-        if "退出码 0" in text or "returncode=0" in text or "已结束（exit=0" in text:
+        # 三种真实格式：`[退出码 0]`（run_command/run_python）、`已结束（退出码 0）`
+        # （bash_output 收尾）、`returncode=0`（self_manage）。前两种都被"退出码 0"覆盖。
+        # 原先这里还有 `已结束（exit=0`，那个字符串本仓一次都没出现过 —— 死判据，删掉。
+        if "退出码 0" in text or "returncode=0" in text:
             self.runtime_validated = True
 
 
@@ -177,8 +180,12 @@ def _resolve_max_steps(value: int | None, setting_key: str) -> int:
 #: 模型步数的硬天花板 = 预算步数 × 这个倍数。
 #:
 #: 预算只数**干活的**调用（记账调用退款，见 budget.py），所以光靠预算，一个只发
-#: progress_update 的死循环可以一直转下去 —— loop_guard 会拦，但天花板是最后一道保险。
-#: 3 倍来自实测：一句"测试"跑了 18 步其中 17 步是记账，最坏情况约 1:2 的干活/记账比。
+#: progress_update 的死循环可以一直转下去 —— loop_guard 会拦大部分，天花板是最后一道保险。
+#:
+#: **3 是拍的，不是算出来的。** routing.py 记的那次实测（18 步里 17 步是记账）真按比例算
+#: 该取 18 倍，那等于没有天花板；取 1 倍又会把"记账多但确实在干活"的正常长任务掐掉。
+#: 3 倍的意思是"允许记账占到三分之二"，这是个判断，不是从数据推出来的 ——
+#: 真要调准得先有一批长任务的干活/记账分布，现在没有。
 _STEP_CEILING_FACTOR = 3
 
 
@@ -214,10 +221,20 @@ def _new_loop_guard() -> "loop_guard.LoopGuard":
 def _limit_text(max_steps: int, budget: "budget_mod.TurnBudget | None" = None) -> str:
     """到顶了给用户的那句话。**必须说清是撞了哪道闸** —— 步数和成本要采取的动作完全不同：
     前者是"再说一句继续"，后者是"这一轮已经花掉 N 块钱了，你要不要继续花"。"""
-    if budget is not None and budget.stop_reason() == "cost":
+    reason = budget.stop_reason() if budget is not None else ""
+    if reason == "cost":
         return (f"（本轮已达成本上限：{budget.render()}。任务还没收尾就先停下来了——"
                 f"这是刻意的止损点，不是出错。要接着做就说“继续”；"
                 f"想放宽用 `ivyea config set chat_max_cost_cny <金额>`，设 0 关掉这道闸。）")
+    if reason == "ceiling":
+        # 撞天花板 ≠ 预算用完。这里**绝不能**叫用户去调 chat_max_tool_steps ——
+        # 预算根本没动，调它一点用没有，那是把人往错方向指。
+        return (f"（本轮跑到了模型步数天花板才停：{budget.render()}——"
+                f"注意干活的调用只用掉 {budget.steps_used} 次配额，"
+                f"绝大多数步数花在了 progress_update/todo_write 这类记账调用上（{budget.steps_refunded} 次）。"
+                f"**调高 chat_max_tool_steps 不会有帮助**，瓶颈不在配额。"
+                f"多半是某个环节反复卡住导致来回记账，可以说“继续”让它换个思路，"
+                f"或者直接告诉它你觉得卡在哪。）")
     return (f"（本轮工具调用已连续执行到安全上限 {max_steps} 步仍未收尾——这通常意味着任务很大或某处卡住了。"
             f"可以直接说“继续”接着做，或用 `ivyea config set chat_max_tool_steps {max_steps * 2}` 进一步提高单轮上限。）")
 
@@ -309,6 +326,13 @@ def _guard_tool_call(ctx: ToolContext, tc: dict,
             if stalled:
                 plan_store.mark_replan(getattr(ctx, "session_id", ""), "连续多步没有新证据，疑似在原地打转")
                 return ToolResult(False, stalled)
+        else:
+            # 记账工具自己也要过一道闸：**成功的**记账风暴不触发重复指纹、
+            # 不触发拒绝连击、也不计空转 —— 此前是彻底的空档。
+            churn = guard.bookkeeping_feedback()
+            if churn:
+                plan_store.mark_replan(getattr(ctx, "session_id", ""), "连续多次只在记账，没有推进")
+                return ToolResult(False, churn)
     # 计划模式下产出的计划还没被用户批准就跑到执行档来写东西 —— 拦住。
     # 正常对话不会命中：只有真的走过 `/plan` 且没 `/approve` 的会话才有待批准的计划。
     if name in _PROJECT_MUTATION_TOOLS and not getattr(ctx, "plan_mode", False):
@@ -618,6 +642,9 @@ def _critique_gate_feedback(ctx: ToolContext, status: TurnStatus, content: str,
         res = _crit.critique(getattr(ctx, "progress_query", "") or "", content, provider, kind=kind)
     except Exception:   # noqa: BLE001 —— 自查挂了绝不拖累交付
         return None
+    # 这一次调用是**运行时自己发起的**，用户看不见，所以更要计进成本 ——
+    # 漏在闸外的话，「本轮花了多少钱」报出来的数就是假的。
+    _charge_side_call(status, provider, res.get("usage"))
     traces.record(getattr(ctx, "session_id", ""), getattr(ctx, "turn_id", ""),
                   "critique", kind, ok=not res.get("needs_fix"),
                   summary=(res.get("markdown") or res.get("note") or "")[:1000])
@@ -713,8 +740,23 @@ def _inject_plan_note(ctx: ToolContext, messages: list) -> None:
         return
 
 
+def _charge_side_call(status: "TurnStatus | None", provider, usage) -> None:
+    """把运行时自己发起的模型调用（自查、压缩）记进本轮成本。
+
+    这些调用用户看不见、也不在工具时间线上，但钱是真花的。漏在闸外的话
+    「本轮花了多少钱」就是个假数，而成本闸恰恰是靠这个数决定停不停。
+    """
+    if status is None or status.budget is None or not usage:
+        return
+    try:
+        status.budget.add_cost(_step_cost(provider, usage))
+    except Exception:   # noqa: BLE001
+        return
+
+
 def _maybe_compact(messages: list, provider, step_idx: int, narrate: Callable[[str], None],
-                   ctx: ToolContext | None = None) -> None:
+                   ctx: ToolContext | None = None,
+                   status: "TurnStatus | None" = None) -> None:
     """步边界上的轮内压缩守卫：此处 tool_call↔tool 已配对完整，整段替换安全。
     仅在估算 token 越过硬上限（防溢出）或开了自动压缩到软阈值时触发。
 
@@ -725,10 +767,12 @@ def _maybe_compact(messages: list, provider, step_idx: int, narrate: Callable[[s
     est = context.estimate_tokens(messages)
     if not context.should_compact_midturn(est):
         return
-    new, summary = context.compact(messages, provider,
-                                   extra_note=_plan_note(ctx) if ctx is not None else "")
+    new, summary, usage = context.compact(messages, provider,
+                                          extra_note=_plan_note(ctx) if ctx is not None else "",
+                                          return_usage=True)
     if summary:
         messages[:] = new
+        _charge_side_call(status, provider, usage)
         narrate(ui.message("info", f"上下文已自动压缩（约 {est} tok）以防溢出，继续。"))
 
 
@@ -747,10 +791,15 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
     status = TurnStatus(max_steps=max_steps, budget=turn_budget,
                         behavioral_task=bool(getattr(ctx, "behavioral_task", False)))
     guard = _new_loop_guard()
-    for step_idx in range(_hard_step_ceiling(max_steps)):
+    _ceiling = _hard_step_ceiling(max_steps)
+    for step_idx in range(_ceiling):
         if turn_budget.exhausted():
             break
-        _maybe_compact(messages, provider, step_idx, narrate, ctx)
+        if step_idx == _ceiling - 1:
+            # 最后一格：跑完这一步就没了，且预算还没用完 —— 记成撞天花板，
+            # 免得收尾文案把它说成"步数上限"并给出一条没用的建议。
+            turn_budget.mark_ceiling()
+        _maybe_compact(messages, provider, step_idx, narrate, ctx, status)
         status.before_model_step(step_idx, narrate)
         msg = provider.chat(messages, tools=tool_schemas)
         turn_budget.add_cost(_step_cost(provider, msg.get("usage") or {}))
@@ -849,12 +898,17 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
     status = TurnStatus(max_steps=max_steps, budget=turn_budget,
                         behavioral_task=bool(getattr(ctx, "behavioral_task", False)))
     guard = _new_loop_guard()
-    for step_idx in range(_hard_step_ceiling(max_steps)):
+    _ceiling = _hard_step_ceiling(max_steps)
+    for step_idx in range(_ceiling):
         if turn_budget.exhausted():
             break
+        if step_idx == _ceiling - 1:
+            # 最后一格：跑完这一步就没了，且预算还没用完 —— 记成撞天花板，
+            # 免得收尾文案把它说成"步数上限"并给出一条没用的建议。
+            turn_budget.mark_ceiling()
         if cancel_check():
             raise KeyboardInterrupt
-        _maybe_compact(messages, provider, step_idx, narrate, ctx)
+        _maybe_compact(messages, provider, step_idx, narrate, ctx, status)
         status.before_model_step(step_idx, narrate)
         final = {"content": "", "tool_calls": [], "usage": {}}
         printed_any = False

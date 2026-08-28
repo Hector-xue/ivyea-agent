@@ -13,8 +13,8 @@ hermes 把整套作者规范塞进 `/learn` 的 prompt 里，指望模型照做�
 **只立本仓真实存在约束的规则，不照抄别家的数字。**
 
 hermes 要求 description ≤ 60 字符，理由是它的技能索引按 60 字截断、超出部分永远参与不了
-路由。ivyea **没有这个截断**（`render_list` 打全文、`_score_parts` 也吃全文），
-照搬这个数字就是 cargo cult。这里换成有依据的两条：
+路由。ivyea **没有这个截断**：`render_search` 打全文、`_score_parts` 也吃全文，
+`render_list` 干脆不显示 description。照搬这个数字就是 cargo cult。这里换成有依据的两条：
 
 * `triggers` 必填 —— `skills._terms()` 不分词，中文查询几乎完全靠 triggers 作为子串命中
   （skills.py 自己的注释就是这么写的）。没有 triggers 的技能，中文用户根本搜不到。

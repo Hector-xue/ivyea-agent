@@ -193,3 +193,46 @@ def test_one_success_clears_the_rotating_streak():
         guard.observe("progress_update", {"n": i}, True, f"⚠ 拒绝 {i % 2}")
     guard.observe("progress_update", {"n": 9}, True, "阶段 2 开始")
     assert guard.check("progress_update", {"n": 10}) is None
+
+
+# ── 记账风暴（复核时打出来的空档） ───────────────────────────────────────────
+#
+# **成功的**记账风暴此前谁也拦不住：todo_write 每次参数都不同（参数指纹对不上）、
+# 结果都是成功（拒绝连击不触发）、又是记账类（不计空转）。
+# 实测 max_steps=5 的一轮跑满了 15 个模型步，全在写 todo。
+def test_a_successful_bookkeeping_storm_is_now_caught():
+    guard = loop_guard.LoopGuard(bookkeeping_limit=4)
+    for i in range(4):
+        assert guard.bookkeeping_feedback() is None
+        guard.observe("todo_write", {"todos": [{"content": f"步骤{i}"}]}, True, f"已更新计划：0/{i}")
+    feedback = guard.bookkeeping_feedback()
+    assert feedback is not None
+    assert "全是记账" in feedback
+    assert "去执行" in feedback
+
+
+def test_doing_one_real_thing_clears_the_bookkeeping_streak():
+    """记账本来就该穿插在干活之间 —— 干了活就不算风暴。"""
+    guard = loop_guard.LoopGuard(bookkeeping_limit=3)
+    guard.observe("todo_write", {}, True, "已更新计划")
+    guard.observe("progress_update", {}, True, "已记录")
+    guard.observe("read_file", {"path": "a.py"}, True, "内容")
+    guard.observe("todo_write", {}, True, "已更新计划")
+    guard.observe("progress_update", {}, True, "已记录")
+    assert guard.bookkeeping_feedback() is None
+
+
+def test_agent_loop_blocks_the_storm(ivyea_home):
+    from ivyea_agent import plan_store
+    # 真实场景里风暴就是 todo_write 刷出来的，所以计划一定已经存在。
+    # （mark_replan 对不存在的计划是 no-op —— 一个没有计划的"重规划理由"没有意义。）
+    plan_store.sync_todos("churn-1", [{"content": "第一步", "status": "pending"}])
+    ctx = ToolContext(workspace=".", session_id="churn-1")
+    guard = loop_guard.LoopGuard(bookkeeping_limit=3)
+    for i in range(3):
+        guard.observe("todo_write", {"n": i}, True, "已更新计划")
+    res, _ms, blocked = agent_loop._run_one(
+        {"id": "t", "name": "todo_write", "arguments": {"todos": []}}, ctx, guard)
+    assert blocked is True and res.ok is False
+    assert "全是记账" in res.text
+    assert "只在记账" in plan_store.replan_reason("churn-1")

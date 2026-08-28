@@ -97,13 +97,21 @@ def _pair_safe_split(history: list[dict], keep_recent: int) -> int:
 
 
 def compact(messages: list[dict], provider, *, keep_system: bool = True,
-            keep_recent: Optional[int] = None, extra_note: str = "") -> tuple[list[dict], str]:
+            keep_recent: Optional[int] = None, extra_note: str = "",
+            return_usage: bool = False):
     """把旧历史压成摘要、保留最近 keep_recent 条消息原文（在 tool 配对边界切分）。
     返回 (新消息列表, 摘要文本)。失败则原样返回。
     新列表 = [system?, {user: 摘要}, {assistant: 确认}] + 最近原文。keep_recent=0 即旧行为全量摘要。
 
     extra_note：**原样**接在摘要后面的结构化状态（当前用于任务计划）。摘要是散文、
-    会走样，而"计划到第几步了"是状态，压一次就该原样过一次，不能交给模型复述。"""
+    会走样，而"计划到第几步了"是状态，压一次就该原样过一次，不能交给模型复述。
+
+    return_usage=True 时返回 (新消息列表, 摘要, 用量估算) 三元组 —— 压缩是**运行时自己
+    发起**的一次模型调用，钱是真花的，成本闸不能把它漏在外面。默认 False，老调用方不变。"""
+
+    def _out(msgs, summary, usage=None):
+        return (msgs, summary, usage or {}) if return_usage else (msgs, summary)
+
     if keep_recent is None:
         try:
             keep_recent = int(config.get_setting("compact_keep_recent", DEFAULT_KEEP_RECENT))
@@ -116,14 +124,14 @@ def compact(messages: list[dict], provider, *, keep_system: bool = True,
         split = _pair_safe_split(history, 0)   # 历史短但需要压（如防溢出）：退回全量摘要
     old, recent = history[:split], history[split:]
     if len(old) < 4:
-        return messages, ""   # 太短不值得压
+        return _out(messages, "")   # 太短不值得压
     text = _render_history(old)
     try:
         summary = provider.complete(_SUMMARY_SYS, text, temperature=0.2, timeout=120.0)
     except Exception:
-        return messages, ""
+        return _out(messages, "")
     if not summary.strip():
-        return messages, ""
+        return _out(messages, "")
     new: list[dict] = []
     if system and keep_system:
         new.append(system)
@@ -144,7 +152,8 @@ def compact(messages: list[dict], provider, *, keep_system: bool = True,
         memory_reflect.reflect_summary_async(summary.strip())
     except Exception:  # noqa: BLE001 —— 记忆是锦上添花，压缩绝不能因它失败
         pass
-    return new, summary.strip()
+    return _out(new, summary.strip(), {"prompt_tokens": int(_est_text(text)),
+                                       "completion_tokens": int(_est_text(summary))})
 
 
 # ── 上下文用量快照 ─────────────────────────────────────────────────────────

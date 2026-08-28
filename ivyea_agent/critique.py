@@ -86,19 +86,35 @@ def needs_fix(markdown: str) -> bool:
     return NEEDS_FIX_MARK in tail and "通过" not in tail.replace("不通过", "")
 
 
+def _estimated_usage(prompt: str, completion: str) -> dict[str, int]:
+    """`complete()` 不回用量，只能按字符估。用 context 那套 CJK 校准的估法，别另发明一个。"""
+    try:
+        from . import context
+        return {"prompt_tokens": int(context._est_text(prompt or "")),
+                "completion_tokens": int(context._est_text(completion or ""))}
+    except Exception:      # noqa: BLE001
+        return {}
+
+
 def critique(task: str, answer: str, provider, rubric: Optional[str] = None,
              kind: str = "") -> dict[str, Any]:
     """返回 {ok, markdown, note, needs_fix}。provider 为 None（未配模型）时优雅降级，不抛异常。"""
     if provider is None:
-        return {"ok": False, "markdown": "", "note": "未配置模型，无法自我批判。", "needs_fix": False}
+        return {"ok": False, "markdown": "", "note": "未配置模型，无法自我批判。",
+                "needs_fix": False, "usage": {}}
     task = (task or "（未提供任务描述）").strip()
     answer = (answer or "").strip()
     if not answer:
-        return {"ok": False, "markdown": "", "note": "没有可复核的回答内容。", "needs_fix": False}
+        return {"ok": False, "markdown": "", "note": "没有可复核的回答内容。",
+                "needs_fix": False, "usage": {}}
     user = f"【任务】\n{task}\n\n【回答】\n{answer}\n\n{rubric or pick_rubric(kind)}"
     try:
         md = provider.complete(CRITIQUE_SYSTEM, user, json_mode=False, temperature=0.2)
     except LLMError as e:
-        return {"ok": False, "markdown": "", "note": f"自我批判调用失败：{e}", "needs_fix": False}
+        return {"ok": False, "markdown": "", "note": f"自我批判调用失败：{e}",
+                "needs_fix": False, "usage": {}}
     md = (md or "").strip()
-    return {"ok": True, "markdown": md, "note": "", "needs_fix": needs_fix(md)}
+    # `complete()` 的契约只返回文本，拿不到真实用量。给个按字符估的兜底 ——
+    # 这一次调用是运行时自己发起的、用户看不见，**漏在成本闸外面比估得不准更糟**。
+    return {"ok": True, "markdown": md, "note": "", "needs_fix": needs_fix(md),
+            "usage": _estimated_usage(user, md)}

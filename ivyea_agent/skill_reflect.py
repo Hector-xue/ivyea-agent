@@ -7,13 +7,18 @@
 
 开：`ivyea config set skill_auto_learn true`。
 
-两道闸门，照抄 memory_reflect 已经被验证过的那套
-------------------------------------------------
+两道闸门，结构沿用 memory_reflect，**门槛按代价重定**
+----------------------------------------------------
 1. **显著性门槛**：这一轮得真干了活（工具步数够、走完多阶段执行、有真实证据），
    才值得花一次模型调用去问"要不要沉淀"。一次问答、一次闲聊没有可复用的流程。
-2. **证据门槛**：同一类流程**跨会话出现过 ≥2 次**才建技能。一次性的具体任务不是技能 ——
+2. **证据门槛**：同一类流程**跨会话出现过 ≥N 次**才建技能。一次性的具体任务不是技能 ——
    `memory_reflect` 那边写着同样的道理：防止把一次性的事固化成"你的长期做法"。
    没到次数的先进待定区（`~/.ivyea/skills/_pending.json`），等它再出现一次。
+
+**门槛不是照抄 memory_reflect 的数字，是比它更严。** 一条记忆写错了，最多是某次回答
+被带偏一点；一条技能写错了，会被**自动注入进后续每一次相关对话**、成段地改变模型的做法，
+而且它还会去和别的技能抢命中。代价不对称，门槛就不该一样 —— 这里取的是
+`memory_reflect.PROMOTE_AFTER_SIGHTINGS` 同档或更高，不允许更低。
 
 安全边界
 --------
@@ -34,7 +39,19 @@ from . import config, security
 #: 这一轮至少要有多少次实质工具调用，才值得问"要不要沉淀"。
 MIN_TOOL_STEPS = 8
 #: 同一类流程跨会话见过几次才真的建技能。
-PROMOTE_AFTER_SIGHTINGS = 2
+#:
+#: **跟随 memory_reflect 但不许更低。** 初版写死成 2，比记忆那边的 3 还松 —— 方向反了：
+#: 建一条技能比记一条记忆贵得多（会被自动注入、会抢命中）。现在直接取那边的值，
+#: 那边调严这边跟着严，那边放松这边不动。
+def _promote_after() -> int:
+    try:
+        from . import memory_reflect
+        return max(3, int(memory_reflect.PROMOTE_AFTER_SIGHTINGS))
+    except Exception:      # noqa: BLE001
+        return 3
+
+
+PROMOTE_AFTER_SIGHTINGS = _promote_after()
 #: 待定区最多攒多少条，防止无限长。
 MAX_PENDING = 50
 

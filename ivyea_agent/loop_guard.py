@@ -31,6 +31,9 @@ import threading
 DEFAULT_REPEAT_LIMIT = 3
 #: 连续多少个实质步骤没有产生新证据就判定空转。
 DEFAULT_STALL_LIMIT = 8
+#: 连续多少次调用**全是记账**就叫停。取 stall 的一半：记账本来就该穿插在干活之间，
+#: 连着这么多次一件实事没做，说明它在原地整理待办而不是在推进。
+DEFAULT_BOOKKEEPING_LIMIT = 4
 
 #: 轮询类：同参数反复调用是**正确用法**（等后台任务出新输出），两条计数都不参与。
 _POLLING_TOOLS = frozenset({"bash_output"})
@@ -63,9 +66,11 @@ class LoopGuard:
     """一轮的打转状态。`agent_loop` 每轮新建一个。"""
 
     def __init__(self, repeat_limit: int = DEFAULT_REPEAT_LIMIT,
-                 stall_limit: int = DEFAULT_STALL_LIMIT) -> None:
+                 stall_limit: int = DEFAULT_STALL_LIMIT,
+                 bookkeeping_limit: int = DEFAULT_BOOKKEEPING_LIMIT) -> None:
         self.repeat_limit = max(2, int(repeat_limit))
         self.stall_limit = max(3, int(stall_limit))
+        self.bookkeeping_limit = max(2, int(bookkeeping_limit))
         self._lock = threading.Lock()
         self._calls: dict[str, int] = {}          # 调用指纹 → 出现次数
         self._results: set[str] = set()           # 见过的 (工具, 结果) 指纹
@@ -76,6 +81,12 @@ class LoopGuard:
         # 不是参数。
         self._last_rejection: dict[str, str] = {}
         self._rejection_streak: dict[str, int] = {}
+        # 连续多少步只在记账、一次实质工作都没有。
+        #
+        # 这是复核时打出来的空档：**成功的**记账风暴此前谁也拦不住 —— todo_write 每次
+        # 参数都不同（参数指纹对不上）、结果都是成功（拒绝连击不触发）、又是记账类
+        # （不计空转）。实测 max_steps=5 的一轮跑满了 15 个模型步，全在写 todo。
+        self._bookkeeping_streak = 0
         # 「同一个工具连续碰壁」的连击数，**不要求拒绝一字不差**。实测里模型会在
         # 三四句不同的拒绝之间轮着撞，每句都不连续重复，于是上面那条也接不住。
         # 阈值放宽到两倍：轮着换做法本身是合理的，一直换不出去才是卡死。
@@ -116,6 +127,18 @@ class LoopGuard:
         return (f"已拦截重复调用：`{name}` 已经用**完全相同的参数**调用了 {self.repeat_limit} 次，"
                 "结果不会变。请停下来重列假设：换参数、换定位思路、换工具，"
                 "或者直接告诉用户你卡在哪、需要什么信息。")
+
+    def bookkeeping_feedback(self) -> str | None:
+        """连着只在记账、一件实事没做时的提示。未到阈值返回 None。"""
+        with self._lock:
+            if self._bookkeeping_streak < self.bookkeeping_limit:
+                return None
+            n = self._bookkeeping_streak
+            self._bookkeeping_streak = 0
+        return (f"已拦截：连续 {n} 次调用全是记账（todo_write / progress_update 这类），"
+                "一件实事都没做。计划已经列清楚了就去执行 —— 读文件、跑命令、查数据，"
+                "随便哪一步都行；如果是卡在汇报流程本身过不去，直接把卡点告诉用户，"
+                "不要继续在待办列表上来回改。")
 
     def stall_feedback(self) -> str | None:
         """空转到阈值时返回一段重规划提示；未到阈值返回 None。"""
@@ -158,7 +181,9 @@ class LoopGuard:
             if name not in _EXEMPT:
                 self._calls[key] = self._calls.get(key, 0) + 1
             if name in _META_TOOLS:
+                self._bookkeeping_streak += 1
                 return          # 记账调用既不算进展也不算空转
+            self._bookkeeping_streak = 0
             # 进展 = 这个工具吐出了**以前没见过的**内容。成功但结果一字不差
             # （同一份报错、同一份空列表）不算进展。
             if ok and result_key not in self._results:

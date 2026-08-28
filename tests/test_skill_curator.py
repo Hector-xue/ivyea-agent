@@ -124,14 +124,26 @@ def test_the_significance_gate(ivyea_home):
     assert skill_reflect.should_reflect(tool_steps=99, had_phases=True, had_evidence=True) is True
 
 
-def test_the_evidence_gate_needs_a_second_sighting(ivyea_home):
-    """一次性的具体任务不是技能。同一类流程跨会话再出现一次才算数。"""
-    assert skill_reflect.note_sighting("跑领星广告巡检并出动作", summary="第一次") == 1
-    assert skill_reflect.ready_to_promote("跑领星广告巡检并出动作") is False
-    assert skill_reflect.note_sighting("跑领星广告巡检并出动作", summary="第二次") == 2
-    assert skill_reflect.ready_to_promote("跑领星广告巡检并出动作") is True
-    skill_reflect.clear_pending("跑领星广告巡检并出动作")
-    assert skill_reflect.ready_to_promote("跑领星广告巡检并出动作") is False
+def test_the_evidence_gate_needs_repeat_sightings(ivyea_home):
+    """一次性的具体任务不是技能。同一类流程跨会话反复出现才算数。"""
+    kind = "跑领星广告巡检并出动作"
+    need = skill_reflect.PROMOTE_AFTER_SIGHTINGS
+    for i in range(1, need):
+        assert skill_reflect.note_sighting(kind, summary=f"第 {i} 次") == i
+        assert skill_reflect.ready_to_promote(kind) is False
+    assert skill_reflect.note_sighting(kind, summary="最后一次") == need
+    assert skill_reflect.ready_to_promote(kind) is True
+    skill_reflect.clear_pending(kind)
+    assert skill_reflect.ready_to_promote(kind) is False
+
+
+def test_the_skill_gate_is_never_looser_than_the_memory_gate():
+    """建一条技能比记一条记忆贵得多（会被自动注入、会抢命中）。门槛不许更松。
+
+    初版这里写死成 2，比 memory_reflect 的 3 还低 —— 方向反了。
+    """
+    from ivyea_agent import memory_reflect
+    assert skill_reflect.PROMOTE_AFTER_SIGHTINGS >= memory_reflect.PROMOTE_AFTER_SIGHTINGS
 
 
 def test_sighting_keys_are_normalised(ivyea_home):

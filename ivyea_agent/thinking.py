@@ -77,12 +77,31 @@ def apply_to(provider: Any, ctx: Any) -> str:
 
     provider 每个会话只构造一次（`from_settings` 在建会话时跑），所以自适应必须在
     **每轮开始时**改 `provider.reasoning_effort`，不能挂在构造那一步。
+
+    共享对象的隐患
+    --------------
+    `provider` 是**整条会话共用的一个对象**，子 agent 也是拿它去跑。所以这个赋值是在改
+    共享状态：子 agent 那一轮会把主线的档位覆盖掉，而且并行派发时是多个线程同时写同一个
+    属性。今天两边解析出来恰好都是 `high`（子 agent 的 ctx 没有 route_lane，落到 work），
+    所以还没出过事 —— 但那是巧合，不是设计。
+
+    所以这里加两道：**子 agent 的轮次不碰 provider**（它继承主线这一轮的档位就够了），
+    以及赋值前先看值是否真的变了，不变就不写。
     """
     if provider is None:
         return ""
     effort = resolve_for_context(ctx)
+    # 子 agent / 后台沉淀这类"内部轮次"不改共享 provider：它们没有自己的路线判断，
+    # 改了只会把主线刚定好的档位覆盖掉。
+    if getattr(ctx, "progress_reporting_disabled", False):
+        try:
+            ctx.thinking_effort = str(getattr(provider, "reasoning_effort", "") or "")
+        except Exception:   # noqa: BLE001
+            pass
+        return str(getattr(provider, "reasoning_effort", "") or "")
     try:
-        provider.reasoning_effort = effort
+        if getattr(provider, "reasoning_effort", None) != effort:
+            provider.reasoning_effort = effort
     except Exception:   # noqa: BLE001 —— 挂不上去就用 provider 自己的默认，不打断这一轮
         return ""
     try:

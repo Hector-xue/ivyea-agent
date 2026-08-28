@@ -139,3 +139,42 @@ def test_observe_still_works_without_a_budget():
     status.record_tool_call("read_file")
     status.observe_tool_result("read_file", ToolResult(True, "x"), {"path": "a.py"})
     assert status.tool_calls == 1
+
+
+# ── 天花板出口（复核时打出来的假话） ─────────────────────────────────────────
+def test_hitting_the_ceiling_is_a_distinct_stop_reason():
+    b = budget.TurnBudget(max_steps=5)
+    for _ in range(15):
+        b.consume("todo_write")          # 全是记账 → 预算一步没用
+    assert b.stop_reason() == ""         # 还没标记之前不算停
+    b.mark_ceiling()
+    assert b.stop_reason() == "ceiling"
+    assert b.steps_used == 0
+
+
+def test_the_ceiling_message_does_not_lie_or_misadvise():
+    """此前这里说"已达安全上限 5 步"（假：预算一步没用），
+    还建议把 chat_max_tool_steps 调到 10（无效：预算根本不是瓶颈）。"""
+    b = budget.TurnBudget(max_steps=5)
+    for _ in range(15):
+        b.consume("todo_write")
+    b.mark_ceiling()
+    text = agent_loop._limit_text(5, b)
+    assert "记账调用" in text
+    assert "不会有帮助" in text
+    assert "chat_max_tool_steps 10" not in text     # 别再给这条没用的建议
+
+
+def test_a_real_step_exhaustion_still_advises_raising_the_cap():
+    b = budget.TurnBudget(max_steps=3)
+    for _ in range(3):
+        b.consume("read_file")
+    assert b.stop_reason() == "steps"
+    assert "chat_max_tool_steps" in agent_loop._limit_text(3, b)
+
+
+def test_cost_outranks_ceiling():
+    b = budget.TurnBudget(max_steps=100, max_cost_cny=1.0)
+    b.add_cost(2.0)
+    b.mark_ceiling()
+    assert b.stop_reason() == "cost"     # 钱的优先级最高：要用户拍板的是它

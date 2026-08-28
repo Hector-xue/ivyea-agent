@@ -44,6 +44,7 @@ class TurnBudget:
         self.steps_used = 0          # 计进预算的调用数
         self.steps_refunded = 0      # 记账调用数（照常执行，不占配额）
         self.cost_cny = 0.0
+        self.hit_ceiling = False     # 是不是撞模型步数天花板停的（≠ 预算用完）
 
     # ── 步数 ────────────────────────────────────────────────────────────────
     def consume(self, tool_name: str = "") -> None:
@@ -73,12 +74,23 @@ class TurnBudget:
     def exhausted(self) -> bool:
         return self.steps_exhausted() or self.cost_exhausted()
 
+    def mark_ceiling(self) -> None:
+        """标记这一轮是撞**模型步数天花板**停的，而不是把预算用完了。
+
+        两者要分开：预算用完 = 真的干了这么多活，说"继续"就接着做；撞天花板 =
+        绝大多数步数花在记账上、预算根本没动，这时候叫用户去调 `chat_max_tool_steps`
+        是**帮倒忙**（预算从来不是瓶颈）。
+        """
+        self.hit_ceiling = True
+
     def stop_reason(self) -> str:
         """为什么停。空串=没停。"""
         if self.cost_exhausted():
             return "cost"
         if self.steps_exhausted():
             return "steps"
+        if getattr(self, "hit_ceiling", False):
+            return "ceiling"
         return ""
 
     def render(self) -> str:

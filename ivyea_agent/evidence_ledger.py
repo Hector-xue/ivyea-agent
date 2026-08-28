@@ -36,7 +36,8 @@ from . import config, security
 
 DB_PATH = config.IVYEA_DIR / "evidence.db"
 
-#: 过期清理阈值。证据是"最近证明过什么"，半年前的没有参考价值，白占地方。
+#: 过期清理阈值。证据回答的是"最近证明过什么"，一个月前跑通的命令对今天的判断已经
+#: 没有参考价值（代码早就变了），留着只是占地方。
 MAX_AGE_DAYS = 30
 #: 每次写入有 1/N 的概率顺手清一次过期数据。没有后台任务，也不值得为它开一个。
 _PRUNE_EVERY = 50
@@ -57,8 +58,11 @@ _TOOL_KIND = {
     "rollback": "write",
 }
 
-#: 从工具输出里抠退出码。三种写法都在用（tools_general / code_agent / 后台任务收尾）。
-_EXIT_RE = re.compile(r"退出码\s*(-?\d+)|returncode=(-?\d+)|已结束（exit=(-?\d+)")
+#: 从工具输出里抠退出码。**代码库里实际只有这两种写法**（核过：`[退出码 N]`、
+#: `已结束（退出码 N）`、`已经结束（退出码 N）` 都被第一个分支覆盖；`returncode=N` 是
+#: self_manage 的格式）。此前这里还有第三个分支 `已结束（exit=`，那个字符串在本仓
+#: **一次都没出现过** —— 是从 agent_loop 一处既有的死判据抄来的，没核。
+_EXIT_RE = re.compile(r"退出码\s*(-?\d+)|returncode=(-?\d+)")
 
 _CLIP = 300
 
