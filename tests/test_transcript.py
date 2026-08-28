@@ -36,6 +36,7 @@ def test_completion_gate_output_is_recognized():
 
     status = agent_loop.TurnStatus(max_steps=8, behavioral_task=True)
     status.wrote_code = True
+    status.wrote_code_files = True   # 行为门禁只认真代码改动；纯文档轮不该被逼着跑运行路径
     fb = agent_loop._verify_gate_feedback(ToolContext(), status, lambda _: None)
     assert fb and transcript.is_injected_user_message(fb)
 

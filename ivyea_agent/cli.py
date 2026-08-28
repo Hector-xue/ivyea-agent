@@ -1632,6 +1632,7 @@ SLASH_COMMANDS = [
     ("/tools", "列出 Agent 可用工具"),
     ("/knowledge", "搜索内置亚马逊知识库：/knowledge 否词"),
     ("/skill", "搜索可复用运营 Skill：/skill listing"),
+    ("/learn", "把一段流程/一个目录/一个网页/刚才做的事，学成可复用 Skill"),
     ("/workspace", "项目理解：/workspace map|search|explain"),
     ("/patch", "结构化补丁：/patch make|validate|apply|tests"),
     ("/gitops", "Git 工作流：/gitops status|diff|stage|commit|tag"),
@@ -1639,7 +1640,8 @@ SLASH_COMMANDS = [
     ("/memory", "记忆：状态/分类记忆/核心记忆；/memory <词> 检索"),
     ("/reflect", "把最近的零散经历提炼成分类记忆（会话结束也会自动跑）"),
     ("/profile", "查看/配置运营画像（目标 ACoS/保护词/核心词）"),
-    ("/plan", "进入/退出计划模式（只读，不写入）"),
+    ("/plan", "进入/退出计划模式（只读，不写入）；/plan show 看当前计划"),
+    ("/resume", "接着上一轮没做完的继续（计划 + 已有证据一起带上）"),
     ("/approve", "批准并退出计划模式，继续执行"),
     ("/cost", "本会话 token 用量与成本估算"),
     ("/compact", "压缩上下文；/compact auto on|off 控制自动压缩"),
@@ -1658,8 +1660,8 @@ SLASH_COMMANDS = [
 _SLASH_GROUPS = [
     ("模型 / 配置", ["/model", "/config", "/status", "/mcp"]),
     ("代码 / 工程", ["/diff", "/workspace", "/patch", "/gitops", "/tools"]),
-    ("会话控制", ["/plan", "/approve", "/auto-edit", "/raw", "/stream", "/compact", "/cost", "/clear"]),
-    ("知识 / 记忆", ["/knowledge", "/skill", "/memory", "/reflect", "/init"]),
+    ("会话控制", ["/plan", "/approve", "/resume", "/auto-edit", "/raw", "/stream", "/compact", "/cost", "/clear"]),
+    ("知识 / 记忆", ["/knowledge", "/skill", "/learn", "/memory", "/reflect", "/init"]),
     ("系统", ["/help", "/exit"]),
 ]
 _SLASH_ALIASES = {"/h": "/help", "/?": "/help", "/q": "/exit", "/quit": "/exit"}
@@ -2007,6 +2009,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         """Shift+Tab 循环：普通 → 自动接受编辑 → 计划模式 → 普通。返回新模式名。"""
         if ctx.plan_mode:
             ctx.plan_mode = False; ctx.perm.accept_edits = False; label = "普通"
+            _approve_plan_note()    # 手动切出计划模式同样视为批准（与 /plan 一致）
         elif ctx.perm.accept_edits:
             ctx.perm.accept_edits = False; ctx.plan_mode = True; label = "计划模式"
         else:
@@ -2044,21 +2047,42 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if on:
             return ui.message("info", "已进入计划模式（只读，不写入；说“退出计划模式”或 /approve 后执行）。"
                                       "复杂任务建议先 /model 切更强主脑。")
-        return ui.message("success", "已退出计划模式。")
+        # 用户亲手退出计划模式 = 认可这份计划。不这么算的话，待批准的计划会在下一次
+        # 写操作时被拦下，用户只会觉得"我明明已经让它出去干活了"。
+        return ui.message("success", "已退出计划模式。" + _approve_plan_note())
 
     def _set_plan_mode(on: bool) -> None:
         print(_set_plan_mode_msg(on))
 
     def _sh_plan(line):
+        if (line or "").split()[1:2] == ["show"]:
+            return _sh_plan_show(line)
         _set_plan_mode(not ctx.plan_mode); return True
+
+    def _approve_plan_note() -> str:
+        """给当前会话的计划盖批准戳，返回一句可以直接接在提示后面的说明。"""
+        from . import plan_store
+        plan = plan_store.approve(sid or "", by="user")
+        if not plan or not (plan.get("steps") or []):
+            return ""
+        path = plan_store.path_for(sid or "")
+        return f"计划已批准（{len(plan['steps'])} 步，{path}）。"
+
+    def _sh_plan_show(line):
+        from . import plan_store
+        print(plan_store.render_human(sid or ""))
+        return True
 
     def _sh_approve(line):
         if ctx.plan_mode:
             ctx.plan_mode = False
             messages[0] = _sys_msg()
-            print(ui.message("success", "已批准，退出计划模式。说“继续/执行”让我落地计划。"))
+            print(ui.message("success", "已批准，退出计划模式。说“继续/执行”让我落地计划。"
+                                        + _approve_plan_note()))
         else:
-            print(ui.message("warn", "当前不在计划模式。"))
+            note = _approve_plan_note()
+            print(ui.message("success", note) if note
+                  else ui.message("warn", "当前不在计划模式，也没有待批准的计划。"))
         return True
 
     def _sh_cost(line):
@@ -2237,11 +2261,15 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
     def _sh_think(line):
         """查看/切换思考深度旋钮（reasoning_effort）：影响 codex/claude/gemini/推理型模型的思考预算。"""
-        levels = ("off", "low", "medium", "high", "auto")
+        from . import thinking as _thinking
+        levels = _thinking.LEVELS
         parts = line.split(None, 1)
-        cur = str(cfg.get_setting("reasoning_effort", "high") or "high").lower()
+        cur = str(cfg.get_setting("reasoning_effort", _thinking.DEFAULT_EFFORT)
+                  or _thinking.DEFAULT_EFFORT).lower()
         if len(parts) == 1:
-            print(ui.message("info", f"当前思考深度：{cur}。切换：/think {'|'.join(levels)}"))
+            print(ui.message("info", f"当前思考深度：{cur}。切换：/think {'|'.join(levels)}\n"
+                                     "  adaptive = 按本轮性质自动定档（寒暄降到 low，其余仍按 high）；\n"
+                                     "  auto = 交给模型自己决定（各家含义不同），与 adaptive 不是一回事。"))
             return True
         lvl = parts[1].strip().lower()
         if lvl not in levels:
@@ -2360,6 +2388,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         # （见 ADR-0010）。**ctx 在终端里跨轮复用**，所以这一行每轮都要赋值 ——
         # 只在命中时置 True 的话，一句"你好"会把汇报纪律一路关到下一个真任务上。
         route = routing.classify(line, ops_bridge=bool(getattr(ctx, "ops_bridge", None)))
+        ctx.route_lane = route.lane      # 供 thinking.apply_to 按路线定思考深度
         ctx.progress_reporting_disabled = route.is_chat or route.is_board
         scope_note = task_scope.prepare_query(ctx, line, messages, base=os.getcwd())
         # 闲聊不扫工程上下文：那是一次真实的目录扫描，为一句问候跑它纯属浪费。
@@ -2425,7 +2454,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if ctx.todos:                        # 供 TUI 在轮末渲染计划面板（与行式对齐）
             from . import panels as _panels
             out["todos_panel"] = _panels.render_todos(ctx.todos, color=True)
-        if ctx_mod.should_compact(int((out.get("usage") or {}).get("prompt_tokens") or 0)):
+        # worth_compacting：阈值到了还得压得动。阈值低于 system 提示词时用量永远在阈值
+        # 之上，少了这一句就是每轮都压、每轮都白压（手动 /compact 不受这道闸限制）。
+        if (ctx_mod.should_compact(int((out.get("usage") or {}).get("prompt_tokens") or 0))
+                and ctx_mod.worth_compacting(messages)):
             messages, _s = ctx_mod.compact(messages, provider)
             if _s:
                 memory.remember_summary(_s, sid)
@@ -2504,7 +2536,24 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             _handler = _SLASH_HANDLERS.get(line.split()[0])
             if _handler is not None:
                 _handler(line); continue
-            if line.startswith("/"):   # 自定义命令展开（展开后贯穿到模型轮）/ 未知命令
+            if line.split()[0] == "/resume":
+                from . import plan_store as _ps
+                _note = _ps.render_note(sid or "")
+                if not _note:
+                    print(ui.message("info", "当前会话没有未完成的计划，没什么可续的。")); continue
+                _extra = line[len("/resume"):].strip()
+                line = ("接着上一轮没做完的继续。先看下面的计划状态，从第一个还没进终态的步骤接着做；"
+                        "已经成功过的工具调用不要重复。\n\n" + _note
+                        + (("\n\n补充要求：" + _extra) if _extra else ""))
+                print(ui.message("muted", "已带上计划与进度，继续…"))
+            elif line.split()[0] == "/learn":
+                # /learn 不是一条"执行完就完"的命令，而是把用户这句话编译成一轮指令、
+                # 交给模型用它已有的工具去做（读素材 → skill_write 落盘）。所以在这里
+                # 展开成 prompt 贯穿到下面的模型轮，与自定义命令走同一条路。
+                from . import learn_prompt as _lp
+                line = _lp.build_learn_prompt(line[len("/learn"):].strip())
+                print(ui.message("muted", "开始学习并沉淀技能…"))
+            elif line.startswith("/"):   # 自定义命令展开（展开后贯穿到模型轮）/ 未知命令
                 from . import commands as _cmds
                 _head = line.split()[0]
                 _expanded = _cmds.expand(_head[1:], line[len(_head):].strip())
@@ -2539,6 +2588,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             from . import engineering_context, knowledge, routing, skills, task_scope
             # 同上（TUI 那一份的注释）：路线判定与 serve 共用，且每轮都要赋值。
             route = routing.classify(line, ops_bridge=bool(getattr(ctx, "ops_bridge", None)))
+            ctx.route_lane = route.lane      # 供 thinking.apply_to 按路线定思考深度
             ctx.progress_reporting_disabled = route.is_chat or route.is_board
             scope_note = task_scope.prepare_query(ctx, line, messages, base=os.getcwd())
             ectx = "" if route.is_chat else engineering_context.build(ctx.workspace or os.getcwd(), line)
@@ -2641,7 +2691,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 if hint:
                     print(f"{_C['d']}  💡 {hint}{_C['x']}")
                 # 自动压缩默认关闭；长上下文只提醒，避免完整任务中途被压缩打断。
-                if ctx_mod.should_compact(int((out.get('usage') or {}).get('prompt_tokens') or 0)):
+                if (ctx_mod.should_compact(int((out.get('usage') or {}).get('prompt_tokens') or 0))
+                        and ctx_mod.worth_compacting(messages)):
                     messages, _s = ctx_mod.compact(messages, provider)
                     if _s:
                         memory.remember_summary(_s, sid)
@@ -2656,6 +2707,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 messages.pop()  # 撤回这条 user，避免污染上下文
     finally:
         _auto_reflect(cfg, narrate=not _oneshot)
+        _auto_learn_skill(ctx, sid or "", meter)
         _hooks.fire("session_end", {"session_id": sid or "", "turns": meter.turns,
                                     "cost": round(meter.cost, 6)})
 
@@ -2719,6 +2771,39 @@ def _record_turn_memory(args, user_text: str, assistant_text: str, sid: str) -> 
         memory_reflect.maybe_reflect_async()
     except Exception:  # noqa: BLE001 —— 记忆是副作用，绝不能吃掉这一轮
         pass
+
+
+def _auto_learn_skill(ctx, session_id: str, meter) -> None:
+    """会话结束时问一句"这一轮有没有值得沉淀成技能的流程"。**默认关。**
+
+    默认关不是保守，是具体的：技能会被自动注入进后续对话、实打实改变模型行为。
+    让后台程序自动往里加东西，第一次误判就会污染检索。先让用户用一段时间 `/learn`
+    看清楚它的水准，再决定要不要放开（`ivyea config set skill_auto_learn true`）。
+    """
+    try:
+        from . import evidence_ledger, plan_store, skill_reflect
+        if not skill_reflect.enabled():
+            return
+        plan = plan_store.load(session_id) or {}
+        steps = plan.get("steps") or []
+        digest_parts = []
+        if plan.get("objective"):
+            digest_parts.append(f"目标：{plan['objective']}")
+        for step in steps:
+            digest_parts.append(f"- {step.get('content')}（{step.get('status')}）"
+                                + (f"：{step['evidence'][-1]}" if step.get("evidence") else ""))
+        evidence = evidence_ledger.render(session_id=session_id, limit=12)
+        digest_parts.extend("- " + e for e in evidence)
+        if not digest_parts:
+            return
+        skill_reflect.maybe_reflect_async(
+            "\n".join(digest_parts),
+            tool_steps=len(evidence) + len(steps),
+            had_phases=len(steps) >= 2,
+            had_evidence=bool(evidence),
+        )
+    except Exception:      # noqa: BLE001 —— 沉淀失败绝不影响退出
+        return
 
 
 def _auto_reflect(cfg, *, narrate: bool = True) -> None:
@@ -3244,6 +3329,47 @@ def _cmd_skill(args: argparse.Namespace) -> int:
     if args.action == "status":
         print(skills.render_status())
         return 0
+    if args.action == "usage":
+        from . import skill_usage
+        print(skill_usage.render([sk.id for sk in skills.list_skills()]))
+        archived = skills.list_archive()
+        if archived:
+            print("\n已归档（`ivyea skill restore <名字>` 可恢复）：")
+            for name in archived:
+                print("  " + name)
+        return 0
+    if args.action == "curate":
+        from . import skill_curator
+        report = skill_curator.analyze(dormant_days=args.dormant_days)
+        print(skill_curator.render(report, dormant_days=args.dormant_days))
+        if args.apply:
+            done = skill_curator.apply_archive(report, dormant_days=args.dormant_days)
+            print(f"\n已归档 {len(done)} 条：{'、'.join(done) or '（无）'}"
+                  "\n（只归档不删除，`ivyea skill restore <名字>` 可恢复；"
+                  "重合与不合格项不自动处理——那两件事得你拍板。）")
+        return 0
+    if args.action == "archive":
+        if not args.query:
+            print("用法: ivyea skill archive <skill_id>", file=sys.stderr)
+            return 2
+        try:
+            dest = skills.archive_skill(args.query)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            print(f"归档失败：{e}", file=sys.stderr)
+            return 1
+        print(f"已归档 → {dest}（`ivyea skill restore {dest.name}` 可恢复；只移动不删除）")
+        return 0
+    if args.action == "restore":
+        if not args.query:
+            print("用法: ivyea skill restore <归档目录名>（`ivyea skill usage` 里能看到）", file=sys.stderr)
+            return 2
+        try:
+            dest = skills.restore_skill(args.query)
+        except (FileNotFoundError, FileExistsError, OSError) as e:
+            print(f"恢复失败：{e}", file=sys.stderr)
+            return 1
+        print(f"已恢复 → {dest}")
+        return 0
     if args.action == "export-lock":
         path = skills.write_lockfile(args.output)
         print(f"已写入 skill lockfile：{path}")
@@ -3285,6 +3411,30 @@ def _cmd_skill(args: argparse.Namespace) -> int:
         print(skills.render_skill(sk, include_knowledge=True))
         return 0
     return 2
+
+
+def _cmd_agents(_args: argparse.Namespace) -> int:
+    from . import subagents
+    print(subagents.render_list())
+    return 0
+
+
+def _cmd_learn(args: argparse.Namespace) -> int:
+    """`ivyea learn ...` = 把请求编译成指令，交给一轮非交互对话去做。
+
+    刻意复用 `chat -p` 那条路而不是另起炉灶：学技能需要的能力（读目录、抓网页、
+    落盘）agent 全都有，再造一条管线只会多出一处要单独维护、单独适配各家 provider 的代码。
+    """
+    from . import learn_prompt
+    # 默认值**从 chat 解析器自己拿**，不手工列一遍：手抄的清单会随 chat 加参数而过期，
+    # 而过期的表现是 learn 直接 AttributeError 崩掉（已经栽过一次）。
+    ns = build_parser().parse_args(["chat"])
+    for key, value in vars(args).items():
+        if key != "request":
+            setattr(ns, key, value)
+    ns.func = _cmd_chat
+    ns.print_prompt = learn_prompt.build_learn_prompt(" ".join(args.request))
+    return _cmd_chat(ns)
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -4649,8 +4799,13 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--note", help="审核备注")
     pk.set_defaults(func=_cmd_knowledge)
 
-    pski = sub.add_parser("skill", help="可复用 Skill：list/search/show/run/create/audit/status/export-lock")
-    pski.add_argument("action", choices=["list", "search", "show", "run", "create", "audit", "status", "export-lock"])
+    pski = sub.add_parser("skill", help="可复用 Skill：list/search/show/run/create/audit/status/usage/curate/archive/restore/export-lock")
+    pski.add_argument("action", choices=["list", "search", "show", "run", "create", "audit",
+                                         "status", "usage", "curate", "archive", "restore",
+                                         "export-lock"])
+    pski.add_argument("--apply", action="store_true",
+                      help="curate：把沉睡技能真的归档（默认只打印建议；归档可 restore）")
+    pski.add_argument("--dormant-days", type=int, default=60, help="curate：多久没命中算沉睡")
     pski.add_argument("query", nargs="?")
     pski.add_argument("--limit", type=int, default=8)
     pski.add_argument("--title")
@@ -4664,6 +4819,20 @@ def build_parser() -> argparse.ArgumentParser:
     pski.add_argument("--output")
     pski.add_argument("--force", action="store_true")
     pski.set_defaults(func=_cmd_skill)
+
+    pag = sub.add_parser("agents", help="查看可用的子 agent 分工角色（含 ~/.ivyea/agents/*.md 自定义）")
+    pag.set_defaults(func=_cmd_agents)
+
+    ple = sub.add_parser("learn", help="把一段流程/目录/网页学成可复用 Skill（跑一轮 agent）")
+    ple.add_argument("request", nargs="+", help="素材与要求，可混写：路径 / URL / 一段描述")
+    # 这几个是审批/模型档位，和 chat 同名同义 —— learn 内部就是跑一轮 chat -p。
+    ple.add_argument("--approve-all", action="store_true", help="本轮写操作自动放行（不逐条审批）")
+    ple.add_argument("--permission-mode", dest="permission_mode",
+                     choices=["default", "policy", "approve-all"], default="default")
+    ple.add_argument("--model", help="本轮覆盖主脑模型")
+    ple.add_argument("--output-format", dest="output_format", choices=["text", "stream-json"],
+                     default="text")
+    ple.set_defaults(func=_cmd_learn)
 
     pch = sub.add_parser("chat", help="对话式 Agent（自然语言 + 斜杠命令 + 人工审批）")
     pch.add_argument("--from-mcp", dest="from_mcp", help="执行/拉数用的 MCP 服务器")

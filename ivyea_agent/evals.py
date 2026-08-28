@@ -152,11 +152,48 @@ def run() -> dict[str, Any]:
         "detail": f"cards={kidx['cards']} fts={kidx['fts']}",
     })
 
-    shits = skills.search("listing 转化 主图", limit=5)
+    # ── 技能召回 golden set ──────────────────────────────────────────────────
+    #
+    # 一条正例是测不出检索质量的：改检索时最容易出的事故不是"该召的没召"，
+    # 而是"不该召的召了"。skills.py 的 _STOP_GRAMS 上面记着那次真实事故 ——
+    # 「为什么我的模型配置页面报错」以 22 分命中了 ASIN 审计手册，用户的原话是
+    # "不管什么问题，任务台第一句好多都是：匹配最合适的技能 ✦ Amazon ASIN COSMO"。
+    # 所以**反例和正例一起进 golden set**，而且反例走 named_only=True（自动注入那条路）。
+    _SKILL_SHOULD_HIT = [
+        ("listing 转化 主图", "amazon.listing_conversion_audit"),
+        ("搜索词报表怎么优化", "amazon.search_term_optimizer"),
+        ("预算怎么分配", "amazon.budget_pacing"),
+        ("否词会不会误伤品牌词", "amazon.negative_keyword_guard"),
+        ("这个 ASIN 值不值得做", "amazon.asin_cosmo_rufus_audit"),
+    ]
+    #: 这些查询与亚马逊运营无关，**自动注入一条都不该命中**。
+    _SKILL_SHOULD_MISS = [
+        "为什么我的模型配置页面报错",
+        "帮我看一下这个报错是什么意思",
+        "测试",
+        "你好，在吗",
+        "把这个函数重构一下",
+    ]
+    hit_rows, miss_rows = [], []
+    for query, want in _SKILL_SHOULD_HIT:
+        got = [sk.id for sk, _ in skills.search(query, limit=5)]
+        hit_rows.append((query, want, want in got, got[:3]))
+    for query in _SKILL_SHOULD_MISS:
+        _text, ids = skills.context_for_query(query, limit=2)
+        miss_rows.append((query, ids))
+    hit_ok = sum(1 for _q, _w, ok, _g in hit_rows if ok)
+    false_positives = [(q, ids) for q, ids in miss_rows if ids]
     checks.append({
-        "name": "skill.listing_recall",
-        "ok": any(sk.id == "amazon.listing_conversion_audit" for sk, _ in shits),
-        "detail": ",".join(sk.id for sk, _ in shits),
+        "name": "skill.recall",
+        "ok": hit_ok == len(hit_rows),
+        "detail": f"{hit_ok}/{len(hit_rows)} 命中；未命中："
+                  + "；".join(f"{q}→{g}" for q, _w, ok, g in hit_rows if not ok),
+    })
+    checks.append({
+        "name": "skill.no_false_inject",
+        "ok": not false_positives,
+        "detail": ("无误注入" if not false_positives else
+                   "；".join(f"{q}→{ids}" for q, ids in false_positives)),
     })
 
     redacted = security.redact_text("api_key=sk-test1234567890abcdef")

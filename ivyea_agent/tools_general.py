@@ -898,6 +898,18 @@ def t_todo_write(args: dict, ctx) -> str:
     if clean != list(getattr(ctx, "todos", []) or []):
         ctx.progress_final = {}
     ctx.todos = clean
+    # 计划同时落台账：ctx.todos 只是缓存，掉电即失，而计划要能扛住压缩、重启和续跑。
+    # 没有 session_id（只读子 agent、裸 ToolContext）时 plan_store 整个空转，行为不变。
+    try:
+        from . import plan_store
+        plan_store.sync_todos(
+            getattr(ctx, "session_id", "") or "", clean,
+            task_id=getattr(ctx, "task_id", "") or "",
+            query=getattr(ctx, "progress_query", "") or "",
+            plan_mode=bool(getattr(ctx, "plan_mode", False)),
+        )
+    except Exception:  # noqa: BLE001 —— 台账写不进去不该让计划更新失败
+        pass
     if not clean:
         return "计划已清空。"
     done = sum(1 for t in clean if t["status"] == "completed")
@@ -924,6 +936,25 @@ def _task_id(args: dict, ctx) -> str:
     return str(args.get("task_id") or getattr(ctx, "task_id", "") or "").strip()
 
 
+def _plan_owns_steps_hint(ctx) -> str:
+    """会话已有计划时，提醒模型步骤的真相在计划台账那边。
+
+    ADR-0026 之后任务文件的 `steps` 是计划的**投影**：下一次 `todo_write` 会把整张表
+    按计划重写一遍，`task_step` 单独改的状态到那时就没了。这里只出一句提示、不拦下
+    调用 —— 没绑会话（纯 CLI `ivyea task step`）的老用法必须一字不差地照旧能用。
+    """
+    try:
+        from . import plan_store
+        plan = plan_store.load(getattr(ctx, "session_id", "") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+    if not plan or not (plan.get("steps") or []):
+        return ""
+    return ("\n\n提示：本会话的步骤真相是计划台账，任务文件里的 steps 是它的投影。"
+            "请用 todo_write 推进步骤 —— 下一次 todo_write 会按计划重写这张表，"
+            "这次 task_step 的改动到那时会被覆盖。")
+
+
 def t_task_read(args: dict, ctx) -> str:
     task_id = _task_id(args, ctx)
     if not task_id:
@@ -947,7 +978,7 @@ def t_task_step(args: dict, ctx) -> str:
             str(args.get("status") or ""),
             note=str(args.get("notes") or args.get("note") or ""),
         )
-        return _truncate(task_runner.render(task))
+        return _truncate(task_runner.render(task) + _plan_owns_steps_hint(ctx))
     except Exception as e:  # noqa: BLE001
         return f"更新任务步骤失败：{e}"
 
@@ -988,10 +1019,122 @@ def t_self_critique(args: dict, ctx) -> str:
     if not draft:
         return "draft 为空：把你准备交付的最终答案放进 draft 再自查。"
     provider = getattr(ctx, "provider", None)
-    res = _crit.critique(args.get("task") or "", draft, provider)
+    res = _crit.critique(args.get("task") or "", draft, provider, kind=str(args.get("kind") or ""))
     if not res.get("ok"):
         return res.get("note") or "自我批判不可用。"
     return _truncate(res["markdown"] or "未见明显问题。")
+
+
+def t_skill_view(args: dict, ctx) -> str:
+    """读技能全文，或读技能目录下的附属文件（只读，自动放行）。
+
+    这个工具补的是一个硬伤：自动注入只给正文开头一段，而剩下的部分此前**根本够不着**。
+    """
+    from . import skills as _skills
+    skill_id = str(args.get("skill_id") or "").strip()
+    if not skill_id:
+        return "skill_id 为空。先用 skill_search 找到技能 id。"
+    sk = _skills.get_skill(skill_id)
+    if sk is None:
+        near = _skills.render_search(skill_id, limit=5)
+        return f"未找到 skill：{skill_id}\n相近的：\n{near}"
+    rel = str(args.get("file_path") or "").strip()
+    try:
+        from . import skill_usage
+        skill_usage.record(sk.id, query=rel or "全文", source="view")
+    except Exception:  # noqa: BLE001
+        pass
+    if rel:
+        try:
+            return _truncate(_skills.read_asset(sk, rel))
+        except (ValueError, FileNotFoundError, OSError) as e:
+            assets = _skills.list_assets(sk)
+            listing = "、".join(assets[:20]) if assets else "（这个技能没有附属文件）"
+            return f"{e}\n可读的附属文件：{listing}"
+    text = _skills.render_skill(sk, include_knowledge=True)
+    assets = _skills.list_assets(sk)
+    if assets:
+        text += ("\n\n附属文件（用 file_path 参数按需读）：\n"
+                 + "\n".join(f"- {a}" for a in assets[:30]))
+    return _truncate(text, 24000)
+
+
+def _skill_write_meta(args: dict) -> dict:
+    return {
+        "name": str(args.get("name") or "").strip(),
+        "description": str(args.get("description") or "").strip(),
+        "triggers": [str(t).strip() for t in (args.get("triggers") or []) if str(t).strip()],
+        "tools": [str(t).strip() for t in (args.get("tools") or []) if str(t).strip()],
+        "knowledge_ids": [str(k).strip() for k in (args.get("knowledge_ids") or []) if str(k).strip()],
+        "version": str(args.get("version") or "").strip() or "0.1.0",
+    }
+
+
+def t_skill_write(args: dict, ctx) -> str:
+    """新建/改写技能、写附属文件、归档（写操作，走审批）。
+
+    落盘前先过 `skill_authoring.validate`：**校验不过直接拒绝**，不写半成品。
+    规范写成代码而不是写进 prompt —— 只要不可执行，规范就一定会慢慢烂掉。
+    """
+    from . import skill_authoring, skills as _skills
+    action = str(args.get("action") or "write").strip().lower()
+    skill_id = str(args.get("skill_id") or "").strip()
+    if not skill_id:
+        return "skill_id 为空。用 domain.name 的形式，如 lingxing.ad_patrol。"
+
+    if action == "archive":
+        preview = f"归档技能 {skill_id}（移进 _archive/，可恢复，不删除）"
+        ok, msg = _gate(ctx, "skill_write", preview, detail={"skill_id": skill_id})
+        if not ok:
+            return msg
+        try:
+            dest = _skills.archive_skill(skill_id)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            return f"归档失败：{e}"
+        return f"已归档 {skill_id} → {dest}（`ivyea skill restore {dest.name}` 可恢复）"
+
+    if action == "write_file":
+        rel = str(args.get("file_path") or "").strip()
+        content = args.get("content") or ""
+        if not rel:
+            return "file_path 为空：附属文件要给相对路径，如 references/ch01.md 或 scripts/run.py。"
+        preview = f"写技能附属文件 {skill_id}/{rel}（{len(content)} 字）"
+        ok, msg = _gate(ctx, "skill_write", preview, detail={"skill_id": skill_id, "path": rel})
+        if not ok:
+            return msg
+        try:
+            path = _skills.write_skill_asset(skill_id, rel, content)
+        except (ValueError, OSError) as e:
+            return f"写入失败：{e}"
+        return f"已写入 {path}"
+
+    # write / create：正文 + 元信息，落 SKILL.md
+    meta = _skill_write_meta(args)
+    if not meta["name"]:
+        meta["name"] = skill_id.rpartition(".")[2] or skill_id
+    body = args.get("body") or ""
+    result = skill_authoring.validate(meta, body)
+    report = skill_authoring.render_report(result)
+    if not result["ok"]:
+        return ("技能未写入 —— 校验没过：\n" + report +
+                "\n\n改完再调一次 skill_write。这些是硬规则，不是建议：不满足的技能"
+                "要么检索不到、要么读的人会被带偏。")
+    exists = _skills.get_skill(skill_id) is not None
+    preview = (f"{'改写' if exists else '新建'}技能 {skill_id}：{meta['description']}\n"
+               f"触发词：{'、'.join(meta['triggers'])}\n正文 {len(body)} 字")
+    if report:
+        preview += "\n校验提醒：\n" + report
+    ok, msg = _gate(ctx, "skill_write", preview, detail={"skill_id": skill_id})
+    if not ok:
+        return msg
+    try:
+        path = _skills.write_user_skill(skill_id, meta, body)
+    except (ValueError, FileExistsError, OSError) as e:
+        return f"写入失败：{e}"
+    out = f"已{'改写' if exists else '新建'}技能 {skill_id} → {path}"
+    if report:
+        out += "\n（还有几点建议，不影响使用）\n" + report
+    return out
 
 
 # ── schema + dispatch ────────────────────────────────────────────────────────
@@ -1095,8 +1238,39 @@ GENERAL_TOOL_SCHEMAS = [
     _fn("self_critique", "收尾前自查：把你准备交付的最终答案放进 draft，用当前主脑按 rubric 复核"
         "(需求吻合/事实可靠/关键遗漏/验证到位)，返回简短批判。高风险或复杂任务交付前建议先自调一次。只读。",
         {"draft": {"type": "string", "description": "准备交付给用户的最终答案全文"},
-         "task": {"type": "string", "description": "可选：本次任务/需求，帮助判断是否答非所问"}},
+         "task": {"type": "string", "description": "可选：本次任务/需求，帮助判断是否答非所问"},
+         "kind": {"type": "string", "enum": ["code", "ads", "knowledge", "general"],
+                  "description": "可选：交付类型，决定用哪套复核维度；不填按通用"}},
         ["draft"]),
+    _fn("skill_view", "读某个技能的**全文**，或读它目录下的附属文件（references/ scripts/ "
+        "templates/）。只读，自动放行。自动注入只给正文开头一段——要照着技能真正动手前，"
+        "先用它读全文，别凭那一小段就开干。",
+        {"skill_id": {"type": "string", "description": "技能 id，先用 skill_search 找"},
+         "file_path": {"type": "string",
+                       "description": "可选：技能目录下的相对路径，如 references/ch01.md；"
+                                      "不填=读技能正文全文"}},
+        ["skill_id"]),
+    _fn("skill_write", "新建/改写技能、写技能附属文件、归档技能（写操作，会弹审批）。"
+        "刚走完一套值得复用的流程时用它沉淀下来。落盘前会校验：name 要小写连字符、"
+        "description 必填且是一句话、**triggers 必填**（检索不分词，中文全靠触发词命中）、"
+        "正文非空。校验不过会直接拒绝并告诉你差什么。",
+        {"action": {"type": "string", "enum": ["write", "write_file", "archive"],
+                    "description": "write=写技能正文(SKILL.md)；write_file=写附属文件；archive=归档(可恢复)"},
+         "skill_id": {"type": "string", "description": "domain.name 形式，如 lingxing.ad_patrol"},
+         "name": {"type": "string", "description": "技能名，小写连字符，如 lingxing-ad-patrol"},
+         "description": {"type": "string", "description": "一句话说清它做什么（进检索范围，别写营销词）"},
+         "triggers": {"type": "array", "items": {"type": "string"},
+                      "description": "3-8 个用户真会打出来的**短词**（2-6 字）"},
+         "tools": {"type": "array", "items": {"type": "string"}, "description": "可选：这技能会用到的工具名"},
+         "knowledge_ids": {"type": "array", "items": {"type": "string"},
+                           "description": "可选：关联的知识卡 id，必须真实存在"},
+         "version": {"type": "string", "description": "可选，默认 0.1.0"},
+         "body": {"type": "string",
+                  "description": "action=write 时的正文 Markdown。建议小节：何时使用/前置条件/"
+                                 "怎么跑/速查/步骤/坑/验证"},
+         "file_path": {"type": "string", "description": "action=write_file 时的相对路径"},
+         "content": {"type": "string", "description": "action=write_file 时的文件内容"}},
+        ["action", "skill_id"]),
     _fn("task_read", "读取当前绑定的 Ivyea 长任务状态、步骤和最近事件。续跑任务时应先调用。",
         {"task_id": {"type": "string", "description": "可选；不传则使用当前对话绑定的 task_id"}}),
     _fn("task_step", "更新当前绑定的 Ivyea 长任务步骤状态。用于执行过程中标记 in_progress/completed/blocked。",
@@ -1133,6 +1307,8 @@ GENERAL_DISPATCH = {
     "todo_write": t_todo_write,
     "progress_update": t_progress_update,
     "self_critique": t_self_critique,
+    "skill_view": t_skill_view,
+    "skill_write": t_skill_write,
     "task_read": t_task_read,
     "task_step": t_task_step,
     "task_log": t_task_log,

@@ -1748,6 +1748,7 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
         has_attachments=bool(payload.get("images") or payload.get("attachments")
                              or payload.get("references")),
     )
+    ctx.route_lane = route.lane      # 供 thinking.apply_to 按路线定思考深度
     if route.is_chat or route.is_board:
         # 闲聊没有阶段可汇报；板块工具本身就是一次长任务、自己会回报进度 ——
         # 这两种情况下 todo + 阶段汇报的状态机只会挡在实际动作前面（实测一句

@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import time
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -30,6 +32,11 @@ class Skill:
     path: str
     scope: str = "builtin"
     body: str = ""
+
+
+#: 归档目录名。它是技能库的**子目录**（`~/.ivyea/skills/_archive/`），所以扫描时必须
+#: 显式跳过 —— 否则归档过的技能照样被加载，"归档"就成了一个纯粹的目录搬家动作。
+ARCHIVE_DIRNAME = "_archive"
 
 
 def _builtin_base():
@@ -201,6 +208,8 @@ def _iter_root(base: Path, scope: str) -> list[Skill]:
             continue
         if any(part.startswith(".") for part in rel.parts):
             continue                       # .archive / .git 之类的不算技能
+        if ARCHIVE_DIRNAME in rel.parts:
+            continue                       # 归档区就在技能库里面；不跳过等于"归档了个寂寞"
         domain = rel.parts[0] if len(rel.parts) > 1 else base.name
         sk = _load_skill(d, scope, domain)
         if sk:
@@ -412,6 +421,123 @@ def create_user_skill(
     return sk
 
 
+
+# ── 写入 / 归档 / 读附属文件 ──────────────────────────────────────────────────
+#
+# 在这之前，建技能只有一条路：人去敲 `ivyea skill create`。模型手上只有 `skill_search`
+# 一个只读工具 —— 它可以刚刚走完一套完整流程，然后眼睁睁看着这套流程随会话消失。
+# 下面这几个函数是"agent 自己能沉淀技能"的落地面，写操作一律经审批（在工具层把关）。
+
+def user_skill_dir(skill_id: str) -> Path:
+    """用户技能的落盘目录。id 里的点被当成 domain/name 分隔（与 create_user_skill 一致）。"""
+    sid = (skill_id or "").strip()
+    if not re.match(r"^[a-zA-Z0-9_.-]+$", sid):
+        raise ValueError("skill id 只能包含字母、数字、点、下划线和短横线")
+    domain, _, name = sid.rpartition(".")
+    return _user_base() / (domain or "user") / (name or sid)
+
+
+def write_user_skill(skill_id: str, meta: dict[str, Any], body: str,
+                     *, overwrite: bool = True) -> Path:
+    """写一份 SKILL.md（frontmatter 格式，见 ADR-0009）。返回文件路径。
+
+    **不做校验** —— 校验在 `skill_authoring.validate`，由调用方（工具层/CLI）先跑、
+    不过就不该走到这里。这里只负责落盘，职责单一。
+    """
+    from . import skill_authoring
+    path = user_skill_dir(skill_id)
+    target = path / "SKILL.md"
+    if target.exists() and not overwrite:
+        raise FileExistsError(f"skill 已存在：{target}")
+    path.mkdir(parents=True, exist_ok=True)
+    payload = dict(meta or {})
+    # id 显式写死：加载器没有 id 就从 name 推导，推出来的和调用方给的往往不是一回事
+    # （name=lingxing-ad-patrol → id=lingxing.lingxing_ad_patrol），后续 view/archive 全找不着。
+    payload["id"] = skill_id
+    payload.setdefault("name", skill_id.rpartition(".")[2] or skill_id)
+    payload.setdefault("version", "0.1.0")
+    domain = skill_id.rpartition(".")[0]
+    if domain:
+        payload.setdefault("domain", domain)
+    target.write_text(skill_authoring.render_frontmatter(payload, body), encoding="utf-8")
+    return target
+
+
+def write_skill_asset(skill_id: str, rel_path: str, content: str) -> Path:
+    """往技能目录里写一个附属文件（scripts/ references/ templates/）。
+
+    路径必须**留在技能目录内** —— 它来自模型，`../../` 一路能写到任何地方。
+    """
+    base = user_skill_dir(skill_id).resolve()
+    rel = (rel_path or "").strip().lstrip("/\\")
+    if not rel or rel in ("SKILL.md", "skill.json"):
+        raise ValueError("附属文件名不能为空，也不能是 SKILL.md / skill.json（正文用 write 动作写）")
+    target = (base / rel).resolve()
+    if base != target and base not in target.parents:
+        raise ValueError(f"附属文件必须留在技能目录内：{rel_path}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content or "", encoding="utf-8")
+    return target
+
+
+def archive_skill(skill_id: str) -> Path:
+    """归档一个用户技能（移进 `_archive/`）。**只归档不删除**，随时可恢复。"""
+    sk = get_skill(skill_id)
+    if sk is None:
+        raise FileNotFoundError(f"未找到 skill：{skill_id}")
+    if sk.scope != "user":
+        raise ValueError(f"只能归档用户自建技能；{skill_id} 是 {sk.scope} 技能。")
+    src = Path(sk.path)
+    dest = _user_base() / ARCHIVE_DIRNAME / f"{skill_id}-{int(time.time())}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dest))
+    return dest
+
+
+def restore_skill(archive_name: str) -> Path:
+    """把归档里的技能放回去。archive_name 是 `_archive/` 下的目录名。"""
+    src = _user_base() / ARCHIVE_DIRNAME / archive_name
+    if not src.is_dir():
+        raise FileNotFoundError(f"归档里没有：{archive_name}")
+    skill_id = archive_name.rsplit("-", 1)[0]
+    dest = user_skill_dir(skill_id)
+    if dest.exists():
+        raise FileExistsError(f"目标已存在，先处理掉：{dest}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dest))
+    return dest
+
+
+def list_archive() -> list[str]:
+    base = _user_base() / ARCHIVE_DIRNAME
+    if not base.is_dir():
+        return []
+    return sorted(p.name for p in base.iterdir() if p.is_dir())
+
+
+def list_assets(sk: Skill) -> list[str]:
+    """技能目录下除 SKILL.md / skill.json 之外的文件（相对路径）。"""
+    try:
+        base = Path(sk.path)
+        return sorted(
+            p.relative_to(base).as_posix() for p in base.rglob("*")
+            if p.is_file() and p.name not in ("SKILL.md", "skill.json")
+        )
+    except Exception:      # noqa: BLE001
+        return []
+
+
+def read_asset(sk: Skill, rel_path: str, max_chars: int = 20000) -> str:
+    """读技能目录下的一个附属文件。路径必须留在技能目录内。"""
+    base = Path(sk.path).resolve()
+    target = (base / (rel_path or "").strip().lstrip("/\\")).resolve()
+    if base != target and base not in target.parents:
+        raise ValueError(f"路径超出技能目录：{rel_path}")
+    if not target.is_file():
+        raise FileNotFoundError(f"技能目录里没有这个文件：{rel_path}")
+    text = target.read_text(encoding="utf-8", errors="replace")
+    return text if len(text) <= max_chars else text[:max_chars] + "\n…（已截断）"
+
 def get_skill(skill_id: str) -> Skill | None:
     for sk in list_skills():
         if sk.id == skill_id:
@@ -538,12 +664,36 @@ def _score_parts(sk: "Skill", terms: list[str], raw_terms: list[str], ql: str) -
 _AUTO_NAMED_MIN = 6
 
 
-def search(query: str, limit: int = 8, *, named_only: bool = False) -> list[tuple[Skill, int]]:
+def _semantic_text(sk: Skill) -> str:
+    """喂给向量的文本。**只用元信息，不用正文** —— 正文动辄几千字，一段技能手册的
+    向量会被大量流程细节主导，"这技能是干什么的"反而被稀释。标题/描述/触发词才是
+    作者对这件事的表述。"""
+    return " ".join(filter(None, [sk.title, sk.description, " ".join(sk.triggers), sk.id]))
+
+
+def search(query: str, limit: int = 8, *, named_only: bool = False,
+           semantic: bool | None = None) -> list[tuple[Skill, int]]:
     """按相关度排序的技能。
 
     `named_only=True` 只保留**名义命中**（标题/描述/触发词对上）的那些 —— 自动注入
     走这条，见 _score_parts 的说明。人工检索（skill search）不设这道闸：那时候用户
     是在翻库，宁可多给几条。
+
+    语义层（`semantic`）
+    -------------------
+    词法这条路是 2-gram + 一张手工停用词表，它的失败模式在 `_STOP_GRAMS` 上面记着：
+    一句和亚马逊毫无关系的话曾以 22 分命中 ASIN 审计手册。反过来也一样 —— 口语化的
+    问法（"这个类目还能不能做"）和技能里的正式用词对不上，词法就是零命中。
+
+    所以接上记忆那套已经验证过的双路召回（`memory_vectors.hybrid_rank`，RRF 融合）。
+    两条纪律：
+
+    * **候选集是全部技能，不是词法命中的那些。** 把语义做成"重排词法候选"是错的 ——
+      词法零命中时候选集是空的，语义根本没有机会，而那正是它唯一存在的理由
+      （`memory_vectors.vector_recall` 的注释里记着这个坑）。
+    * **`named_only` 那道闸不因语义放松。** 自动注入的误报是有过真实事故的，
+      语义只用来**排序**已经过闸的那些；发现新技能是 `skill_search` 的事。
+      没有 dense 后端时，一切行为与纯词法**逐条相同**。
     """
     terms = _terms(query)
     if not terms:
@@ -552,14 +702,37 @@ def search(query: str, limit: int = 8, *, named_only: bool = False) -> list[tupl
     # 那样加分就成了噪音（"帮我分析"里的"分析"能把一堆技能全拉进来）。
     raw_terms = [t.lower() for t in re.findall(r"[\w一-鿿+.-]+", query)]
     ql = query.lower()
-    rows: list[tuple[Skill, int]] = []
-    for sk in list_skills():
+    all_skills = list_skills()
+    scored: dict[str, int] = {}
+    admitted: list[Skill] = []
+    for sk in all_skills:
         score, named = _score_parts(sk, terms, raw_terms, ql)
         if not score or (named_only and named < _AUTO_NAMED_MIN):
             continue
-        rows.append((sk, score))
-    rows.sort(key=lambda x: (-x[1], x[0].id))
-    return rows[:limit]
+        scored[sk.id] = score
+        admitted.append(sk)
+    admitted.sort(key=lambda x: (-scored[x.id], x.id))
+
+    if semantic is None:
+        semantic = bool(config.get_setting("skill_semantic_search", True))
+    if not semantic:
+        return [(sk, scored[sk.id]) for sk in admitted[:limit]]
+
+    # 自动注入：候选集就是过了闸的那些，语义只负责排序。
+    # 人工/模型检索：候选集是全部技能，语义有机会捞出词法零命中的那条。
+    pool = admitted if named_only else all_skills
+    if not pool:
+        return []
+    index = {id(sk): i for i, sk in enumerate(pool)}
+    lex_ranked = [index[id(sk)] for sk in admitted if id(sk) in index]
+    try:
+        from . import memory_vectors
+        ranked = memory_vectors.hybrid_rank(query, pool, _semantic_text,
+                                            limit=limit, lex_ranked=lex_ranked)
+    except Exception:      # noqa: BLE001 —— 语义层出任何问题都退回纯词法，不能让检索挂掉
+        return [(sk, scored[sk.id]) for sk in admitted[:limit]]
+    # 纯语义捞出来的（词法 0 分）给 1 分，好和"词法命中"区分得开。
+    return [(sk, scored.get(sk.id, 1)) for sk in ranked]
 
 
 def render_list(skills: list[Skill] | None = None) -> str:
@@ -614,11 +787,25 @@ def render_skill(sk: Skill, include_knowledge: bool = True) -> str:
     return "\n".join(lines).strip()
 
 
+#: 自动注入时每条技能给多少正文。**它不再是"手册全文被截断后的残骸"** —— 见下面
+#: context_for_query 的说明。
+_INJECT_BODY_CHARS = 700
+
+
 def context_for_query(query: str, limit: int = 2, max_chars: int = 1800) -> tuple[str, list[str]]:
     """自动注入用的技能上下文。**只认名义命中**（named_only）。
 
-    这里注入的是一本 1600 字的手册，它会实打实地改变模型的行为 —— 只靠正文撞词
-    命中就注入，等于给一句「测试」派了一份 ASIN 审计流程。
+    这里注入的东西会实打实地改变模型的行为 —— 只靠正文撞词命中就注入，等于给一句
+    「测试」派了一份 ASIN 审计流程。所以准入闸不动。
+
+    渐进披露
+    --------
+    此前这里把正文**截到 700 字**塞进去，而剩下的部分模型**根本够不着** —— 没有任何
+    工具能读技能全文。于是一本三千字的审计手册，模型永远只看得到开头那段"何时使用"，
+    真正的步骤和护栏全在截断线以下。它照着残缺的手册干活，还以为自己看全了。
+
+    现在改成：注入**开头一段 + 一句"要全文用 `skill_view`"**，把"读多少"的决定权
+    交还给模型。截断这件事本身没变（上下文是有价的），变的是**截掉的部分现在拿得回来**。
     """
     hits = search(query, limit=limit, named_only=True)
     if not hits:
@@ -628,14 +815,28 @@ def context_for_query(query: str, limit: int = 2, max_chars: int = 1800) -> tupl
     for sk, score in hits:
         ids.append(sk.id)
         body = sk.body.strip()
-        if len(body) > 700:
-            body = body[:700].rstrip() + "\n..."
-        # 目录写在正文**之前**：正文会被截断，跟在后面的说明进不了上下文。
-        where = f"\n（技能目录：{sk.path}，正文提到的相对路径都在这下面）" if has_assets(sk) else ""
-        parts.append(f"[skill:{sk.id} score={score}] {sk.title}{where}\n{body}")
+        truncated = len(body) > _INJECT_BODY_CHARS
+        if truncated:
+            body = body[:_INJECT_BODY_CHARS].rstrip() + "\n…"
+        # 提示写在正文**之前**：正文会被截断，跟在后面的说明进不了上下文。
+        hint = ""
+        if truncated:
+            hint = f"\n（以上只是开头。完整步骤用 `skill_view(skill_id=\"{sk.id}\")` 读全文——"
+            hint += "下面这段被截断了，不要凭这一小段就动手。）"
+        assets = list_assets(sk)
+        if assets:
+            shown = "、".join(assets[:6]) + ("…" if len(assets) > 6 else "")
+            hint += (f"\n（这个技能还带了附属文件：{shown}。"
+                     f"用 `skill_view(skill_id=\"{sk.id}\", file_path=\"…\")` 按需读。）")
+        parts.append(f"[skill:{sk.id} score={score}] {sk.title}{hint}\n{body}")
     text = "\n\n".join(parts)
     if len(text) > max_chars:
-        text = text[:max_chars].rstrip() + "\n..."
+        text = text[:max_chars].rstrip() + "\n…"
+    try:
+        from . import skill_usage
+        skill_usage.record(ids, query=query, source="inject")
+    except Exception:      # noqa: BLE001 —— 统计坏了不该连累注入
+        pass
     return text, ids
 
 

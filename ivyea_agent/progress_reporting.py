@@ -50,6 +50,14 @@ def _dedupe(*groups: list[str], limit: int = 30) -> list[str]:
 
 def reset(ctx: Any, *, clear_todos: bool = True) -> None:
     """Reset one task's reporting state without disturbing session scope."""
+    if clear_todos:
+        try:
+            from . import plan_store
+            plan_store.reset(getattr(ctx, "session_id", "") or "",
+                             query=_text(getattr(ctx, "progress_query", "")),
+                             task_id=getattr(ctx, "task_id", "") or "")
+        except Exception:  # noqa: BLE001
+            pass
     ctx.progress_started = False
     ctx.progress_start = {}
     ctx.progress_active_phase = 0
@@ -115,6 +123,14 @@ def _current_index(ctx: Any) -> int:
     return 0
 
 
+def _first_open_index(ctx: Any) -> int:
+    """第一条还没进终态的 Todo 序号；全都收尾了返回 0。"""
+    for index, item in enumerate(getattr(ctx, "todos", []) or [], 1):
+        if isinstance(item, dict) and item.get("status") not in TERMINAL_TODO_STATUSES:
+            return index
+    return 0
+
+
 def _phase_index(args: dict[str, Any], ctx: Any) -> int:
     raw = args.get("phase_index")
     if raw in (None, ""):
@@ -123,6 +139,24 @@ def _phase_index(args: dict[str, Any], ctx: Any) -> int:
         return int(raw)
     except (TypeError, ValueError):
         return 0
+
+
+def _plan_record_start(ctx: Any, objective: str, scope: list[str], criteria: list[str]) -> None:
+    """把 start 汇报里的目标/范围/完成标准写进计划台账（best-effort）。"""
+    try:
+        from . import plan_store
+        plan_store.record_start(getattr(ctx, "session_id", "") or "",
+                                objective=objective, scope=scope, success_criteria=criteria)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _plan_attach_evidence(ctx: Any, index: int, evidence: list[str]) -> None:
+    try:
+        from . import plan_store
+        plan_store.attach_evidence(getattr(ctx, "session_id", "") or "", index, evidence)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _failure(message: str) -> dict[str, Any]:
@@ -181,6 +215,7 @@ def apply_update(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
         started.add(index)
         ctx.progress_started_phases = started
         ctx.progress_last_event = event
+        _plan_record_start(ctx, objective, scope, criteria)
         return _success(event)
 
     if kind == "phase_start":
@@ -215,7 +250,20 @@ def apply_update(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
         attention = _items(args.get("attention"))
         observed = list((getattr(ctx, "progress_phase_tool_evidence", {}) or {}).get(index, []) or [])
         if not active or index != active or not item:
-            return _failure("phase_end 必须结束当前正在汇报的阶段。")
+            # 光说"不对"会把模型逼进死循环：实测里它连发 90 次 phase_end，每次只改措辞，
+            # 因为这句话没告诉它**该做什么**。拒绝必须带下一步动作。
+            if not active:
+                nxt = _current_index(ctx) or _first_open_index(ctx)
+                hint = (f"当前没有正在进行的阶段。请先 todo_write 把第 {nxt} 步标 in_progress，"
+                        f"再 progress_update(kind='phase_start')，做完那一步才轮到 phase_end。"
+                        if nxt else "当前没有正在进行的阶段，且 Todo 里已没有未完成步骤 —— "
+                                    "直接 progress_update(kind='final') 收尾。")
+            elif not item:
+                hint = f"phase_index={index} 在 Todo 里不存在；当前正在进行的是第 {active} 步。"
+            else:
+                hint = (f"你要结束的是第 {index} 步，但当前正在进行的是第 {active} 步。"
+                        f"要么把 phase_index 改成 {active}，要么先把第 {active} 步收尾。")
+            return _failure("phase_end 必须结束当前正在汇报的阶段。" + hint)
         if status not in {"completed", "partial", "blocked", "skipped"}:
             return _failure("phase_end.status 必须是 completed、partial、blocked 或 skipped。")
         if not summary:
@@ -223,7 +271,16 @@ def apply_update(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
         if status in {"completed", "partial"} and not evidence:
             return _failure("完成或部分完成的阶段必须提供 evidence。")
         if status in {"completed", "partial"} and not observed:
-            return _failure("完成或部分完成的阶段还没有真实工具结果，不能只凭文字声称完成。")
+            # 「不能只凭文字声称完成」这条要守，但**不该逐阶段守**：写结论、做汇总这类
+            # 纯综合步骤本来就不调工具，逐阶段要求等于给它判了死刑 —— 实测里模型在这一步
+            # 上反复碰壁直到把整轮耗光。所以把这条要求提到**本轮**层面：
+            # 本轮真的跑出过工具结果，综合阶段就可以收尾；一次都没跑过，才是真的空口。
+            turn_evidence = list(getattr(ctx, "progress_tool_evidence", []) or [])
+            if not turn_evidence:
+                return _failure("本轮到目前为止一次工具都没有成功跑出结果，不能只凭文字声称完成。"
+                                "先用工具拿到证据；确实做不了就把 status 改成 blocked 或 skipped "
+                                "并在 attention 里说明原因。")
+            observed = turn_evidence[-3:]   # 纯综合阶段：证据挂本轮已有的真实结果
         if status in {"partial", "blocked"} and not incomplete:
             return _failure("部分完成或阻塞的阶段必须说明 incomplete。")
         if status == "blocked" and not attention:
@@ -242,6 +299,7 @@ def apply_update(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
         ctx.progress_active_phase = 0
         ctx.progress_final = {}
         ctx.progress_last_event = event
+        _plan_attach_evidence(ctx, index, evidence)
         return _success(event)
 
     # final
@@ -264,8 +322,19 @@ def apply_update(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
     report_attention = [e for report in reports for e in _items(report.get("attention"))]
     completed = _dedupe(actual_completed, _items(args.get("completed")), limit=20) or ["无"]
     incomplete = _dedupe(actual_incomplete, _items(args.get("incomplete")), limit=20) or ["无"]
+    # 最终汇总的「验证」一栏：模型自述 → 阶段报告 → 本轮工具痕迹 → **证据台账**。
+    # 台账排最后但不可省：前三样都活在这一轮的内存里，台账是唯一落了盘、能事后对账的那份。
+    ledger_evidence: list[str] = []
+    try:
+        from . import evidence_ledger
+        ledger_evidence = evidence_ledger.render(
+            session_id=getattr(ctx, "session_id", "") or "",
+            turn_id=getattr(ctx, "turn_id", "") or "", limit=8)
+    except Exception:  # noqa: BLE001
+        ledger_evidence = []
     evidence = _dedupe(_items(args.get("evidence")), report_evidence,
-                       list(getattr(ctx, "progress_tool_evidence", []) or []), limit=12) or ["无可用验证证据"]
+                       list(getattr(ctx, "progress_tool_evidence", []) or []),
+                       ledger_evidence, limit=12) or ["无可用验证证据"]
     attention = _dedupe(_items(args.get("attention")), report_attention,
                         list(getattr(ctx, "progress_attention", []) or []), limit=10)
     if actual_incomplete:
