@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import __version__, config, ui
+from . import __version__, ask as _ask_mod, config, ui
 # chat 展示层 helper 已拆到 chat_ui.py；re-export 保持 cli.X 引用与既有测试兼容。
 from .chat_ui import _is_amazon_domain, _looks_like_code_task, _LiveSpinner, _ReasoningPrinter, _StreamPrinter
 
@@ -1838,6 +1838,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         task_id=getattr(args, "task_id", "") or "")
     if getattr(args, "asin", None):
         ctx.asin = args.asin
+    # 终端里的「拿不准就弹选项」通道：tty 上是个菜单；管道/非交互（-p、cron）里
+    # 直接回 None，由 ask.resolve 立刻按推荐项继续 —— 决不在没人看的终端上干等。
+    ctx.ask_fn = _ask_mod.TerminalAsk().ask
     meter = pricing.UsageMeter()
     _ui = {"ctx": 0}                                        # 状态栏:上下文 token 估算
     _checkpoints: list = []                                 # /rewind 检查点：每轮前的 {对话长度, 代码快照}

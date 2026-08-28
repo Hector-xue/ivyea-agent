@@ -42,6 +42,13 @@ class ToolContext:
     # 本轮自动召回了哪几条记忆。运行时填、展示层读——**指示器必须是确定性的**：
     # 用户凭它知道"记忆起作用了"，而不是靠模型在回答里顺口提一句（模型经常不提）。
     memory_recall: dict[str, Any] = field(default_factory=dict)
+    # 「拿不准就弹选项」的通道（ask.AskFn）。None = 没人可问（cron/飞书/管道），
+    # 此时 ask_user_question 立刻按推荐项继续，不等 —— 见 ask.py 顶部。
+    ask_fn: Any = None
+    # 本轮有哪几项是**替用户定的**（超时/无通道按推荐项走）。收尾说明必须是
+    # 确定性的：界面读这一份自己画，不能指望模型在总结里顺口提一句。
+    auto_decisions: list = field(default_factory=list)
+    asked_count: int = 0                                       # 本轮已经弹过几次选项（防问个不停）
     ops_bridge: dict[str, Any] = field(default_factory=dict)  # IvyeaOps 嵌入模式工具桥接
     ops_context: dict[str, Any] = field(default_factory=dict)  # 当前 Ops 页面/板块上下文
     provider: Any = None                                       # 当前主脑 provider（供 dispatch_subagent）
@@ -301,6 +308,27 @@ TOOL_SCHEMAS = [
                                     "用户在 ~/.ivyea/agents/*.md 里自定义的角色名也可以填。"},
             "max_steps": {"type": "integer", "description": "子 agent 工具步数上限；不填按角色默认"}},
             "required": ["task"]}}},
+    {"type": "function", "function": {
+        "name": "ask_user_question",
+        "description": "方案有分叉、且不同选法会做出不同的东西时，把选项弹给用户自己选（工作台会弹一张选项卡）。"
+                       "用在真正拿不准的地方：技术路线二选一、要不要动某个已有行为、范围到哪为止。"
+                       "**不要**用它问那些看代码/看数据就能自己确定的事，也不要用来确认"
+                       "「我可以开始了吗」。每轮最多 3 次。给每个选项写清楚选它会发生什么，"
+                       "并把你自己推荐的那个标 recommended=true —— 用户 5 分钟不选就按推荐项继续，"
+                       "那时收尾总结里必须说明这一项是自动定的。终端里多选会退化成单选。",
+        "parameters": {"type": "object", "properties": {
+            "questions": {"type": "array", "description": "1-4 个问题；每个问题 2-4 个选项",
+                          "items": {"type": "object", "properties": {
+                              "question": {"type": "string", "description": "完整的问句"},
+                              "header": {"type": "string", "description": "≤12 字的短标签，如「投递语义」"},
+                              "multi_select": {"type": "boolean", "description": "true=可多选"},
+                              "options": {"type": "array", "items": {"type": "object", "properties": {
+                                  "label": {"type": "string", "description": "选项名（1-6 个词）"},
+                                  "description": {"type": "string", "description": "选它意味着什么、代价是什么"},
+                                  "recommended": {"type": "boolean", "description": "你推荐的那一项标 true（只能标一个）"}},
+                                  "required": ["label"]}}},
+                              "required": ["question", "options"]}}},
+            "required": ["questions"]}}},
 ] + tools_general.GENERAL_TOOL_SCHEMAS
 
 
@@ -812,7 +840,65 @@ def _t_ivyea_ops_call_tool(args: dict, ctx: ToolContext) -> str:
     return _compact_json_text(data)
 
 
+def _t_ask_user_question(args: dict, ctx: ToolContext) -> str:
+    """把选项弹给用户，等他选；没人选就按推荐项继续，并记账。
+
+    **一定会返回一份答案**：这个工具的意义是让一轮任务在分叉处不卡死，而不是
+    多一个可能挂住的地方。没有通道（cron/飞书/管道）就立刻按推荐项走，一秒不等。
+    """
+    from . import ask as ask_mod
+
+    try:
+        questions = ask_mod.normalize(args.get("questions"))
+    except ValueError as exc:
+        return f"参数不对：{exc}。请修正后重试。"
+
+    asked = int(getattr(ctx, "asked_count", 0) or 0)
+    if asked >= ask_mod.MAX_ASKS_PER_TURN:
+        picks = ask_mod.recommended_answers(questions)
+        return ("这一轮已经问过 " + str(asked) + " 次了，不再打扰用户。"
+                "按你自己推荐的选项继续：" + _format_answers(picks)
+                + "\n收尾时说明这几项是你自行决定的。")
+    ctx.asked_count = asked + 1
+
+    timeout = _ask_timeout()
+    out = ask_mod.resolve(questions, getattr(ctx, "ask_fn", None), timeout)
+    answers = out.get("answers") or {}
+    if out.get("auto"):
+        reason = str(out.get("reason") or "")
+        for q in questions:
+            ctx.auto_decisions.append({
+                "question": q["question"],
+                "header": q.get("header") or "",
+                "chosen": answers.get(q["question"], ""),
+                "reason": reason,
+            })
+        why = {
+            "timeout": f"用户在 {int(timeout // 60)} 分钟内没有选择",
+            "no_channel": "当前没有可以弹选项的界面（无人值守运行）",
+            "error": "提问通道出错",
+        }.get(reason, "没能拿到用户的选择")
+        return (f"{why}，已按你标记的推荐项继续：{_format_answers(answers)}\n"
+                "**最终总结里必须明确说明这几项是自动决定的、依据是什么、"
+                "以及用户如果想改该怎么改。**")
+    return "用户选择：" + _format_answers(answers)
+
+
+def _format_answers(answers: dict) -> str:
+    return "；".join(f"「{q}」→ {a}" for q, a in answers.items()) or "（无）"
+
+
+def _ask_timeout() -> float:
+    from . import ask as ask_mod, config as cfg_mod
+    try:
+        val = float(cfg_mod.get_setting("ask_timeout_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        val = 0.0
+    return val if val > 0 else ask_mod.DEFAULT_ASK_TIMEOUT
+
+
 _DISPATCH = {
+    "ask_user_question": _t_ask_user_question,
     "run_patrol": _t_run_patrol,
     "run_account_diagnosis": _t_run_account_diagnosis,
     "propose_actions": _t_propose_actions,
