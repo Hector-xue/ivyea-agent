@@ -60,8 +60,8 @@ def test_normalize_rejects_malformed(bad):
 def test_no_channel_takes_recommendation_immediately():
     started = time.time()
     out = ask.resolve(ask.normalize(QUESTIONS), None, timeout_s=300)
-    assert out == {"answers": {"追加的指令什么时候生效？": "真注入"},
-                   "auto": True, "reason": "no_channel"}
+    assert out == {"answers": {"追加的指令什么时候生效？": "真注入"}, "auto": True,
+                   "reason": "no_channel", "auto_filled": ["追加的指令什么时候生效？"]}
     assert time.time() - started < 1     # 无人值守时一秒都不该等
 
 
@@ -86,7 +86,8 @@ def test_recommendation_defaults_to_first_option_when_unmarked():
 def test_human_answer_wins_and_is_not_marked_auto():
     out = ask.resolve(ask.normalize(QUESTIONS),
                       lambda _q, _t: {"answers": {"追加的指令什么时候生效？": "排队"}}, 5)
-    assert out == {"answers": {"追加的指令什么时候生效？": "排队"}, "auto": False, "reason": ""}
+    assert out == {"answers": {"追加的指令什么时候生效？": "排队"}, "auto": False,
+                   "reason": "", "auto_filled": []}
 
 
 def test_answers_for_questions_we_never_asked_are_dropped():
@@ -173,3 +174,30 @@ def test_tool_is_not_offered_to_subagents():
     """子 agent 不该替用户做选择题 —— 它连界面都没有。"""
     assert "ask_user_question" not in agent_tools.READONLY_TOOLS
     assert "ask_user_question" not in agent_tools.PARALLEL_SAFE
+
+
+def test_a_partly_answered_card_still_records_what_was_auto_filled():
+    """一次问四问、人只点了一问 —— 剩下三问同样是"替他定的"，必须记账。
+
+    实测栽过：真跑那一轮里模型问了四问，脚本只答了第一问，另外三问被按推荐项
+    填掉却没进 auto_decisions —— 收尾说明里一个字都不会提，用户永远不知道。
+    """
+    from ivyea_agent import agent_tools
+    from ivyea_agent.agent_tools import ToolContext
+
+    qs = [
+        {"question": "口径按哪个？", "header": "口径",
+         "options": [{"label": "环比", "recommended": True}, {"label": "同比"}]},
+        {"question": "要不要落档？", "header": "落档",
+         "options": [{"label": "记下来", "recommended": True}, {"label": "先不记"}]},
+    ]
+    ctx = ToolContext()
+    # 通道只答第一问
+    ctx.ask_fn = lambda _q, _t: {"answers": {"口径按哪个？": "同比"}}
+    out = agent_tools.dispatch("ask_user_question", {"questions": qs}, ctx)
+
+    assert "同比" in out                                   # 人选的那一问照人的来
+    assert [d["question"] for d in ctx.auto_decisions] == ["要不要落档？"]
+    assert ctx.auto_decisions[0]["chosen"] == "记下来"
+    assert ctx.auto_decisions[0]["reason"] == "partial"
+    assert "自动定的" in out                                # 也要提醒模型在总结里说

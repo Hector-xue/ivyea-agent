@@ -864,15 +864,20 @@ def _t_ask_user_question(args: dict, ctx: ToolContext) -> str:
     timeout = _ask_timeout()
     out = ask_mod.resolve(questions, getattr(ctx, "ask_fn", None), timeout)
     answers = out.get("answers") or {}
+    reason = str(out.get("reason") or "")
+    # 记账按**问**记，不按整次调用记：一次问四问、人只点了两问，剩下两问同样是
+    # "替他定的"，一样要出现在收尾说明里。
+    filled = set(out.get("auto_filled") or [])
+    by_text = {q["question"]: q for q in questions}
+    for question in filled:
+        q = by_text.get(question, {})
+        ctx.auto_decisions.append({
+            "question": question,
+            "header": q.get("header") or "",
+            "chosen": answers.get(question, ""),
+            "reason": reason,
+        })
     if out.get("auto"):
-        reason = str(out.get("reason") or "")
-        for q in questions:
-            ctx.auto_decisions.append({
-                "question": q["question"],
-                "header": q.get("header") or "",
-                "chosen": answers.get(q["question"], ""),
-                "reason": reason,
-            })
         why = {
             "timeout": f"用户在 {int(timeout // 60)} 分钟内没有选择",
             "no_channel": "当前没有可以弹选项的界面（无人值守运行）",
@@ -881,6 +886,12 @@ def _t_ask_user_question(args: dict, ctx: ToolContext) -> str:
         return (f"{why}，已按你标记的推荐项继续：{_format_answers(answers)}\n"
                 "**最终总结里必须明确说明这几项是自动决定的、依据是什么、"
                 "以及用户如果想改该怎么改。**")
+    if filled:
+        picked = {k: v for k, v in answers.items() if k not in filled}
+        return ("用户选择：" + _format_answers(picked)
+                + "\n其余几问他没选，已按推荐项继续："
+                + _format_answers({k: answers[k] for k in filled if k in answers})
+                + "\n**最终总结里要说明后面这几项是自动定的。**")
     return "用户选择：" + _format_answers(answers)
 
 

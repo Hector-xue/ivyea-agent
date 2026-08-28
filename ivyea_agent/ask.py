@@ -114,25 +114,35 @@ def resolve(questions: list[dict], ask_fn: Optional[AskFn],
             timeout_s: float = DEFAULT_ASK_TIMEOUT) -> dict[str, Any]:
     """问一次，**一定**拿到一份答案。
 
-    返回 `{answers, auto, reason}`：auto=True 表示这份答案不是人选的。
-    reason: ""（人选的）/ no_channel / timeout / error。
+    返回 `{answers, auto, reason, auto_filled}`：auto=True 表示整份答案都不是人选的；
+    `auto_filled` 是**其中哪几问是替用户填的**（按推荐项）。
+    reason: ""（全是人选的）/ partial / no_channel / timeout / error。
+
+    `auto_filled` 必须端出去，调用方才记得了账。只回一个 auto 布尔是不够的：
+    一次可以问四问，人只点了第一问就提交（界面会拦，但别的客户端不一定），
+    剩下三问照样是"替他定的"—— 不记下来，用户就永远不知道那三项是谁定的。
     """
+    everything = [q["question"] for q in questions]
     if ask_fn is None:
-        return {"answers": recommended_answers(questions), "auto": True, "reason": "no_channel"}
+        return {"answers": recommended_answers(questions), "auto": True,
+                "reason": "no_channel", "auto_filled": everything}
     try:
         got = ask_fn(questions, float(timeout_s))
     except Exception:  # noqa: BLE001 —— 通道坏了不能把整轮拖死，按推荐继续
-        return {"answers": recommended_answers(questions), "auto": True, "reason": "error"}
+        return {"answers": recommended_answers(questions), "auto": True,
+                "reason": "error", "auto_filled": everything}
     answers = _clean_answers(questions, got)
     if not answers:
-        return {"answers": recommended_answers(questions), "auto": True, "reason": "timeout"}
-    # 只答了一部分：没答的按推荐补齐，并如实说这份答案是混合来的。
-    partial = False
+        return {"answers": recommended_answers(questions), "auto": True,
+                "reason": "timeout", "auto_filled": everything}
+    # 只答了一部分：没答的按推荐补齐，并如实说是哪几问补的。
+    filled: list[str] = []
     for q in questions:
         if not answers.get(q["question"]):
             answers[q["question"]] = recommended_label(q)
-            partial = True
-    return {"answers": answers, "auto": False, "reason": "partial" if partial else ""}
+            filled.append(q["question"])
+    return {"answers": answers, "auto": False,
+            "reason": "partial" if filled else "", "auto_filled": filled}
 
 
 def _clean_answers(questions: list[dict], got: Any) -> dict[str, str]:
