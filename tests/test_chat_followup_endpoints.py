@@ -186,14 +186,23 @@ class _EndlessProvider:
 
     没有中止的话，这样一轮会一直烧到步数上限 —— 那正是"点了停止却还在跑"时
     用户在替它付的账。
+
+    `cancel_at`：跑到第几步时**由它自己**按下停止。用回调而不是另起一个线程去掐：
+    线程版依赖时序（"等 provider.calls >= 2 再 cancel"），机器一快，整轮就在掐之前
+    先跑完了 —— macOS CI 上真挂过一次。这里的顺序是确定的：标志在这一步的流里就
+    置上了，下一个边界必然读到。
     """
 
-    def __init__(self):
+    def __init__(self, cancel_at: int = 0, on_cancel=None):
         self.calls = 0
+        self._cancel_at = cancel_at
+        self._on_cancel = on_cancel
 
     def stream_chat(self, messages, tools=None):
         self.calls += 1
         yield {"type": "text", "text": f"第 {self.calls} 步…"}
+        if self._cancel_at and self.calls == self._cancel_at and self._on_cancel:
+            self._on_cancel()
         yield {"type": "final", "content": "", "usage": {},
                "tool_calls": [{"id": f"c{self.calls}", "name": "list_dir",
                                "arguments": {"path": "."}}]}
@@ -202,27 +211,19 @@ class _EndlessProvider:
 def test_cancel_really_stops_the_turn(ivyea_home):
     """点停止 = 模型不会再往下走一步，而不是"我不看了、你接着烧"。"""
     import importlib
-    import threading
     importlib.reload(sessions)
     importlib.reload(service)
     sid = sessions.new_id()
-    provider = _EndlessProvider()
+    cancelled: dict = {}
+    provider = _EndlessProvider(
+        cancel_at=2, on_cancel=lambda: cancelled.update(service.chat_cancel({"session_id": sid})))
     events: list[tuple[str, dict]] = []
 
-    def watcher():
-        for _ in range(400):                       # 最多等 4 秒
-            if provider.calls >= 2:
-                assert service.chat_cancel({"session_id": sid})["cancelled"] is True
-                return
-            time.sleep(0.01)
-
-    t = threading.Thread(target=watcher)
-    t.start()
     out = service.chat_stream(
         {"message": "跑个长任务", "session_id": sid, "max_steps": 50, "persist": True},
         lambda e, d: events.append((e, d)), provider=provider)
-    t.join()
 
+    assert cancelled.get("cancelled") is True      # 按下去的那一刻确实有活轮可停
     assert out["cancelled"] is True
     assert provider.calls < 50                     # 真的停在半路，不是跑满了才结束
     # 停止是**正常结局**，不能画成红色的失败
