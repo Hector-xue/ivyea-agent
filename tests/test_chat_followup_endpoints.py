@@ -177,3 +177,130 @@ def test_detail_only_returns_the_times_of_the_page_it_serves(ivyea_home):
     page = service.chat_session_detail(sid, turns=1)["session"]
     assert page["turns"]["from"] == 2
     assert [t["turn"] for t in page["turn_times"]] == [2]
+
+
+# ── 真·停止 ─────────────────────────────────────────────────────────────────
+
+class _EndlessProvider:
+    """永远不肯收工的模型：每一步都再调一个工具。
+
+    没有中止的话，这样一轮会一直烧到步数上限 —— 那正是"点了停止却还在跑"时
+    用户在替它付的账。
+    """
+
+    def __init__(self):
+        self.calls = 0
+
+    def stream_chat(self, messages, tools=None):
+        self.calls += 1
+        yield {"type": "text", "text": f"第 {self.calls} 步…"}
+        yield {"type": "final", "content": "", "usage": {},
+               "tool_calls": [{"id": f"c{self.calls}", "name": "list_dir",
+                               "arguments": {"path": "."}}]}
+
+
+def test_cancel_really_stops_the_turn(ivyea_home):
+    """点停止 = 模型不会再往下走一步，而不是"我不看了、你接着烧"。"""
+    import importlib
+    import threading
+    importlib.reload(sessions)
+    importlib.reload(service)
+    sid = sessions.new_id()
+    provider = _EndlessProvider()
+    events: list[tuple[str, dict]] = []
+
+    def watcher():
+        for _ in range(400):                       # 最多等 4 秒
+            if provider.calls >= 2:
+                assert service.chat_cancel({"session_id": sid})["cancelled"] is True
+                return
+            time.sleep(0.01)
+
+    t = threading.Thread(target=watcher)
+    t.start()
+    out = service.chat_stream(
+        {"message": "跑个长任务", "session_id": sid, "max_steps": 50, "persist": True},
+        lambda e, d: events.append((e, d)), provider=provider)
+    t.join()
+
+    assert out["cancelled"] is True
+    assert provider.calls < 50                     # 真的停在半路，不是跑满了才结束
+    # 停止是**正常结局**，不能画成红色的失败
+    assert [e for e, _ in events if e == "cancelled"]
+    assert not [e for e, _ in events if e == "error"]
+    # 已经跑出来的东西照常落盘 —— 半截也是真发生过的
+    assert sessions.load(sid)["messages"]
+    assert sessions.turn_times(sid)[0]["ended_at"] > 0
+
+
+def test_cancel_reports_honestly_when_nothing_is_running():
+    out = service.chat_cancel({"session_id": "nobody-home"})
+    assert out == {"ok": True, "cancelled": False, "session_id": "nobody-home",
+                   "reason": "no_live_turn"}
+
+
+def test_cancel_validates_arguments():
+    assert service.chat_cancel({"session_id": ""})["ok"] is False
+
+
+class _SlowProvider:
+    """一个字一个字慢慢吐的模型 —— 用来把"用户在模型说话时按了停止"这个时序做实。"""
+
+    def __init__(self, on_first_token=None):
+        self.calls = 0
+        self._on_first_token = on_first_token
+
+    def stream_chat(self, messages, tools=None):
+        self.calls += 1
+        for i in range(200):
+            if i == 0 and self._on_first_token:
+                self._on_first_token()
+            yield {"type": "text", "text": "字"}
+            time.sleep(0.01)
+        yield {"type": "final", "content": "字" * 200, "tool_calls": [], "usage": {}}
+
+
+def test_cancel_hands_back_the_queued_followups(ivyea_home):
+    """停在半路时，还没被读到的追加指令不能无声吞掉 —— 端回给调用方。"""
+    import importlib
+    importlib.reload(sessions)
+    importlib.reload(service)
+    sid = sessions.new_id()
+
+    def on_first_token():
+        # 模型正在吐字：这时排一条追加指令（它要到下一个步边界才会被读走），
+        # 紧接着按停止 —— 于是它注定没被读到，必须被端回来。
+        turn_inbox.submit(sid, "还有件事")
+        service.chat_cancel({"session_id": sid})
+
+    out = service.chat_stream({"message": "跑个长任务", "session_id": sid, "max_steps": 50},
+                              lambda _e, _d: None, provider=_SlowProvider(on_first_token))
+    assert out["cancelled"] is True
+    assert [i["text"] for i in out.get("injected_pending") or []] == ["还有件事"]
+    assert turn_inbox.pending(sid) == []
+
+
+def test_cancel_stops_mid_generation(ivyea_home):
+    """在模型吐字的过程中按停止，也要当场停 —— 不能等它把这一段说完。"""
+    import importlib
+    importlib.reload(sessions)
+    importlib.reload(service)
+    sid = sessions.new_id()
+    started = time.time()
+    out = service.chat_stream(
+        {"message": "说点什么", "session_id": sid, "max_steps": 5},
+        lambda _e, _d: None,
+        provider=_SlowProvider(lambda: service.chat_cancel({"session_id": sid})))
+    assert out["cancelled"] is True
+    # 200 个 token × 10ms = 2s；当场停的话远不到
+    assert time.time() - started < 1.5
+
+
+def test_status_says_it_is_stopping():
+    live = live_turn.begin("s-x")
+    try:
+        assert live_turn.status("s-x")["cancelling"] is False
+        live_turn.request_cancel("s-x")
+        assert live_turn.status("s-x")["cancelling"] is True
+    finally:
+        live.end()

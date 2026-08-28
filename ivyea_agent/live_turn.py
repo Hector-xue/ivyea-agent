@@ -68,6 +68,10 @@ class LiveTurn:
         self.running = True
         self.started = time.time()
         self.ended = 0.0
+        #: 有人按了停止。轮次线程在步/流/工具边界读它 —— **必须是服务端状态**：
+        #: 按停止的那个页面可能刚好断线、或者干脆是另一台机器上的另一个标签页，
+        #: 而"别再烧 token 了"这件事和哪条连接还活着没有关系。
+        self.cancel_requested = False
         self.cond = threading.Condition()
 
     # ── 写端（轮次线程）────────────────────────────────────────────────────
@@ -198,6 +202,27 @@ def get(session_id: str) -> Optional[LiveTurn]:
         return _LIVE.get(session_id)
 
 
+def request_cancel(session_id: str) -> bool:
+    """请求中止这条会话正在跑的那一轮。没有活轮返回 False。
+
+    只置一个标志：真正的中止发生在轮次线程读到它的那一刻（模型流的下一个事件、
+    或下一个工具步边界）。**不去杀线程** —— 那会把正在写的文件、正在收尾的落盘
+    停在半路上，而"停止"不该是"把现场砸烂"。
+    """
+    live = get(session_id)
+    if live is None or not live.running:
+        return False
+    with live.cond:
+        live.cancel_requested = True
+        live.cond.notify_all()
+    return True
+
+
+def is_cancelled(session_id: str) -> bool:
+    live = get(session_id)
+    return bool(live is not None and live.cancel_requested)
+
+
 def running_ids() -> list[str]:
     """此刻真的有一轮在跑的会话 id。
 
@@ -219,6 +244,7 @@ def status(session_id: str) -> dict[str, Any]:
         "running": bool(live.running),
         "seq": int(live.seq),
         "started_ms": int(live.started * 1000),
+        "cancelling": bool(live.cancel_requested and live.running),
     }
 
 

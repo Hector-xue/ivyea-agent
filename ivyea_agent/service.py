@@ -279,6 +279,7 @@ def manifest() -> dict[str, Any]:
             {"method": "POST", "path": "/v1/chat/stream", "description": "run one read-only embedded agent turn as server-sent events"},
             {"method": "POST", "path": "/v1/chat/inject", "description": "append a follow-up instruction into the turn that is currently running"},
             {"method": "POST", "path": "/v1/chat/question", "description": "answer an ask_user_question option card"},
+            {"method": "POST", "path": "/v1/chat/cancel", "description": "really stop the turn that is running (stops spending tokens)"},
             {"method": "GET", "path": "/v1/chat/live-sessions", "description": "session ids that have a turn running right now"},
             {"method": "GET", "path": "/v1/skills", "description": "list active built-in and user skills"},
             {"method": "GET", "path": "/v1/skills/search", "description": "search active skills"},
@@ -1991,6 +1992,13 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
             # 追加指令：跑到一半时用户又说的话，在步边界插进当前这一轮。
             inject_check=_inject_check,
             on_inject=_on_inject,
+            # 真·停止：POST /v1/chat/cancel 置个标志，这里在模型流的每个事件和
+            # 每个工具步边界读它 —— 于是"不想做了"能在几百毫秒内真的停下来，
+            # 而不是眼睁睁看着它把这一轮的 token 烧完。
+            #
+            # 直接读活轮对象上的那个布尔，不走 live_turn.get()：这个钩子每个 token
+            # 都会被调用一次（一轮几万次），走注册表就是几万次加锁 + 遍历。
+            cancel_check=lambda: bool(getattr(holder.get("live"), "cancel_requested", False)),
         )
     except LLMError as exc:
         # 模型报错：**先落盘再报错**。已经流出去的正文和执行过程是真跑出来的，
@@ -2000,8 +2008,26 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
         data = {"ok": False, "error": "model_error", "detail": str(exc)}
         send("error", data)
         return data
+    except KeyboardInterrupt:
+        # **用户按了停止。** 这是一个正常结局，不是异常：已经跑出来的正文、执行过程、
+        # 时间账全部照常落盘（那些是真发生过的），然后明确地告诉前端"停住了"。
+        #
+        # 不发 error：界面会把它画成红色的失败，而这不是失败，是用户改主意了。
+        _persist(None)
+        _finish_turn_times()
+        leftover_on_cancel = turn_inbox.drain_remaining(ctx.session_id)
+        data = {
+            "ok": True, "cancelled": True, "session_id": ctx.session_id,
+            "text": str(getattr(holder.get("live"), "text", "") or ""),
+            # 停在半路的这一轮里，用户排着的追加指令一条都没被读到 —— 端回去，
+            # 由调用方决定是丢掉还是当成下一轮。
+            "injected_pending": [{"id": str(i.get("id") or ""), "text": str(i.get("text") or "")}
+                                 for i in leftover_on_cancel],
+        }
+        send("cancelled", data)
+        return data
     except BaseException:
-        # 断流、被中止、任何没预料到的异常 —— 同上，先把跑出来的东西留住。
+        # 断流、任何没预料到的异常 —— 同上，先把跑出来的东西留住。
         _persist(None)
         _finish_turn_times()
         raise
@@ -2256,6 +2282,26 @@ def chat_inject(payload: dict[str, Any]) -> dict[str, Any]:
         return {**out, "accepted": False, "session_id": session_id}
     return {"ok": True, "accepted": True, "session_id": session_id,
             "item": out.get("item"), "pending": out.get("pending")}
+
+
+def chat_cancel(payload: dict[str, Any]) -> dict[str, Any]:
+    """真的停掉这条会话正在跑的那一轮。
+
+    "停止"此前只是调用方断开自己那条事件流 —— 轮次在这边照跑照烧 token，用户看到的
+    是"我点了停止，它还在跑"。现在置中止标志，轮次线程在模型流的下一个事件或下一个
+    工具步边界就收摊：**已经跑出来的东西照常落盘**，然后回一个 `cancelled` 事件。
+
+    正在执行中的那**一个**工具调用不会被打断（写文件、跑命令中途砸断只会留下半个
+    现场）—— 所以最坏要等它结束，但模型不会再往下走一步。
+    """
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        return {"ok": False, "error": "session_id is required"}
+    ok = live_turn.request_cancel(session_id)
+    return {"ok": True, "cancelled": bool(ok), "session_id": session_id,
+            # False = 这条会话本来就没有在跑的轮次（多半刚好收尾了）。
+            # 照实说，别让界面显示"已停止"却其实什么都没停。
+            "reason": "" if ok else "no_live_turn"}
 
 
 def chat_question(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2894,6 +2940,10 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/chat/question":
             out = chat_question(body)
             self._json(200 if out.get("ok") else 404, out)
+            return
+        if parsed.path == "/v1/chat/cancel":
+            out = chat_cancel(body)
+            self._json(200 if out.get("ok") else 400, out)
             return
         if parsed.path == "/v1/chat":
             try:
