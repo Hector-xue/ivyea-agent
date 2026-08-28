@@ -1000,7 +1000,7 @@ def t_self_critique(args: dict, ctx) -> str:
     if not draft:
         return "draft 为空：把你准备交付的最终答案放进 draft 再自查。"
     provider = getattr(ctx, "provider", None)
-    res = _crit.critique(args.get("task") or "", draft, provider)
+    res = _crit.critique(args.get("task") or "", draft, provider, kind=str(args.get("kind") or ""))
     if not res.get("ok"):
         return res.get("note") or "自我批判不可用。"
     return _truncate(res["markdown"] or "未见明显问题。")
@@ -1107,7 +1107,9 @@ GENERAL_TOOL_SCHEMAS = [
     _fn("self_critique", "收尾前自查：把你准备交付的最终答案放进 draft，用当前主脑按 rubric 复核"
         "(需求吻合/事实可靠/关键遗漏/验证到位)，返回简短批判。高风险或复杂任务交付前建议先自调一次。只读。",
         {"draft": {"type": "string", "description": "准备交付给用户的最终答案全文"},
-         "task": {"type": "string", "description": "可选：本次任务/需求，帮助判断是否答非所问"}},
+         "task": {"type": "string", "description": "可选：本次任务/需求，帮助判断是否答非所问"},
+         "kind": {"type": "string", "enum": ["code", "ads", "knowledge", "general"],
+                  "description": "可选：交付类型，决定用哪套复核维度；不填按通用"}},
         ["draft"]),
     _fn("task_read", "读取当前绑定的 Ivyea 长任务状态、步骤和最近事件。续跑任务时应先调用。",
         {"task_id": {"type": "string", "description": "可选；不传则使用当前对话绑定的 task_id"}}),

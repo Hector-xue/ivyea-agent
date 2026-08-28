@@ -2259,11 +2259,15 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
     def _sh_think(line):
         """查看/切换思考深度旋钮（reasoning_effort）：影响 codex/claude/gemini/推理型模型的思考预算。"""
-        levels = ("off", "low", "medium", "high", "auto")
+        from . import thinking as _thinking
+        levels = _thinking.LEVELS
         parts = line.split(None, 1)
-        cur = str(cfg.get_setting("reasoning_effort", "high") or "high").lower()
+        cur = str(cfg.get_setting("reasoning_effort", _thinking.DEFAULT_EFFORT)
+                  or _thinking.DEFAULT_EFFORT).lower()
         if len(parts) == 1:
-            print(ui.message("info", f"当前思考深度：{cur}。切换：/think {'|'.join(levels)}"))
+            print(ui.message("info", f"当前思考深度：{cur}。切换：/think {'|'.join(levels)}\n"
+                                     "  adaptive = 按本轮性质自动定档（寒暄降到 low，其余仍按 high）；\n"
+                                     "  auto = 交给模型自己决定（各家含义不同），与 adaptive 不是一回事。"))
             return True
         lvl = parts[1].strip().lower()
         if lvl not in levels:
@@ -2382,6 +2386,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         # （见 ADR-0010）。**ctx 在终端里跨轮复用**，所以这一行每轮都要赋值 ——
         # 只在命中时置 True 的话，一句"你好"会把汇报纪律一路关到下一个真任务上。
         route = routing.classify(line, ops_bridge=bool(getattr(ctx, "ops_bridge", None)))
+        ctx.route_lane = route.lane      # 供 thinking.apply_to 按路线定思考深度
         ctx.progress_reporting_disabled = route.is_chat or route.is_board
         scope_note = task_scope.prepare_query(ctx, line, messages, base=os.getcwd())
         # 闲聊不扫工程上下文：那是一次真实的目录扫描，为一句问候跑它纯属浪费。
@@ -2561,6 +2566,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             from . import engineering_context, knowledge, routing, skills, task_scope
             # 同上（TUI 那一份的注释）：路线判定与 serve 共用，且每轮都要赋值。
             route = routing.classify(line, ops_bridge=bool(getattr(ctx, "ops_bridge", None)))
+            ctx.route_lane = route.lane      # 供 thinking.apply_to 按路线定思考深度
             ctx.progress_reporting_disabled = route.is_chat or route.is_board
             scope_note = task_scope.prepare_query(ctx, line, messages, base=os.getcwd())
             ectx = "" if route.is_chat else engineering_context.build(ctx.workspace or os.getcwd(), line)

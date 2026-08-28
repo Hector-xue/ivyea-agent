@@ -59,6 +59,9 @@ class ToolContext:
     search_recovery_required: bool = False                     # 0 文件后先 list_dir，禁止继续盲搜
     consecutive_search_deadends: int = 0
     navigation_since_read: int = 0
+    executed_writes: bool = False                              # 本轮真的下过写指令（广告执行等），供收尾自查门禁判定
+    route_lane: str = ""                                       # 本轮路线（routing.classify）：chat|board|work，供思考深度自适应
+    thinking_effort: str = ""                                  # 本轮实际生效的思考深度（运行时填，展示层读）
     progress_reporting_disabled: bool = False                  # 只读子 agent 等内部执行不展示主任务汇报
     progress_required: bool = False                            # 复杂/多步任务启用结构化汇报闭环
     progress_execution_expected: bool = False                  # 用户明确要求落地执行，而非只要方案
@@ -412,6 +415,8 @@ def _t_execute_lingxing(ctx: ToolContext) -> str:
             results.append(f"跳过：{lw.preview(intent)}")
             continue
         r = lw.execute(intent, dry_run=not live)
+        if live and r.get("ok"):
+            ctx.executed_writes = True   # 真下过写指令 → 收尾前必须走一次自查门禁
         results.append(("✓ " if r["ok"] else "✗ ") + r["detail"])
     if not live:
         results.append("（dry-run 预览；真写需在终端 `ivyea lingxing operate on`。）")
@@ -440,6 +445,8 @@ def _t_execute_actions(args: dict, ctx: ToolContext) -> str:
             continue
         memory.record_decision(ctx.asin, a.search_term, a.kind, "approve")
         r = executor.execute(a, ctx.from_mcp or "", dry_run=not ctx.execute)
+        if ctx.execute and r.get("ok"):
+            ctx.executed_writes = True   # 真下过写指令 → 收尾前必须走一次自查门禁
         results.append(("✓ " if r["ok"] else "✗ ") + r["detail"])
     return "\n".join(results) if results else "无操作。"
 

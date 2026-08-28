@@ -6,6 +6,7 @@ provider.chat(messages, tools) → 若有 tool_calls 则逐个派发(写工具�
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -13,8 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import (config, context, knowledge, loop_guard, panels, plan_store, progress_reporting,
-               stream_json, task_scope, traces, transcript, ui)
+from . import (config, context, evidence_ledger, knowledge, loop_guard, panels, plan_store,
+               progress_reporting, stream_json, task_scope, thinking, traces, transcript, ui)
 from .agent_tools import PARALLEL_SAFE, TOOL_SCHEMAS, ToolContext, ToolResult, dispatch_result
 from .providers import LLMProvider
 
@@ -119,6 +120,8 @@ class TurnStatus:
     runtime_validated: bool = False
     behavior_gate_rounds: int = 0
     citation_gate_rounds: int = 0
+    critique_rounds: int = 0       # 收尾自查门禁已经逼修正过几轮（封顶 1）
+    self_critiqued: bool = False   # 模型自己调过 self_critique —— 调过就不再由运行时代劳
 
     def before_model_step(self, step_idx: int, narrate: Callable[[str], None]) -> None:
         remaining = self.max_steps - step_idx
@@ -145,6 +148,9 @@ class TurnStatus:
                     self.wrote_code_files = True
                 self.runtime_validated = False
                 self.behavior_gate_rounds = 0
+            return
+        if name == "self_critique" and result.ok:
+            self.self_critiqued = True
             return
         if not self.wrote_code or name not in _RUNTIME_VALIDATION_TOOLS or not result.ok:
             return
@@ -339,6 +345,15 @@ def _record_tool_result(ctx: ToolContext, messages: list, tc: dict, res, duratio
     if guard is not None:
         guard.observe(tc.get("name") or "", tc.get("arguments"),
                       res.ok and not blocked, res.text or "")
+    if not blocked:
+        # 证据台账：跨轮、跨会话地记住"这一轮到底证明了什么"。它自己挑有验证意义的
+        # 工具（命令/测试/读写/接口），其余一律跳过。
+        try:
+            evidence_ledger.record_tool(
+                getattr(ctx, "session_id", ""), getattr(ctx, "turn_id", ""),
+                tc.get("name") or "", tc.get("arguments") or {}, res.ok, res.text or "")
+        except Exception:   # noqa: BLE001 —— 台账坏了不该连累工具调用
+            pass
     progress_reporting.observe_tool_result(ctx, tc.get("name") or "", res)
     result = res.text
     payload = {"arguments": tc.get("arguments") or {}}
@@ -475,6 +490,96 @@ def _verify_gate_feedback(ctx: ToolContext, status: TurnStatus,
     return res.get("feedback") or None
 
 
+_CRITIQUE_CAP = 1          # 最多逼修正几轮。自查是帮手不是关卡，绝不因为它把一轮耗光。
+
+
+def _critique_kind(ctx: ToolContext, status: TurnStatus) -> str:
+    """这一轮该用哪套复核维度。"""
+    if getattr(ctx, "executed_writes", False):
+        return "ads"
+    if status.wrote_code_files:
+        return "code"
+    if getattr(ctx, "knowledge_citations", []):
+        return "knowledge"
+    return "general"
+
+
+#: 通过时给用户看的自查备注最多几条、每条多长。这是旁注不是报告，长了没人看。
+_CRITIQUE_NOTE_ITEMS = 3
+_CRITIQUE_NOTE_CHARS = 160
+
+
+def _critique_note(markdown: str) -> str:
+    """从复核正文里挑出实质发现，渲染成给用户看的几行旁注。没有实质内容返回空串。"""
+    lines: list[str] = []
+    for raw in (markdown or "").splitlines():
+        line = raw.strip().lstrip("-*• ").strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.lstrip("*_ ").startswith(("通过", "建议修正")) or line in ("**通过**", "通过。"):
+            continue
+        if not re.match(r"^\d+[.、)]", line):
+            continue
+        body = re.sub(r"^\d+[.、)]\s*", "", line)
+        # "未发现问题"这类空结论不值得占一行
+        if any(mark in body for mark in ("未发现", "无问题", "没有问题", "无异常", "符合")):
+            continue
+        lines.append("  · " + body[:_CRITIQUE_NOTE_CHARS])
+        if len(lines) >= _CRITIQUE_NOTE_ITEMS:
+            break
+    return "\n".join(lines)
+
+
+def _critique_gate_feedback(ctx: ToolContext, status: TurnStatus, content: str,
+                            narrate: Callable[[str], None]) -> str | None:
+    """收尾前自查门禁：改过真代码、或真下过写指令的轮次，交付前由**运行时**复核一遍。
+
+    为什么只盯这两种轮次：自查要多花一次模型调用，全轮次开等于给每次问答都加一份税。
+    而"动过东西"的轮次是返工代价最高的地方 —— 改错了要再改一遍，广告下错了要花钱。
+    普通问答、只写文档的轮次一律不碰。
+
+    模型自己调过 `self_critique` 就不再代劳（它已经自查过了）。
+    结论是"通过"时静默放行，只有"建议修正"才注回 —— 拿不准一律按通过（见 critique.needs_fix）。
+    """
+    if status.critique_rounds >= _CRITIQUE_CAP or status.self_critiqued:
+        return None
+    if not (status.wrote_code_files or getattr(ctx, "executed_writes", False)):
+        return None
+    if not config.get_setting("critique_before_done", True):
+        return None
+    provider = getattr(ctx, "provider", None)
+    if provider is None or not (content or "").strip():
+        return None
+    kind = _critique_kind(ctx, status)
+    narrate(ui.message("info", "改动已落盘，交付前先自查一遍…"))
+    try:
+        from . import critique as _crit
+        res = _crit.critique(getattr(ctx, "progress_query", "") or "", content, provider, kind=kind)
+    except Exception:   # noqa: BLE001 —— 自查挂了绝不拖累交付
+        return None
+    traces.record(getattr(ctx, "session_id", ""), getattr(ctx, "turn_id", ""),
+                  "critique", kind, ok=not res.get("needs_fix"),
+                  summary=(res.get("markdown") or res.get("note") or "")[:1000])
+    if not res.get("ok") or not res.get("needs_fix"):
+        # 判"通过"不等于**什么都没发现**。实测里一次通过的复核仍然指出了
+        # "调用方可能依赖 ZeroDivisionError"这种真问题 —— 静默丢掉等于付了钱没拿到东西。
+        # 只讲给用户听（narrate），不注回模型：它已经决定通过了，再塞回去只会诱导它
+        # 把对的答案改坏。
+        note = _critique_note(res.get("markdown") or "")
+        if note:
+            narrate(ui.message("info", "自查备注（不影响结论）：\n" + note))
+        return None
+    status.critique_rounds += 1
+    narrate(ui.message("warn", "收尾自查发现问题，先处理再交付。"))
+    return transcript.gate_text(
+        transcript.CRITIQUE_GATE,
+        "\n" + (res.get("markdown") or "") +
+        "\n\n请逐条处理：能改的直接改（改完照常验证），改不了的在最终回答里**明说**"
+        "为什么不改、风险是什么。不要为了通过自查把已经对的结论改掉；"
+        "确认某条批评不成立时，说明理由即可。"
+    )
+
+
 def _progress_gate_feedback(ctx: ToolContext, narrate: Callable[[str], None]) -> str | None:
     feedback = progress_reporting.completion_feedback(ctx)
     if feedback:
@@ -574,6 +679,7 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
     None = 全量 TOOL_SCHEMAS。"""
     task_scope.prepare_messages(ctx, messages)
     _inject_plan_note(ctx, messages)
+    thinking.apply_to(provider, ctx)
     tool_schemas = TOOL_SCHEMAS if tools is None else tools
     max_steps = _resolve_max_steps(max_steps, "chat_max_tool_steps")
     status = TurnStatus(max_steps=max_steps, behavioral_task=bool(getattr(ctx, "behavioral_task", False)))
@@ -591,6 +697,8 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
                 fb = _progress_gate_feedback(ctx, narrate)
             if fb is None:
                 fb = _citation_gate_feedback(ctx, content, status, narrate)
+            if fb is None:
+                fb = _critique_gate_feedback(ctx, status, content, narrate)
             if fb is not None:
                 messages.append({"role": "user", "content": fb})
                 continue
@@ -630,9 +738,10 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
     （引用校验最多来回 2 次）——终端是一条向下的日志、叠着看没问题，但网页把
     token 顺序拼进同一个气泡，用户看到的就是同一张表连出三遍。给了这个回调的
     调用方（serve → 网页）会收到边界，把气泡清空重画；不给（CLI）则一个字都不变。
-    reason: tool_call | gate:verify | gate:progress | gate:citation。"""
+    reason: tool_call | gate:verify | gate:progress | gate:citation | gate:critique。"""
     task_scope.prepare_messages(ctx, messages)
     _inject_plan_note(ctx, messages)
+    thinking.apply_to(provider, ctx)
     tool_schemas = TOOL_SCHEMAS if tools is None else tools
     render = render or (lambda s: print(s, end="", flush=True))
     render_reasoning = render_reasoning or (lambda s: None)
@@ -724,6 +833,10 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
                 fb = _citation_gate_feedback(ctx, content, status, narrate)
                 if fb is not None:
                     gate = "citation"
+            if fb is None:
+                fb = _critique_gate_feedback(ctx, status, content, narrate)
+                if fb is not None:
+                    gate = "critique"
             if fb is not None:
                 messages.append({"role": "user", "content": fb})
                 # 门禁要求的是**整篇重写**，所以刚吐出去的那一稿到此作废。

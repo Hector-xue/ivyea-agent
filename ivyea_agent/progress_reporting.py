@@ -322,8 +322,19 @@ def apply_update(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
     report_attention = [e for report in reports for e in _items(report.get("attention"))]
     completed = _dedupe(actual_completed, _items(args.get("completed")), limit=20) or ["无"]
     incomplete = _dedupe(actual_incomplete, _items(args.get("incomplete")), limit=20) or ["无"]
+    # 最终汇总的「验证」一栏：模型自述 → 阶段报告 → 本轮工具痕迹 → **证据台账**。
+    # 台账排最后但不可省：前三样都活在这一轮的内存里，台账是唯一落了盘、能事后对账的那份。
+    ledger_evidence: list[str] = []
+    try:
+        from . import evidence_ledger
+        ledger_evidence = evidence_ledger.render(
+            session_id=getattr(ctx, "session_id", "") or "",
+            turn_id=getattr(ctx, "turn_id", "") or "", limit=8)
+    except Exception:  # noqa: BLE001
+        ledger_evidence = []
     evidence = _dedupe(_items(args.get("evidence")), report_evidence,
-                       list(getattr(ctx, "progress_tool_evidence", []) or []), limit=12) or ["无可用验证证据"]
+                       list(getattr(ctx, "progress_tool_evidence", []) or []),
+                       ledger_evidence, limit=12) or ["无可用验证证据"]
     attention = _dedupe(_items(args.get("attention")), report_attention,
                         list(getattr(ctx, "progress_attention", []) or []), limit=10)
     if actual_incomplete:
