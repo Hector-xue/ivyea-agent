@@ -288,10 +288,18 @@ TOOL_SCHEMAS = [
             "required": ["name"]}}},
     {"type": "function", "function": {
         "name": "dispatch_subagent",
-        "description": "派一个只读子 agent 做聚焦调研/探索，返回其结论摘要。子 agent 只能用只读工具(grep/code_search/read_file/web_fetch/knowledge_search 等)、不能写、不能再派子 agent、步数受限。需要并行铺开多角度调研、或把一段独立的查证任务委派出去时用它，避免主线上下文被探索细节塞满。",
+        "description": "派一个只读子 agent 做聚焦调研/探索，返回其结论摘要。用 role 选分工（默认通用调研）。子 agent 只能用只读工具、不能写、不能执行命令、不能再派子 agent、步数受限，且有自己的预算不吃主线额度。需要并行铺开多角度调研、或把一段独立的查证任务委派出去时用它，避免主线上下文被探索细节塞满。同一步里可以派多个不同角色并行。",
         "parameters": {"type": "object", "properties": {
             "task": {"type": "string", "description": "交给子 agent 的具体问题/调研目标，越聚焦越好"},
-            "max_steps": {"type": "integer", "description": "子 agent 工具步数上限，默认 12，最大 20"}},
+            "role": {"type": "string",
+                     "enum": ["researcher", "code_explorer", "data_analyst",
+                              "listing_auditor", "ads_reviewer", "knowledge_auditor"],
+                     "description": "分工角色：researcher=通用调研(默认)；code_explorer=在代码库里定位"
+                                    "实现/调用方/影响面；data_analyst=拉取并解读账户广告数据；"
+                                    "listing_auditor=Listing/评论/图片审核；ads_reviewer=复核广告动作"
+                                    "(数据够不够、护栏有没有越)；knowledge_auditor=核对事实来源与适用范围。"
+                                    "用户在 ~/.ivyea/agents/*.md 里自定义的角色名也可以填。"},
+            "max_steps": {"type": "integer", "description": "子 agent 工具步数上限；不填按角色默认"}},
             "required": ["task"]}}},
 ] + tools_general.GENERAL_TOOL_SCHEMAS
 
@@ -911,33 +919,40 @@ def _subagent_schemas() -> list:
 
 
 def t_dispatch_subagent(args: dict, ctx: ToolContext) -> str:
-    """跑一个只读子 agent 做聚焦调研，返回结论摘要（自带独立上下文，不污染主线）。"""
+    """跑一个只读子 agent 做聚焦调研，返回结论摘要（自带独立上下文，不污染主线）。
+
+    角色决定它拿到什么 system prompt、能用哪些工具、能跑几步（见 subagents.py）。
+    **所有角色都是只读的**：子 agent 跑在后台，写/执行类工具的审批没有人能应答。
+    """
     task = (args.get("task") or "").strip()
     if not task:
         return "task 为空：描述要子 agent 查清的问题。"
     provider = getattr(ctx, "provider", None)
     if provider is None:
         return "当前环境无可用主脑 provider，无法派子 agent。"
-    from . import agent_loop, config  # 延迟导入避免循环依赖
+    from . import agent_loop, config, subagents  # 延迟导入避免循环依赖
+    role = subagents.get_role(str(args.get("role") or ""))
     try:
         _cap = int(config.get_setting("subagent_max_steps_cap", 40))
     except (TypeError, ValueError):
         _cap = 40
-    max_steps = min(int(args.get("max_steps") or 12), max(1, _cap))
-    sub_sys = ("你是只读调研子 agent。用只读工具(grep/code_search/read_file/web_fetch/knowledge_search 等)"
-               "把交给你的问题查清楚，最后用简洁中文给出结论与依据(文件:行/来源)。"
-               "你不能写文件、不能执行命令、不能改广告，也不要再派子 agent。")
+    max_steps = min(int(args.get("max_steps") or role.max_steps), max(1, _cap))
+    # 子 agent 有**自己的**预算，不吃主线额度：派三个去查三件事，
+    # 不该让主线只剩三分之一的配额。
     sub_ctx = ToolContext(workspace=getattr(ctx, "workspace", ""), plan_mode=True,
                           provider=provider, perm=permission.PermissionState(),
                           progress_reporting_disabled=True)
-    sub_messages = [{"role": "system", "content": sub_sys},
+    sub_messages = [{"role": "system", "content": role.system},
                     {"role": "user", "content": task}]
     try:
-        result = agent_loop.run_turn(provider, sub_ctx, sub_messages, max_steps=max_steps,
-                                     narrate=lambda s: None, tools=_subagent_schemas())
+        result = agent_loop.run_turn(
+            provider, sub_ctx, sub_messages, max_steps=max_steps,
+            narrate=lambda s: None,
+            tools=subagents.tools_for(role, _subagent_schemas()))
     except Exception as e:  # noqa: BLE001
         return f"子 agent 执行出错：{e}"
-    return "【子 agent 结论】\n" + (result or "（无结论）")
+    head = "【子 agent 结论】" if role.name == subagents.DEFAULT_ROLE else f"【子 agent · {role.name}】"
+    return head + "\n" + (result or "（无结论）")
 
 
 _DISPATCH["dispatch_subagent"] = t_dispatch_subagent

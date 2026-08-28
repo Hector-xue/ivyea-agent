@@ -11,7 +11,7 @@ from pathlib import Path
 from . import config
 
 _RESERVED = {"help", "quit", "exit", "plan", "approve", "cost", "compact", "raw",
-             "init", "mcp", "knowledge", "skill", "learn", "model"}
+             "init", "mcp", "knowledge", "skill", "learn", "resume", "model"}
 
 
 def commands_dir() -> Path:

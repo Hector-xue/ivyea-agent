@@ -1641,6 +1641,7 @@ SLASH_COMMANDS = [
     ("/reflect", "把最近的零散经历提炼成分类记忆（会话结束也会自动跑）"),
     ("/profile", "查看/配置运营画像（目标 ACoS/保护词/核心词）"),
     ("/plan", "进入/退出计划模式（只读，不写入）；/plan show 看当前计划"),
+    ("/resume", "接着上一轮没做完的继续（计划 + 已有证据一起带上）"),
     ("/approve", "批准并退出计划模式，继续执行"),
     ("/cost", "本会话 token 用量与成本估算"),
     ("/compact", "压缩上下文；/compact auto on|off 控制自动压缩"),
@@ -1659,7 +1660,7 @@ SLASH_COMMANDS = [
 _SLASH_GROUPS = [
     ("模型 / 配置", ["/model", "/config", "/status", "/mcp"]),
     ("代码 / 工程", ["/diff", "/workspace", "/patch", "/gitops", "/tools"]),
-    ("会话控制", ["/plan", "/approve", "/auto-edit", "/raw", "/stream", "/compact", "/cost", "/clear"]),
+    ("会话控制", ["/plan", "/approve", "/resume", "/auto-edit", "/raw", "/stream", "/compact", "/cost", "/clear"]),
     ("知识 / 记忆", ["/knowledge", "/skill", "/learn", "/memory", "/reflect", "/init"]),
     ("系统", ["/help", "/exit"]),
 ]
@@ -2532,7 +2533,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             _handler = _SLASH_HANDLERS.get(line.split()[0])
             if _handler is not None:
                 _handler(line); continue
-            if line.split()[0] == "/learn":
+            if line.split()[0] == "/resume":
+                from . import plan_store as _ps
+                _note = _ps.render_note(sid or "")
+                if not _note:
+                    print(ui.message("info", "当前会话没有未完成的计划，没什么可续的。")); continue
+                _extra = line[len("/resume"):].strip()
+                line = ("接着上一轮没做完的继续。先看下面的计划状态，从第一个还没进终态的步骤接着做；"
+                        "已经成功过的工具调用不要重复。\n\n" + _note
+                        + (("\n\n补充要求：" + _extra) if _extra else ""))
+                print(ui.message("muted", "已带上计划与进度，继续…"))
+            elif line.split()[0] == "/learn":
                 # /learn 不是一条"执行完就完"的命令，而是把用户这句话编译成一轮指令、
                 # 交给模型用它已有的工具去做（读素材 → skill_write 落盘）。所以在这里
                 # 展开成 prompt 贯穿到下面的模型轮，与自定义命令走同一条路。
@@ -2692,6 +2703,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 messages.pop()  # 撤回这条 user，避免污染上下文
     finally:
         _auto_reflect(cfg, narrate=not _oneshot)
+        _auto_learn_skill(ctx, sid or "", meter)
         _hooks.fire("session_end", {"session_id": sid or "", "turns": meter.turns,
                                     "cost": round(meter.cost, 6)})
 
@@ -2755,6 +2767,39 @@ def _record_turn_memory(args, user_text: str, assistant_text: str, sid: str) -> 
         memory_reflect.maybe_reflect_async()
     except Exception:  # noqa: BLE001 —— 记忆是副作用，绝不能吃掉这一轮
         pass
+
+
+def _auto_learn_skill(ctx, session_id: str, meter) -> None:
+    """会话结束时问一句"这一轮有没有值得沉淀成技能的流程"。**默认关。**
+
+    默认关不是保守，是具体的：技能会被自动注入进后续对话、实打实改变模型行为。
+    让后台程序自动往里加东西，第一次误判就会污染检索。先让用户用一段时间 `/learn`
+    看清楚它的水准，再决定要不要放开（`ivyea config set skill_auto_learn true`）。
+    """
+    try:
+        from . import evidence_ledger, plan_store, skill_reflect
+        if not skill_reflect.enabled():
+            return
+        plan = plan_store.load(session_id) or {}
+        steps = plan.get("steps") or []
+        digest_parts = []
+        if plan.get("objective"):
+            digest_parts.append(f"目标：{plan['objective']}")
+        for step in steps:
+            digest_parts.append(f"- {step.get('content')}（{step.get('status')}）"
+                                + (f"：{step['evidence'][-1]}" if step.get("evidence") else ""))
+        evidence = evidence_ledger.render(session_id=session_id, limit=12)
+        digest_parts.extend("- " + e for e in evidence)
+        if not digest_parts:
+            return
+        skill_reflect.maybe_reflect_async(
+            "\n".join(digest_parts),
+            tool_steps=len(evidence) + len(steps),
+            had_phases=len(steps) >= 2,
+            had_evidence=bool(evidence),
+        )
+    except Exception:      # noqa: BLE001 —— 沉淀失败绝不影响退出
+        return
 
 
 def _auto_reflect(cfg, *, narrate: bool = True) -> None:
@@ -3289,6 +3334,16 @@ def _cmd_skill(args: argparse.Namespace) -> int:
             for name in archived:
                 print("  " + name)
         return 0
+    if args.action == "curate":
+        from . import skill_curator
+        report = skill_curator.analyze(dormant_days=args.dormant_days)
+        print(skill_curator.render(report, dormant_days=args.dormant_days))
+        if args.apply:
+            done = skill_curator.apply_archive(report, dormant_days=args.dormant_days)
+            print(f"\n已归档 {len(done)} 条：{'、'.join(done) or '（无）'}"
+                  "\n（只归档不删除，`ivyea skill restore <名字>` 可恢复；"
+                  "重合与不合格项不自动处理——那两件事得你拍板。）")
+        return 0
     if args.action == "archive":
         if not args.query:
             print("用法: ivyea skill archive <skill_id>", file=sys.stderr)
@@ -3352,6 +3407,12 @@ def _cmd_skill(args: argparse.Namespace) -> int:
         print(skills.render_skill(sk, include_knowledge=True))
         return 0
     return 2
+
+
+def _cmd_agents(_args: argparse.Namespace) -> int:
+    from . import subagents
+    print(subagents.render_list())
+    return 0
 
 
 def _cmd_learn(args: argparse.Namespace) -> int:
@@ -4734,9 +4795,13 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--note", help="审核备注")
     pk.set_defaults(func=_cmd_knowledge)
 
-    pski = sub.add_parser("skill", help="可复用 Skill：list/search/show/run/create/audit/status/usage/archive/restore/export-lock")
+    pski = sub.add_parser("skill", help="可复用 Skill：list/search/show/run/create/audit/status/usage/curate/archive/restore/export-lock")
     pski.add_argument("action", choices=["list", "search", "show", "run", "create", "audit",
-                                         "status", "usage", "archive", "restore", "export-lock"])
+                                         "status", "usage", "curate", "archive", "restore",
+                                         "export-lock"])
+    pski.add_argument("--apply", action="store_true",
+                      help="curate：把沉睡技能真的归档（默认只打印建议；归档可 restore）")
+    pski.add_argument("--dormant-days", type=int, default=60, help="curate：多久没命中算沉睡")
     pski.add_argument("query", nargs="?")
     pski.add_argument("--limit", type=int, default=8)
     pski.add_argument("--title")
@@ -4750,6 +4815,9 @@ def build_parser() -> argparse.ArgumentParser:
     pski.add_argument("--output")
     pski.add_argument("--force", action="store_true")
     pski.set_defaults(func=_cmd_skill)
+
+    pag = sub.add_parser("agents", help="查看可用的子 agent 分工角色（含 ~/.ivyea/agents/*.md 自定义）")
+    pag.set_defaults(func=_cmd_agents)
 
     ple = sub.add_parser("learn", help="把一段流程/目录/网页学成可复用 Skill（跑一轮 agent）")
     ple.add_argument("request", nargs="+", help="素材与要求，可混写：路径 / URL / 一段描述")

@@ -14,8 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import (config, context, evidence_ledger, knowledge, loop_guard, panels, plan_store,
-               progress_reporting, stream_json, task_scope, thinking, traces, transcript, ui)
+from . import (budget as budget_mod, config, context, evidence_ledger, knowledge, loop_guard,
+               panels, plan_store, progress_reporting, stream_json, task_scope, thinking, traces,
+               transcript, ui)
 from .agent_tools import PARALLEL_SAFE, TOOL_SCHEMAS, ToolContext, ToolResult, dispatch_result
 from .providers import LLMProvider
 
@@ -111,6 +112,7 @@ def _wrote_code_files(args: dict | None) -> bool:
 @dataclass
 class TurnStatus:
     max_steps: int
+    budget: "budget_mod.TurnBudget | None" = None   # 步数/成本预算；None=按 max_steps 裸数（老行为）
     warning_remaining: int = DEFAULT_TOOL_WARNING_REMAINING
     warned: bool = False
     tool_calls: int = 0
@@ -125,7 +127,8 @@ class TurnStatus:
     self_critiqued: bool = False   # 模型自己调过 self_critique —— 调过就不再由运行时代劳
 
     def before_model_step(self, step_idx: int, narrate: Callable[[str], None]) -> None:
-        remaining = self.max_steps - step_idx
+        remaining = (self.budget.steps_remaining if self.budget is not None
+                     else self.max_steps - step_idx)
         if not self.warned and remaining <= self.warning_remaining:
             self.warned = True
             narrate(ui.message(
@@ -134,8 +137,11 @@ class TurnStatus:
                 "若进展不顺，先停下重列假设/换定位思路，别把疑似错误的路径走到底。",
             ))
 
-    def record_tool_call(self) -> None:
+    def record_tool_call(self, name: str = "") -> None:
+        # tool_calls 是**全部**调用数（UI 的时间线序号靠它），预算才区分记不记账。
         self.tool_calls += 1
+        if self.budget is not None:
+            self.budget.consume(name)
 
     def observe_tool_result(self, name: str, result: ToolResult, args: dict | None = None) -> None:
         text = result.text or ""
@@ -168,6 +174,28 @@ def _resolve_max_steps(value: int | None, setting_key: str) -> int:
         return DEFAULT_MAX_TOOL_STEPS
 
 
+#: 模型步数的硬天花板 = 预算步数 × 这个倍数。
+#:
+#: 预算只数**干活的**调用（记账调用退款，见 budget.py），所以光靠预算，一个只发
+#: progress_update 的死循环可以一直转下去 —— loop_guard 会拦，但天花板是最后一道保险。
+#: 3 倍来自实测：一句"测试"跑了 18 步其中 17 步是记账，最坏情况约 1:2 的干活/记账比。
+_STEP_CEILING_FACTOR = 3
+
+
+def _hard_step_ceiling(max_steps: int) -> int:
+    return max(1, int(max_steps)) * _STEP_CEILING_FACTOR
+
+
+def _step_cost(provider, usage: dict, model: str = "") -> float:
+    """这一步的估算成本（人民币）。算不出来一律 0 —— 成本闸宁可不拦，也不能因为
+    某个模型没在价目表里就把一轮好端端的任务掐了。"""
+    try:
+        from . import pricing
+        return pricing.estimate(model or getattr(provider, "model", "") or "", usage or {})
+    except Exception:   # noqa: BLE001
+        return 0.0
+
+
 def _new_loop_guard() -> "loop_guard.LoopGuard":
     """按设置造一轮的打转守卫。两个阈值都可调，设 0 即关掉对应检测。"""
     def _num(key: str, default: int) -> int:
@@ -183,15 +211,23 @@ def _new_loop_guard() -> "loop_guard.LoopGuard":
     )
 
 
-def _limit_text(max_steps: int) -> str:
+def _limit_text(max_steps: int, budget: "budget_mod.TurnBudget | None" = None) -> str:
+    """到顶了给用户的那句话。**必须说清是撞了哪道闸** —— 步数和成本要采取的动作完全不同：
+    前者是"再说一句继续"，后者是"这一轮已经花掉 N 块钱了，你要不要继续花"。"""
+    if budget is not None and budget.stop_reason() == "cost":
+        return (f"（本轮已达成本上限：{budget.render()}。任务还没收尾就先停下来了——"
+                f"这是刻意的止损点，不是出错。要接着做就说“继续”；"
+                f"想放宽用 `ivyea config set chat_max_cost_cny <金额>`，设 0 关掉这道闸。）")
     return (f"（本轮工具调用已连续执行到安全上限 {max_steps} 步仍未收尾——这通常意味着任务很大或某处卡住了。"
             f"可以直接说“继续”接着做，或用 `ivyea config set chat_max_tool_steps {max_steps * 2}` 进一步提高单轮上限。）")
 
 
 def _limit_payload(max_steps: int, status: TurnStatus, ctx: ToolContext | None = None) -> str:
     text = (
-        f"{_limit_text(max_steps)}\n"
-        f"本轮已经执行工具调用 {status.tool_calls} 次。下一轮继续时，请先总结已完成的工具结果，"
+        f"{_limit_text(max_steps, status.budget)}\n"
+        f"本轮已经执行工具调用 {status.tool_calls} 次"
+        + (f"（{status.budget.render()}）" if status.budget is not None else "")
+        + "。下一轮继续时，请先总结已完成的工具结果，"
         "再从最后一个未完成的小步骤继续；除非必要，不要重复已经成功的工具调用。"
     )
     todos = list(getattr(ctx, "todos", []) or []) if ctx is not None else []
@@ -417,7 +453,7 @@ def _dispatch_tool_calls(ctx: ToolContext, messages: list, status: TurnStatus, t
         序号取 status.tool_calls（record_tool_call 刚自增过），全轮单调递增，
         UI 靠它排时间线；配对靠 tc["id"]，与 tool_result 事件同一把钥匙。
         """
-        status.record_tool_call()
+        status.record_tool_call(tc["name"])
         seq = status.tool_calls
         narrate(ui.tool_call(tc["name"], tc.get("arguments") or {}))
         _emit_safe(emit, stream_json.step_event(
@@ -450,12 +486,36 @@ def _finalize_limit(ctx: ToolContext, messages: list, status: TurnStatus, max_st
     text = _limit_payload(max_steps, status, ctx)
     _append_limit_context(messages, text)
     _record_task_interruption(ctx, text, status)
+    _write_resume_artifact(ctx, status, text)
     payload = {"max_steps": max_steps, "tool_calls": status.tool_calls}
+    if status.budget is not None:
+        payload.update({"steps_used": status.budget.steps_used,
+                        "steps_refunded": status.budget.steps_refunded,
+                        "cost_cny": round(status.budget.cost_cny, 6),
+                        "stop_reason": status.budget.stop_reason()})
     if extra_payload:
         payload.update(extra_payload)
     traces.record(getattr(ctx, "session_id", ""), getattr(ctx, "turn_id", ""),
                   "turn_limit", "tool_steps", ok=False, summary=text, payload=payload)
     return text
+
+
+def _write_resume_artifact(ctx: ToolContext, status: TurnStatus, text: str) -> None:
+    """把"停在哪、已经证明了什么"落盘，供 `/resume` 接着做。
+
+    `_record_task_interruption` 只在绑了 task_id 时生效（serve 的任务台），命令行这条路
+    此前撞上限就只剩一句提示文字 —— 计划状态和证据都在内存里，进程一退就没了。
+    """
+    session_id = getattr(ctx, "session_id", "") or ""
+    if not session_id:
+        return
+    try:
+        plan_store.mark_replan(
+            session_id,
+            f"上一轮未收尾就停了（{status.budget.stop_reason() or 'steps'}）。"
+            "继续时先看计划里哪几步还没进终态，从那里接着做。")
+    except Exception:   # noqa: BLE001
+        pass
 
 
 def _verify_gate_feedback(ctx: ToolContext, status: TurnStatus,
@@ -683,12 +743,17 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
     thinking.apply_to(provider, ctx)
     tool_schemas = TOOL_SCHEMAS if tools is None else tools
     max_steps = _resolve_max_steps(max_steps, "chat_max_tool_steps")
-    status = TurnStatus(max_steps=max_steps, behavioral_task=bool(getattr(ctx, "behavioral_task", False)))
+    turn_budget = budget_mod.from_settings(max_steps)
+    status = TurnStatus(max_steps=max_steps, budget=turn_budget,
+                        behavioral_task=bool(getattr(ctx, "behavioral_task", False)))
     guard = _new_loop_guard()
-    for step_idx in range(max_steps):
+    for step_idx in range(_hard_step_ceiling(max_steps)):
+        if turn_budget.exhausted():
+            break
         _maybe_compact(messages, provider, step_idx, narrate, ctx)
         status.before_model_step(step_idx, narrate)
         msg = provider.chat(messages, tools=tool_schemas)
+        turn_budget.add_cost(_step_cost(provider, msg.get("usage") or {}))
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
             content = msg.get("content", "") or ""
@@ -780,9 +845,13 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
             u.get("prompt_cache_hit_tokens") or (u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
 
     max_steps = _resolve_max_steps(max_steps, "chat_max_tool_steps")
-    status = TurnStatus(max_steps=max_steps, behavioral_task=bool(getattr(ctx, "behavioral_task", False)))
+    turn_budget = budget_mod.from_settings(max_steps)
+    status = TurnStatus(max_steps=max_steps, budget=turn_budget,
+                        behavioral_task=bool(getattr(ctx, "behavioral_task", False)))
     guard = _new_loop_guard()
-    for step_idx in range(max_steps):
+    for step_idx in range(_hard_step_ceiling(max_steps)):
+        if turn_budget.exhausted():
+            break
         if cancel_check():
             raise KeyboardInterrupt
         _maybe_compact(messages, provider, step_idx, narrate, ctx)
@@ -818,6 +887,7 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
         if printed_any and not defer_text:
             render("\n")
         _accum(final.get("usage") or {})
+        turn_budget.add_cost(_step_cost(provider, final.get("usage") or {}, model))
         tool_calls = final.get("tool_calls") or []
         if not tool_calls:
             content = final.get("content", "") or ""
