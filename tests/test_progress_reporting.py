@@ -215,3 +215,41 @@ def test_phase_end_on_the_wrong_index_names_the_right_one():
                                            "evidence": ["x"]}, ctx)
     assert out["ok"] is False
     assert "当前正在进行的是第 1 步" in out["text"]
+
+
+def _ctx_with_active_phase(tool_evidence):
+    from ivyea_agent.agent_tools import ToolContext
+    ctx = ToolContext(workspace=".")
+    ctx.todos = [{"content": "查资料", "status": "completed"},
+                 {"content": "写结论（不调工具）", "status": "in_progress"}]
+    ctx.progress_started = True
+    ctx.progress_active_phase = 2
+    ctx.progress_tool_evidence = list(tool_evidence)
+    ctx.progress_phase_tool_evidence = {}      # 第 2 阶段本身一次工具都没调
+    return ctx
+
+
+def test_a_tool_free_phase_can_still_be_closed():
+    """写结论/做汇总这类步骤本来就不调工具，逐阶段要求工具证据等于判它死刑（实测卡死过）。"""
+    from ivyea_agent import progress_reporting
+
+    ctx = _ctx_with_active_phase(["read_file: app.py 82 字节", "glob: 匹配 1 个文件"])
+    out = progress_reporting.apply_update(
+        {"kind": "phase_end", "status": "completed", "summary": "写完结论",
+         "evidence": ["结论基于前两步的读取结果"]}, ctx)
+    assert out["ok"] is True
+    # 证据里要真的带上本轮跑出来的东西，不能只有模型自述
+    assert any("read_file" in e or "glob" in e for e in out["event"]["evidence"])
+
+
+def test_a_turn_with_zero_tool_evidence_still_cannot_claim_completion():
+    """本轮一次工具都没跑通时，"不能只凭文字声称完成"这条必须照样守住。"""
+    from ivyea_agent import progress_reporting
+
+    ctx = _ctx_with_active_phase([])
+    out = progress_reporting.apply_update(
+        {"kind": "phase_end", "status": "completed", "summary": "我觉得做完了",
+         "evidence": ["凭感觉"]}, ctx)
+    assert out["ok"] is False
+    assert "一次工具都没有成功跑出结果" in out["text"]
+    assert "blocked" in out["text"]      # 拒绝要给出路

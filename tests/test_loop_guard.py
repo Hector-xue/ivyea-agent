@@ -173,3 +173,23 @@ def test_polling_never_trips_the_rejection_streak():
     for _ in range(10):
         guard.observe("bash_output", {"bash_id": "b1"}, True, "⚠ 该后台任务不存在")
         assert guard.check("bash_output", {"bash_id": "b1"}) is None
+
+
+def test_rotating_rejections_are_blocked_too():
+    """实测第二形态：模型在三四句**不同**的拒绝之间轮着撞，一句都不连续重复。"""
+    guard = loop_guard.LoopGuard(repeat_limit=3, stall_limit=99)
+    rejects = ["⚠ 必须提供 evidence。", "⚠ 还没有真实工具结果。", "⚠ 当前阶段尚未 phase_end。"]
+    for i in range(6):
+        assert guard.check("progress_update", {"n": i}) is None
+        guard.observe("progress_update", {"n": i}, True, rejects[i % 3])
+    blocked = guard.check("progress_update", {"n": 99})
+    assert blocked is not None
+    assert "连续 6 次被拒绝" in blocked
+
+
+def test_one_success_clears_the_rotating_streak():
+    guard = loop_guard.LoopGuard(repeat_limit=2, stall_limit=99)
+    for i in range(4):
+        guard.observe("progress_update", {"n": i}, True, f"⚠ 拒绝 {i % 2}")
+    guard.observe("progress_update", {"n": 9}, True, "阶段 2 开始")
+    assert guard.check("progress_update", {"n": 10}) is None

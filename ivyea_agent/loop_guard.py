@@ -76,6 +76,10 @@ class LoopGuard:
         # 不是参数。
         self._last_rejection: dict[str, str] = {}
         self._rejection_streak: dict[str, int] = {}
+        # 「同一个工具连续碰壁」的连击数，**不要求拒绝一字不差**。实测里模型会在
+        # 三四句不同的拒绝之间轮着撞，每句都不连续重复，于是上面那条也接不住。
+        # 阈值放宽到两倍：轮着换做法本身是合理的，一直换不出去才是卡死。
+        self._any_rejection_streak: dict[str, int] = {}
         self.steps_since_progress = 0
         self.stall_notices = 0                    # 已经因空转提醒过几次
 
@@ -90,6 +94,13 @@ class LoopGuard:
             return (f"已拦截：`{name}` 已经连续 {streak} 次拿回**完全相同的拒绝**，"
                     "改的只是措辞、不是做法。请照上一条结果指出的问题真正换一步做；"
                     "如果那一步做不到，就停下来告诉用户你卡在哪 —— 再发一遍结果不会变。")
+        with self._lock:
+            any_streak = self._any_rejection_streak.get(name, 0)
+        if any_streak >= self.repeat_limit * 2:
+            return (f"已拦截：`{name}` 已经连续 {any_streak} 次被拒绝，一次都没成功过。"
+                    "这说明你和这个工具的前置条件之间有个死结，继续换措辞试探只会把这一轮耗光。"
+                    "请换一条路（改用别的工具、把这一步标成 blocked/skipped 并说明原因），"
+                    "或者停下来把你卡在哪告诉用户。")
         if name in _EXEMPT:
             return None
         key = _fingerprint(name, args)
@@ -133,14 +144,17 @@ class LoopGuard:
             if name in _POLLING_TOOLS:
                 return
             # 拒绝连击：同一个工具连续拿回同一句拒绝才算，中间成功一次就清零。
-            if rejected and self._last_rejection.get(name) == result_key:
-                self._rejection_streak[name] = self._rejection_streak.get(name, 0) + 1
-            elif rejected:
-                self._last_rejection[name] = result_key
-                self._rejection_streak[name] = 1
+            if rejected:
+                self._any_rejection_streak[name] = self._any_rejection_streak.get(name, 0) + 1
+                if self._last_rejection.get(name) == result_key:
+                    self._rejection_streak[name] = self._rejection_streak.get(name, 0) + 1
+                else:
+                    self._last_rejection[name] = result_key
+                    self._rejection_streak[name] = 1
             else:
                 self._last_rejection.pop(name, None)
                 self._rejection_streak.pop(name, None)
+                self._any_rejection_streak.pop(name, None)
             if name not in _EXEMPT:
                 self._calls[key] = self._calls.get(key, 0) + 1
             if name in _META_TOOLS:
