@@ -2368,7 +2368,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         "/workspace": _sh_embedded, "/patch": _sh_embedded, "/gitops": _sh_embedded,
     }
 
-    def _execute_turn(line, render, narrate, cancel_check=None, render_reasoning=None, emit=None):
+    def _execute_turn(line, render, narrate, cancel_check=None, render_reasoning=None, emit=None,
+                      inject_check=None, on_inject=None):
         """跑一轮对话，输出经 render(token)/narrate(行) 注入 —— 供 TUI 复用（行式循环仍走下方原逻辑）。
         cancel_check：运行中请求中断的钩子（TUI 用）。emit(event)：stream-json 结构化事件回调。
         返回 {text, usage, cost, blocked}。"""
@@ -2445,7 +2446,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         out = agent_loop.run_turn_stream(provider, ctx, messages, model=mcfg.get("model", ""),
                                          render=render, narrate=narrate, cancel_check=cancel_check,
                                          render_reasoning=render_reasoning, emit=emit,
-                                         tools=routing.tools_for(route))
+                                         tools=routing.tools_for(route),
+                                         inject_check=inject_check, on_inject=on_inject)
         c = meter.add(mcfg.get("model", ""), out.get("usage") or {})
         out["cost"] = c or 0.0
         _ui["ctx"] = int((out.get("usage") or {}).get("prompt_tokens") or _ui["ctx"])
@@ -2491,8 +2493,50 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                     sid, cfg.get_model_config().get("model", ""), os.getcwd(),
                     [t["function"]["name"] for t in agent_tools.TOOL_SCHEMAS],
                     "acceptEdits" if ctx.perm.accept_edits else "default"))
-            _out = _execute_turn(args.print_prompt, lambda t: None, _narrate,
-                                 emit=_sj_mod.emit_line if _sj else None)
+            # --input-format stream-json：stdin 也是一条 NDJSON 通道 —— 调用方可以在
+            # 轮次跑着的时候插一句话、回答选项卡、或者叫停。不开这个开关时行为逐字不变
+            # （stdin 照常不读，`-p` 仍是"喂一句、读一串、退出"）。
+            _ctrl = None
+            if getattr(args, "input_format", "text") == "stream-json":
+                from .stdio_control import StdioControl
+                _ctrl = StdioControl(_sj_mod.emit_line).start()
+                ctx.ask_fn = _ctrl.ask          # 选项卡走 stdout/stdin，不再是"没人可问"
+            def _on_inject_p(item: dict) -> None:
+                """追加指令真的插进这一轮了 —— 回一条事件，调用方据此销账。
+
+                调用方（IvyeaOps）靠它认领"这句话到底被读到没有"：没收到回执的，
+                本轮结束后当成下一轮发出去。
+                """
+                if _sj:
+                    _sj_mod.emit_line({"type": "injected", "session_id": sid,
+                                       "id": str(item.get("id") or ""),
+                                       "text": str(item.get("text") or ""),
+                                       "ts": item.get("ts") or 0})
+
+            try:
+                _out = _execute_turn(
+                    args.print_prompt, lambda t: None, _narrate,
+                    emit=_sj_mod.emit_line if _sj else None,
+                    cancel_check=(_ctrl.cancelled if _ctrl else None),
+                    inject_check=(_ctrl.drain if _ctrl else None),
+                    on_inject=_on_inject_p if _ctrl else None,
+                )
+            except KeyboardInterrupt:
+                # 被叫停：**这不是异常结局**。已经跑出来的东西照常落盘（下面那句
+                # `_persist()`），再明确回一条 cancelled —— SIGTERM 掉进程的老做法
+                # 正是在这里丢掉整轮产出的。
+                _persist()
+                if _ctrl:
+                    _ctrl.close()
+                if _sj:
+                    _sj_mod.emit_line({"type": "result", "subtype": "cancelled",
+                                       "is_error": False, "cancelled": True,
+                                       "session_id": sid, "result": "",
+                                       "duration_ms": int((time.time() - _t0) * 1000)})
+                return 0
+            finally:
+                if _ctrl:
+                    _ctrl.close()
             _persist()               # -p 也落盘会话：session_id 可供 --resume 真续接
             if _show_progress and _out.get("todos_panel"):
                 print(_out["todos_panel"], file=sys.stderr, flush=True)
@@ -4863,6 +4907,10 @@ def build_parser() -> argparse.ArgumentParser:
                      default="text",
                      help="-p 输出格式：text=最终答案纯文本（默认）；stream-json=逐行 NDJSON 事件"
                           "（system/init→assistant→tool_result→result，对齐 Claude Code，供程序消费）")
+    pch.add_argument("--input-format", dest="input_format", choices=["text", "stream-json"],
+                     default="text",
+                     help="-p 输入通道：text=不读 stdin（默认，行为不变）；stream-json=从 stdin 逐行读"
+                          "控制消息 —— user_input 追加指令、control_response 回答选项卡、interrupt 优雅中止")
     pch.set_defaults(func=_cmd_chat)
     return p
 
