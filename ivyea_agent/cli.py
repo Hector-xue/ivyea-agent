@@ -1632,6 +1632,7 @@ SLASH_COMMANDS = [
     ("/tools", "列出 Agent 可用工具"),
     ("/knowledge", "搜索内置亚马逊知识库：/knowledge 否词"),
     ("/skill", "搜索可复用运营 Skill：/skill listing"),
+    ("/learn", "把一段流程/一个目录/一个网页/刚才做的事，学成可复用 Skill"),
     ("/workspace", "项目理解：/workspace map|search|explain"),
     ("/patch", "结构化补丁：/patch make|validate|apply|tests"),
     ("/gitops", "Git 工作流：/gitops status|diff|stage|commit|tag"),
@@ -1659,7 +1660,7 @@ _SLASH_GROUPS = [
     ("模型 / 配置", ["/model", "/config", "/status", "/mcp"]),
     ("代码 / 工程", ["/diff", "/workspace", "/patch", "/gitops", "/tools"]),
     ("会话控制", ["/plan", "/approve", "/auto-edit", "/raw", "/stream", "/compact", "/cost", "/clear"]),
-    ("知识 / 记忆", ["/knowledge", "/skill", "/memory", "/reflect", "/init"]),
+    ("知识 / 记忆", ["/knowledge", "/skill", "/learn", "/memory", "/reflect", "/init"]),
     ("系统", ["/help", "/exit"]),
 ]
 _SLASH_ALIASES = {"/h": "/help", "/?": "/help", "/q": "/exit", "/quit": "/exit"}
@@ -2531,7 +2532,14 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             _handler = _SLASH_HANDLERS.get(line.split()[0])
             if _handler is not None:
                 _handler(line); continue
-            if line.startswith("/"):   # 自定义命令展开（展开后贯穿到模型轮）/ 未知命令
+            if line.split()[0] == "/learn":
+                # /learn 不是一条"执行完就完"的命令，而是把用户这句话编译成一轮指令、
+                # 交给模型用它已有的工具去做（读素材 → skill_write 落盘）。所以在这里
+                # 展开成 prompt 贯穿到下面的模型轮，与自定义命令走同一条路。
+                from . import learn_prompt as _lp
+                line = _lp.build_learn_prompt(line[len("/learn"):].strip())
+                print(ui.message("muted", "开始学习并沉淀技能…"))
+            elif line.startswith("/"):   # 自定义命令展开（展开后贯穿到模型轮）/ 未知命令
                 from . import commands as _cmds
                 _head = line.split()[0]
                 _expanded = _cmds.expand(_head[1:], line[len(_head):].strip())
@@ -3272,6 +3280,37 @@ def _cmd_skill(args: argparse.Namespace) -> int:
     if args.action == "status":
         print(skills.render_status())
         return 0
+    if args.action == "usage":
+        from . import skill_usage
+        print(skill_usage.render([sk.id for sk in skills.list_skills()]))
+        archived = skills.list_archive()
+        if archived:
+            print("\n已归档（`ivyea skill restore <名字>` 可恢复）：")
+            for name in archived:
+                print("  " + name)
+        return 0
+    if args.action == "archive":
+        if not args.query:
+            print("用法: ivyea skill archive <skill_id>", file=sys.stderr)
+            return 2
+        try:
+            dest = skills.archive_skill(args.query)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            print(f"归档失败：{e}", file=sys.stderr)
+            return 1
+        print(f"已归档 → {dest}（`ivyea skill restore {dest.name}` 可恢复；只移动不删除）")
+        return 0
+    if args.action == "restore":
+        if not args.query:
+            print("用法: ivyea skill restore <归档目录名>（`ivyea skill usage` 里能看到）", file=sys.stderr)
+            return 2
+        try:
+            dest = skills.restore_skill(args.query)
+        except (FileNotFoundError, FileExistsError, OSError) as e:
+            print(f"恢复失败：{e}", file=sys.stderr)
+            return 1
+        print(f"已恢复 → {dest}")
+        return 0
     if args.action == "export-lock":
         path = skills.write_lockfile(args.output)
         print(f"已写入 skill lockfile：{path}")
@@ -3313,6 +3352,24 @@ def _cmd_skill(args: argparse.Namespace) -> int:
         print(skills.render_skill(sk, include_knowledge=True))
         return 0
     return 2
+
+
+def _cmd_learn(args: argparse.Namespace) -> int:
+    """`ivyea learn ...` = 把请求编译成指令，交给一轮非交互对话去做。
+
+    刻意复用 `chat -p` 那条路而不是另起炉灶：学技能需要的能力（读目录、抓网页、
+    落盘）agent 全都有，再造一条管线只会多出一处要单独维护、单独适配各家 provider 的代码。
+    """
+    from . import learn_prompt
+    # 默认值**从 chat 解析器自己拿**，不手工列一遍：手抄的清单会随 chat 加参数而过期，
+    # 而过期的表现是 learn 直接 AttributeError 崩掉（已经栽过一次）。
+    ns = build_parser().parse_args(["chat"])
+    for key, value in vars(args).items():
+        if key != "request":
+            setattr(ns, key, value)
+    ns.func = _cmd_chat
+    ns.print_prompt = learn_prompt.build_learn_prompt(" ".join(args.request))
+    return _cmd_chat(ns)
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -4677,8 +4734,9 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--note", help="审核备注")
     pk.set_defaults(func=_cmd_knowledge)
 
-    pski = sub.add_parser("skill", help="可复用 Skill：list/search/show/run/create/audit/status/export-lock")
-    pski.add_argument("action", choices=["list", "search", "show", "run", "create", "audit", "status", "export-lock"])
+    pski = sub.add_parser("skill", help="可复用 Skill：list/search/show/run/create/audit/status/usage/archive/restore/export-lock")
+    pski.add_argument("action", choices=["list", "search", "show", "run", "create", "audit",
+                                         "status", "usage", "archive", "restore", "export-lock"])
     pski.add_argument("query", nargs="?")
     pski.add_argument("--limit", type=int, default=8)
     pski.add_argument("--title")
@@ -4692,6 +4750,17 @@ def build_parser() -> argparse.ArgumentParser:
     pski.add_argument("--output")
     pski.add_argument("--force", action="store_true")
     pski.set_defaults(func=_cmd_skill)
+
+    ple = sub.add_parser("learn", help="把一段流程/目录/网页学成可复用 Skill（跑一轮 agent）")
+    ple.add_argument("request", nargs="+", help="素材与要求，可混写：路径 / URL / 一段描述")
+    # 这几个是审批/模型档位，和 chat 同名同义 —— learn 内部就是跑一轮 chat -p。
+    ple.add_argument("--approve-all", action="store_true", help="本轮写操作自动放行（不逐条审批）")
+    ple.add_argument("--permission-mode", dest="permission_mode",
+                     choices=["default", "policy", "approve-all"], default="default")
+    ple.add_argument("--model", help="本轮覆盖主脑模型")
+    ple.add_argument("--output-format", dest="output_format", choices=["text", "stream-json"],
+                     default="text")
+    ple.set_defaults(func=_cmd_learn)
 
     pch = sub.add_parser("chat", help="对话式 Agent（自然语言 + 斜杠命令 + 人工审批）")
     pch.add_argument("--from-mcp", dest="from_mcp", help="执行/拉数用的 MCP 服务器")

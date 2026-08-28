@@ -6,7 +6,8 @@ def test_product_evals_pass():
 
     result = evals.run()
     assert result["ok"], evals.render(result)
-    assert any(c["name"] == "skill.listing_recall" for c in result["checks"])
+    assert any(c["name"] == "skill.recall" for c in result["checks"])
+    assert any(c["name"] == "skill.no_false_inject" for c in result["checks"])
     assert any(c["name"] == "knowledge.registration_official_recall" for c in result["checks"])
     assert any(c["name"] == "knowledge.listing_error_citation" for c in result["checks"])
 

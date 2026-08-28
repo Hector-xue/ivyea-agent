@@ -677,7 +677,11 @@ def _t_recall(args: dict, ctx: ToolContext) -> str:
     except Exception:  # noqa: BLE001 —— 知识库缺失不该让回忆整个失败
         pass
     try:
-        found = skills.search(query, limit=3)
+        # **纯词法**：这里的技能指针是要注进回答里的，和自动注入同一个风险类别。
+        # 语义在小语料（几十条技能）上没有"都不像"这个答案 —— 余弦总会给出最像的那几条，
+        # 于是"完全不存在的东西"也能匹配出三条技能，正是"不管问什么第一句都在匹配技能"
+        # 那个老事故的语义版。想按语义找技能是 skill_search 的事，那里用户是在主动翻库。
+        found = skills.search(query, limit=3, semantic=False)
         if found:
             blocks.append("【相关 Skill】（用 skill_search 取流程）\n"
                           + "\n".join(f"  · {sk.title}（{sk.id}）" for sk, _ in found))
@@ -889,6 +893,9 @@ READONLY_TOOLS = (PARALLEL_SAFE - {"dispatch_subagent"}) | {
     # core_memory_view 只读文件；core_memory_edit 故意**不**进只读集：
     # 子 agent 不该改主人的长期画像，那是主线才有权做的决定。
     "knowledge_search", "skill_search", "recall", "self_critique", "core_memory_view",
+    # skill_view 只读技能全文/附属文件；skill_write 故意**不**进只读集 ——
+    # 子 agent 的一次探索不足以决定"这值得沉淀成技能"，那是主线的判断。
+    "skill_view",
     # memory_search/read 只读；memory_write 不进——子 agent 的探索结论该由主线判断要不要沉淀
     "memory_search", "memory_read",
     "run_patrol", "run_account_diagnosis", "propose_actions",

@@ -45,6 +45,7 @@ git log 记得住「改了什么」，记不住「为什么不选另一条路」
 | [0025](./0025-memory-is-runtime-driven.md) | 记忆由运行时驱动，不等模型想起来去查 | 2026-08-27 |
 | [0026](./0026-the-plan-is-runtime-state.md) | 计划是运行时状态，不是模型的记忆 | 2026-08-28 |
 | [0027](./0027-thinking-critique-and-evidence.md) | 思考按轮定档、自查由运行时兜底、证据要落盘 | 2026-08-28 |
+| [0028](./0028-agent-authored-skills.md) | 技能改成 agent 自己能读全、能写、能沉淀 | 2026-08-28 |
 
 相关的工作台侧决策见
 [IvyeaOps 的 ADR 目录](https://github.com/Hector-xue/IvyeaOps/tree/main/docs/decisions)，

@@ -243,8 +243,11 @@ def test_the_model_is_told_where_the_assets_are(ivyea_home):
     sk = {s.id: s for s in skills.list_skills()}["amazon.with_assets"]
     assert str(d) in skills.render_skill(sk)
 
+    # 注入侧改成**点名文件 + 给取文件的工具**，不再贴绝对路径：
+    # 路径贴了模型也得自己拼 read_file，而 skill_view 是为这件事准备的。
     text, _ = skills.context_for_query("带脚本的技能", limit=2, max_chars=2000)
-    assert str(d) in text
+    assert "scripts/render.py" in text
+    assert "skill_view" in text
 
 
 def test_no_assets_means_no_directory_noise(ivyea_home):
@@ -347,3 +350,46 @@ def test_auto_injection_requires_a_named_hit(ivyea_home):
     # 所以这里断言"命中里有它"，不断言"只有它"。
     text, ids = skills.context_for_query("asin审计", limit=3)
     assert "amazon.audit" in ids and text
+
+
+def test_archived_skills_are_not_loaded(ivyea_home):
+    """归档区就在 ~/.ivyea/skills/ 里面 —— 扫描不跳过它，"归档"就只是搬了个目录。"""
+    import importlib
+    importlib.reload(skills)
+    _write_skill(ivyea_home / "skills", "lingxing/patrol",
+                 "id: lingxing.patrol\nname: patrol\ndescription_zh: 巡检\ntriggers: [巡检]")
+    importlib.reload(skills)
+    assert skills.get_skill("lingxing.patrol") is not None
+
+    skills.archive_skill("lingxing.patrol")
+    importlib.reload(skills)
+    assert skills.get_skill("lingxing.patrol") is None
+    assert skills.list_archive()          # 但东西还在，没删
+
+
+def test_written_id_is_the_id_that_loads_back(ivyea_home):
+    """加载器没有 id 就从 name 推导，推出来的和调用方给的往往不是一回事。"""
+    import importlib
+    importlib.reload(skills)
+    skills.write_user_skill("lingxing.ad_patrol",
+                            {"name": "lingxing-ad-patrol", "description": "巡检", "triggers": ["巡检"]},
+                            "# 正文")
+    importlib.reload(skills)
+    assert skills.get_skill("lingxing.ad_patrol") is not None
+    assert skills.get_skill("lingxing.lingxing_ad_patrol") is None
+
+
+def test_semantic_never_leaks_into_auto_injection(ivyea_home):
+    """小语料上余弦永远返回"最像的那几条"，没有"都不像"这个答案 ——
+    自动注入那条路必须仍然能回答"一条都没有"。"""
+    import importlib
+    importlib.reload(skills)
+    for query in ("完全不存在的东西", "为什么我的模型配置页面报错", "测试"):
+        _text, ids = skills.context_for_query(query, limit=2)
+        assert ids == [], query
+
+
+def test_semantic_can_be_turned_off_for_a_single_call(ivyea_home):
+    import importlib
+    importlib.reload(skills)
+    assert skills.search("完全不存在的东西", limit=3, semantic=False) == []
