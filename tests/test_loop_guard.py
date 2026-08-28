@@ -7,7 +7,7 @@ from ivyea_agent import agent_loop, loop_guard, plan_store
 from ivyea_agent.agent_tools import ToolContext
 
 
-def _drive(guard, name, args, *, ok=False, text="同一份报错", times=1):
+def _drive(guard, name, args, *, ok=True, text="一份普通结果", times=1):
     """模拟 times 次「检查 → 执行 → 观察」。返回最后一次的拦截文案（None=放行）。"""
     blocked = None
     for _ in range(times):
@@ -19,6 +19,7 @@ def _drive(guard, name, args, *, ok=False, text="同一份报错", times=1):
 
 
 def test_identical_call_is_blocked_after_the_limit():
+    # 结果**不是**拒绝：这里验的是参数指纹那条路（拒绝连击是另一条，见下面的用例）。
     guard = loop_guard.LoopGuard(repeat_limit=3, stall_limit=99)
     args = {"pattern": "找不到的东西"}
     assert _drive(guard, "grep", args, times=3) is None      # 前 3 次照常放行
@@ -30,7 +31,7 @@ def test_identical_call_is_blocked_after_the_limit():
 def test_second_block_is_terser_and_still_blocks():
     guard = loop_guard.LoopGuard(repeat_limit=2, stall_limit=99)
     args = {"command": "false"}
-    _drive(guard, "run_command", args, times=2)
+    _drive(guard, "run_command", args, times=2, text="一份普通结果")
     first = guard.check("run_command", args)
     second = guard.check("run_command", args)
     assert first and second
@@ -104,7 +105,7 @@ def test_agent_loop_blocks_a_repeating_tool_call(ivyea_home):
     guard = loop_guard.LoopGuard(repeat_limit=2, stall_limit=99)
     tc = {"id": "t1", "name": "grep", "arguments": {"pattern": "zzz"}}
     for _ in range(2):
-        guard.observe("grep", tc["arguments"], True, "⚠ 扫描 0 文件")
+        guard.observe("grep", tc["arguments"], True, f"命中 {_} 处")   # 非拒绝结果
     res, _ms, blocked = agent_loop._run_one(tc, ctx, guard)
     assert blocked is True and res.ok is False
     assert "重复调用" in res.text
@@ -133,3 +134,42 @@ def test_disabled_thresholds_never_block(ivyea_home, monkeypatch):
         assert guard.check("grep", {"pattern": "x"}) is None
         guard.observe("grep", {"pattern": "x"}, True, "同样的结果")
     assert guard.stall_feedback() is None
+
+
+# ── 拒绝连击（实测打出来的那个洞） ──────────────────────────────────────────
+#
+# 实测：模型连发 90 次 progress_update(kind='phase_end')，每次把 summary 的措辞改一点，
+# 于是**参数指纹永远对不上**，而拿回来的拒绝一字不差。真正说明"卡住了"的是结果不是参数。
+def test_same_rejection_over_and_over_is_blocked_even_with_shifting_args():
+    guard = loop_guard.LoopGuard(repeat_limit=3, stall_limit=99)
+    reject = "⚠ phase_end 必须结束当前正在汇报的阶段。"
+    for i in range(3):
+        assert guard.check("progress_update", {"kind": "phase_end", "summary": f"第 2 步完成 {i}"}) is None
+        guard.observe("progress_update", {"kind": "phase_end", "summary": f"第 2 步完成 {i}"},
+                      True, reject)
+    blocked = guard.check("progress_update", {"kind": "phase_end", "summary": "换个说法再来一次"})
+    assert blocked is not None
+    assert "完全相同的拒绝" in blocked
+
+
+def test_a_success_in_between_clears_the_rejection_streak():
+    guard = loop_guard.LoopGuard(repeat_limit=2, stall_limit=99)
+    guard.observe("progress_update", {"kind": "phase_end"}, True, "⚠ 不行")
+    guard.observe("progress_update", {"kind": "phase_end"}, True, "⚠ 不行")
+    guard.observe("progress_update", {"kind": "phase_start"}, True, "阶段 2 开始")
+    assert guard.check("progress_update", {"kind": "phase_end"}) is None
+
+
+def test_a_different_rejection_restarts_the_streak():
+    """换了一句拒绝说明模型确实换了做法，不该被当成打转。"""
+    guard = loop_guard.LoopGuard(repeat_limit=2, stall_limit=99)
+    guard.observe("todo_write", {"todos": []}, True, "⚠ Todo 更新已拒绝：A")
+    guard.observe("todo_write", {"todos": []}, True, "⚠ Todo 更新已拒绝：B")
+    assert guard.check("todo_write", {"todos": []}) is None
+
+
+def test_polling_never_trips_the_rejection_streak():
+    guard = loop_guard.LoopGuard(repeat_limit=2, stall_limit=99)
+    for _ in range(10):
+        guard.observe("bash_output", {"bash_id": "b1"}, True, "⚠ 该后台任务不存在")
+        assert guard.check("bash_output", {"bash_id": "b1"}) is None

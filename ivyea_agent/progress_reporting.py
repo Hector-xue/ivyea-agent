@@ -123,6 +123,14 @@ def _current_index(ctx: Any) -> int:
     return 0
 
 
+def _first_open_index(ctx: Any) -> int:
+    """第一条还没进终态的 Todo 序号；全都收尾了返回 0。"""
+    for index, item in enumerate(getattr(ctx, "todos", []) or [], 1):
+        if isinstance(item, dict) and item.get("status") not in TERMINAL_TODO_STATUSES:
+            return index
+    return 0
+
+
 def _phase_index(args: dict[str, Any], ctx: Any) -> int:
     raw = args.get("phase_index")
     if raw in (None, ""):
@@ -242,7 +250,20 @@ def apply_update(args: dict[str, Any], ctx: Any) -> dict[str, Any]:
         attention = _items(args.get("attention"))
         observed = list((getattr(ctx, "progress_phase_tool_evidence", {}) or {}).get(index, []) or [])
         if not active or index != active or not item:
-            return _failure("phase_end 必须结束当前正在汇报的阶段。")
+            # 光说"不对"会把模型逼进死循环：实测里它连发 90 次 phase_end，每次只改措辞，
+            # 因为这句话没告诉它**该做什么**。拒绝必须带下一步动作。
+            if not active:
+                nxt = _current_index(ctx) or _first_open_index(ctx)
+                hint = (f"当前没有正在进行的阶段。请先 todo_write 把第 {nxt} 步标 in_progress，"
+                        f"再 progress_update(kind='phase_start')，做完那一步才轮到 phase_end。"
+                        if nxt else "当前没有正在进行的阶段，且 Todo 里已没有未完成步骤 —— "
+                                    "直接 progress_update(kind='final') 收尾。")
+            elif not item:
+                hint = f"phase_index={index} 在 Todo 里不存在；当前正在进行的是第 {active} 步。"
+            else:
+                hint = (f"你要结束的是第 {index} 步，但当前正在进行的是第 {active} 步。"
+                        f"要么把 phase_index 改成 {active}，要么先把第 {active} 步收尾。")
+            return _failure("phase_end 必须结束当前正在汇报的阶段。" + hint)
         if status not in {"completed", "partial", "blocked", "skipped"}:
             return _failure("phase_end.status 必须是 completed、partial、blocked 或 skipped。")
         if not summary:

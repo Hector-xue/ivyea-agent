@@ -32,14 +32,19 @@ DEFAULT_REPEAT_LIMIT = 3
 #: 连续多少个实质步骤没有产生新证据就判定空转。
 DEFAULT_STALL_LIMIT = 8
 
-#: 轮询类：同参数反复调用是**正确用法**，不参与重复计数。
+#: 轮询类：同参数反复调用是**正确用法**（等后台任务出新输出），两条计数都不参与。
 _POLLING_TOOLS = frozenset({"bash_output"})
 #: 记账类：与 progress_reporting.META_TOOLS 同义，独立写一份避免反向依赖。
 _META_TOOLS = frozenset({
     "progress_update", "todo_write", "self_critique",
     "task_read", "task_step", "task_log", "task_resume",
 })
+#: 按**参数指纹**计重复时豁免的工具。记账类在这里豁免 —— 它们本来就该反复出现。
 _EXEMPT = _POLLING_TOOLS | _META_TOOLS
+
+#: 结果看起来是"这次没成"的特征。工具层的拒绝大多 ok=True（它成功地告诉你不行），
+#: 所以不能只看 ok。
+_REJECTION_MARKS = ("⚠", "已拦截", "已拒绝")
 
 #: 结果指纹只取前这么多字符。工具结果动辄几千字，全量哈希既慢又对"尾部有个时间戳"
 #: 这种伪差异过敏。
@@ -65,13 +70,27 @@ class LoopGuard:
         self._calls: dict[str, int] = {}          # 调用指纹 → 出现次数
         self._results: set[str] = set()           # 见过的 (工具, 结果) 指纹
         self._blocked: set[str] = set()           # 已经因重复拦过的指纹（同一句话不重复说）
+        # 「同一个工具连续拿回同一句拒绝」的连击数。**这条比参数指纹更要紧**：
+        # 实测里模型连发 90 次 progress_update，每次把 summary 的措辞改一点点，
+        # 于是参数指纹永远对不上，而拿回来的拒绝一字不差。真正说明"卡住了"的是结果，
+        # 不是参数。
+        self._last_rejection: dict[str, str] = {}
+        self._rejection_streak: dict[str, int] = {}
         self.steps_since_progress = 0
         self.stall_notices = 0                    # 已经因空转提醒过几次
 
     # ── 前置检查 ────────────────────────────────────────────────────────────
     def check(self, name: str, args) -> str | None:
         """要拦就返回拦截文案，放行返回 None。在工具真正执行**之前**调用。"""
-        if not name or name in _EXEMPT:
+        if not name or name in _POLLING_TOOLS:
+            return None
+        with self._lock:
+            streak = self._rejection_streak.get(name, 0)
+        if streak >= self.repeat_limit:
+            return (f"已拦截：`{name}` 已经连续 {streak} 次拿回**完全相同的拒绝**，"
+                    "改的只是措辞、不是做法。请照上一条结果指出的问题真正换一步做；"
+                    "如果那一步做不到，就停下来告诉用户你卡在哪 —— 再发一遍结果不会变。")
+        if name in _EXEMPT:
             return None
         key = _fingerprint(name, args)
         with self._lock:
@@ -108,7 +127,20 @@ class LoopGuard:
             return
         key = _fingerprint(name, args)
         result_key = _fingerprint(name, (text or "")[:_RESULT_FINGERPRINT_CHARS])
+        body = (text or "").lstrip()
+        rejected = (not ok) or body.startswith(_REJECTION_MARKS)
         with self._lock:
+            if name in _POLLING_TOOLS:
+                return
+            # 拒绝连击：同一个工具连续拿回同一句拒绝才算，中间成功一次就清零。
+            if rejected and self._last_rejection.get(name) == result_key:
+                self._rejection_streak[name] = self._rejection_streak.get(name, 0) + 1
+            elif rejected:
+                self._last_rejection[name] = result_key
+                self._rejection_streak[name] = 1
+            else:
+                self._last_rejection.pop(name, None)
+                self._rejection_streak.pop(name, None)
             if name not in _EXEMPT:
                 self._calls[key] = self._calls.get(key, 0) + 1
             if name in _META_TOOLS:

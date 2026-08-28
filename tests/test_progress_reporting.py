@@ -184,3 +184,34 @@ def test_streaming_hides_premature_final_until_report_closes(tmp_path):
                        for block in event["message"]["content"] if block.get("type") == "text"]
     assert "提前声称完成" not in assistant_texts
     assert ctx.progress_final["summary"] == "完成可执行部分"
+
+
+def test_phase_end_rejection_tells_the_model_what_to_do_next():
+    """拒绝必须带下一步动作 —— 只说"不对"会把模型逼进 90 次重发的死循环（实测）。"""
+    from ivyea_agent import progress_reporting
+    from ivyea_agent.agent_tools import ToolContext
+
+    ctx = ToolContext(workspace=".")
+    ctx.todos = [{"content": "A", "status": "completed"}, {"content": "B", "status": "pending"}]
+    ctx.progress_started = True
+    ctx.progress_active_phase = 0          # 没有正在进行的阶段
+    out = progress_reporting.apply_update({"kind": "phase_end", "status": "completed",
+                                           "summary": "做完了", "evidence": ["x"]}, ctx)
+    assert out["ok"] is False
+    assert "第 2 步标 in_progress" in out["text"]
+    assert "phase_start" in out["text"]
+
+
+def test_phase_end_on_the_wrong_index_names_the_right_one():
+    from ivyea_agent import progress_reporting
+    from ivyea_agent.agent_tools import ToolContext
+
+    ctx = ToolContext(workspace=".")
+    ctx.todos = [{"content": "A", "status": "in_progress"}, {"content": "B", "status": "pending"}]
+    ctx.progress_started = True
+    ctx.progress_active_phase = 1
+    out = progress_reporting.apply_update({"kind": "phase_end", "phase_index": 2,
+                                           "status": "completed", "summary": "做完了",
+                                           "evidence": ["x"]}, ctx)
+    assert out["ok"] is False
+    assert "当前正在进行的是第 1 步" in out["text"]
