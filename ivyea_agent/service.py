@@ -16,11 +16,12 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from . import (
-    __version__, ads_evidence, agent_loop, code_agent, config, context, knowledge, knowledge_evidence,
+    __version__, ads_evidence, agent_loop, ask as ask_mod, code_agent, config, context,
+    knowledge, knowledge_evidence,
     knowledge_governance, knowledge_quality, knowledge_sync, live_turn, memory, memory_reflect,
     memory_store, models,
     progress_reporting, retrieval, routing, security, self_manage, sessions, skills, stream_json,
-    task_runner, task_scope, traces, transcript, workspace,
+    task_runner, task_scope, traces, transcript, turn_inbox, workspace,
 )
 from .agent_tools import ToolContext
 
@@ -276,6 +277,10 @@ def manifest() -> dict[str, Any]:
             {"method": "GET", "path": "/v1/chat/sessions/{id}", "description": "load embedded chat session"},
             {"method": "POST", "path": "/v1/chat", "description": "run one read-only embedded agent turn"},
             {"method": "POST", "path": "/v1/chat/stream", "description": "run one read-only embedded agent turn as server-sent events"},
+            {"method": "POST", "path": "/v1/chat/inject", "description": "append a follow-up instruction into the turn that is currently running"},
+            {"method": "POST", "path": "/v1/chat/question", "description": "answer an ask_user_question option card"},
+            {"method": "POST", "path": "/v1/chat/cancel", "description": "really stop the turn that is running (stops spending tokens)"},
+            {"method": "GET", "path": "/v1/chat/live-sessions", "description": "session ids that have a turn running right now"},
             {"method": "GET", "path": "/v1/skills", "description": "list active built-in and user skills"},
             {"method": "GET", "path": "/v1/skills/search", "description": "search active skills"},
             {"method": "GET", "path": "/v1/skills/{id}", "description": "load skill detail"},
@@ -1739,6 +1744,17 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
         # 走的是同一个开关）。**只在 plan_mode=false 时才有意义**：计划模式下写工具
         # 在更外层就被拦住了，这里放行也落不了地。
         ctx.perm.accept_edits = bool(not plan_mode)
+    # 「拿不准就弹选项」的通道。**必须调用方显式要**（`interactive: true`）：
+    #
+    # 事件流有一半消费方根本不是界面 —— IvyeaOps 的技能执行、知识库问答那几处是
+    # 服务端在读流，没有人会看到 question_request，更没人能点。默认开的话，模型
+    # 一旦在那种轮次里问一句，那一轮就白白挂满超时时长（5 分钟）才继续。
+    #
+    # 与 stream_reasoning / defer_citation_text 同一路数：新行为 opt-in，老调用方
+    # 一字不变（没有通道 → ask_user_question 立刻按推荐项继续，不等）。
+    # 审批档位不参与判断：问问题不是写操作，只读档下照样该问。
+    if payload.get("interactive") is True:
+        ctx.ask_fn = ask_mod.RemoteAsk(send, ctx.session_id, client_gone=client_gone).ask
 
     # 这一轮走哪条路线（闲聊快车道 / 板块直达 / 常规）。判不准一律落 work，
     # 也就是改动前的行为。见 routing.py 顶部那段"慢的是步数不是模型"。
@@ -1796,6 +1812,7 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
     #     之后的全没了"（真实反馈，连着两三次）。
     # 现在先写用户这句话，再把本轮起点推到它后面 —— 收尾时只追加模型的回答和
     # 工具消息，不会重复。写盘失败绝不能打断这一轮：最坏退回改动前的行为。
+    main_turn_idx = -1        # 这一轮是这条会话的第几轮（时间账挂在它上面）
     if payload.get("persist", True):
         try:
             sessions.append_turn(
@@ -1804,6 +1821,10 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
                 messages[turn_base:],
                 model=model_cfg.get("model", ""), created=created_at)
             turn_base = len(messages)
+            # 用户那句话已经落盘了 —— 顺手把"这一轮几点开始的"也落下。收尾时再补
+            # 结束时刻和时长。中途断电/进程被杀时盘上至少留着起点，而不是一片空白。
+            main_turn_idx = sessions.current_turn_index(ctx.session_id)
+            sessions.note_turn_time(ctx.session_id, main_turn_idx, started_at=turn_started)
         except Exception:  # noqa: BLE001 — 落盘失败不该让用户这一轮跑不成
             pass
 
@@ -1844,6 +1865,41 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
             turn_steps[str(ev["id"])] = dict(ev)
         elif kind == "skill_match" and ev.get("skills"):
             turn_skills.append(dict(ev))
+
+    # 用户在这一轮跑着的时候又说的话。收件箱由 POST /v1/chat/inject 投递，
+    # agent_loop 在两个工具步之间排空 —— 于是"任务跑起来就闭麦"变成了"随时能补一句"。
+    consumed_injects: list[dict[str, Any]] = []
+
+    def _inject_check() -> list[dict[str, Any]]:
+        return turn_inbox.drain(ctx.session_id)
+
+    def _on_inject(item: dict[str, Any]) -> None:
+        consumed_injects.append(dict(item))
+        send("injected", {"session_id": ctx.session_id, "id": str(item.get("id") or ""),
+                          "text": security.redact_text(str(item.get("text") or "")),
+                          "ts": float(item.get("ts") or time.time())})
+
+    def _finish_turn_times() -> None:
+        """收尾时把结束时刻/时长补上（主轮 + 这一轮里插进来的每条追加指令各算一轮）。"""
+        if not payload.get("persist", True):
+            return
+        ended = time.time()
+        try:
+            if main_turn_idx >= 0:
+                sessions.note_turn_time(ctx.session_id, main_turn_idx, ended_at=ended,
+                                        ms=int(max(0.0, ended - turn_started) * 1000))
+            if consumed_injects:
+                # 追加指令是**真实的用户提问**，落盘后各自成一轮（transcript.turn_slices
+                # 按 user 消息切）。它们排在这一批的最后几条，所以从末尾倒着认。
+                last = sessions.current_turn_index(ctx.session_id)
+                first = last - len(consumed_injects) + 1
+                for offset, item in enumerate(consumed_injects):
+                    started = float(item.get("ts") or ended)
+                    sessions.note_turn_time(
+                        ctx.session_id, first + offset, started_at=started, ended_at=ended,
+                        ms=int(max(0.0, ended - started) * 1000))
+        except Exception:  # noqa: BLE001 —— 时间账写不进去不该把这一轮搭进去
+            pass
 
     def _persist(usage: dict[str, Any] | None) -> None:
         """把**已经跑出来的东西**落盘。
@@ -1933,20 +1989,51 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
             # 三遍"。这条事件告诉前端：前面那一稿作废，从下一个 token 重新开始。
             on_answer_reset=lambda reason: send(
                 "answer_reset", {"reason": str(reason), "session_id": ctx.session_id}),
+            # 追加指令：跑到一半时用户又说的话，在步边界插进当前这一轮。
+            inject_check=_inject_check,
+            on_inject=_on_inject,
+            # 真·停止：POST /v1/chat/cancel 置个标志，这里在模型流的每个事件和
+            # 每个工具步边界读它 —— 于是"不想做了"能在几百毫秒内真的停下来，
+            # 而不是眼睁睁看着它把这一轮的 token 烧完。
+            #
+            # 直接读活轮对象上的那个布尔，不走 live_turn.get()：这个钩子每个 token
+            # 都会被调用一次（一轮几万次），走注册表就是几万次加锁 + 遍历。
+            cancel_check=lambda: bool(getattr(holder.get("live"), "cancel_requested", False)),
         )
     except LLMError as exc:
         # 模型报错：**先落盘再报错**。已经流出去的正文和执行过程是真跑出来的，
         # 不能因为收尾那一下失败就整轮蒸发。
         _persist(None)
+        _finish_turn_times()
         data = {"ok": False, "error": "model_error", "detail": str(exc)}
         send("error", data)
         return data
-    except BaseException:
-        # 断流、被中止、任何没预料到的异常 —— 同上，先把跑出来的东西留住。
+    except KeyboardInterrupt:
+        # **用户按了停止。** 这是一个正常结局，不是异常：已经跑出来的正文、执行过程、
+        # 时间账全部照常落盘（那些是真发生过的），然后明确地告诉前端"停住了"。
+        #
+        # 不发 error：界面会把它画成红色的失败，而这不是失败，是用户改主意了。
         _persist(None)
+        _finish_turn_times()
+        leftover_on_cancel = turn_inbox.drain_remaining(ctx.session_id)
+        data = {
+            "ok": True, "cancelled": True, "session_id": ctx.session_id,
+            "text": str(getattr(holder.get("live"), "text", "") or ""),
+            # 停在半路的这一轮里，用户排着的追加指令一条都没被读到 —— 端回去，
+            # 由调用方决定是丢掉还是当成下一轮。
+            "injected_pending": [{"id": str(i.get("id") or ""), "text": str(i.get("text") or "")}
+                                 for i in leftover_on_cancel],
+        }
+        send("cancelled", data)
+        return data
+    except BaseException:
+        # 断流、任何没预料到的异常 —— 同上，先把跑出来的东西留住。
+        _persist(None)
+        _finish_turn_times()
         raise
 
     _persist(out.get("usage") or {})
+    _finish_turn_times()
     data = {
         "ok": True,
         "session_id": ctx.session_id,
@@ -1966,6 +2053,27 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
     }
     if ctx.vision_tier:
         data["vision_tier"] = dict(ctx.vision_tier)
+    # 这一轮的时刻表。前端拿它画"结束于 09:49 · 用时 3 分 12 秒" —— 时间必须是
+    # **服务端的事实**：客户端自己掐表在断链/换页面/换机器之后就对不上了，而这
+    # 一轮跑完前端还会重新去拉存档，纯前端记的数会被那次拉取冲掉。
+    ended_at = time.time()
+    data["started_ms"] = int(turn_started * 1000)
+    data["ended_ms"] = int(ended_at * 1000)
+    data["ms"] = int(max(0.0, ended_at - turn_started) * 1000)
+    # 本轮有哪几项是**替用户定的**（弹了选项但没人在 5 分钟内点）。界面读这份自己
+    # 画说明块 —— 不能指望模型在总结里顺口提一句（它经常不提），同 memory_recall。
+    if ctx.auto_decisions:
+        data["auto_decisions"] = [dict(d) for d in ctx.auto_decisions]
+    if consumed_injects:
+        data["injected"] = [{"id": str(i.get("id") or ""),
+                             "text": security.redact_text(str(i.get("text") or ""))}
+                            for i in consumed_injects]
+    # 收件箱里还剩下的：模型已经收工，这几句话这一轮读不到了。**不能无声吞掉** ——
+    # 端给前端，由它当成下一轮发出去。
+    leftover = turn_inbox.drain_remaining(ctx.session_id)
+    if leftover:
+        data["injected_pending"] = [{"id": str(i.get("id") or ""),
+                                     "text": str(i.get("text") or "")} for i in leftover]
     send("final", data)
     return data
 
@@ -2136,6 +2244,79 @@ def chat_session_detail(session_id: str, *, turns: int = _DETAIL_TURNS_DEFAULT,
             # 这条会话现在有没有一轮正在跑。前端据此决定要不要接进活轮日志把进度
             # 补上 —— 没有这一行，切回来的页面只能看到磁盘上那份（还没写呢）。
             "live": live_turn.status(session_id)}
+
+
+def chat_live_sessions() -> dict[str, Any]:
+    """此刻真的有一轮在跑的会话。工作台左栏靠它给正在执行的会话打闪烁标记。
+
+    读的是内存里的活轮登记（live_turn），**不扫会话文件** —— 这个接口会被几秒
+    问一次，扫盘的实现放在那个频率上纯属白烧磁盘。
+    """
+    rows = []
+    for sid in live_turn.running_ids():
+        st = live_turn.status(sid)
+        rows.append({"id": sid, "started_ms": st.get("started_ms") or 0,
+                     "seq": st.get("seq") or 0})
+    return {"ok": True, "sessions": rows}
+
+
+def chat_inject(payload: dict[str, Any]) -> dict[str, Any]:
+    """把一条追加指令投进**正在跑的那一轮**。
+
+    没有活轮时不收（`accepted: false`）：收下就意味着它要么被下一轮莫名其妙地读到，
+    要么烂在收件箱里。调用方据此把这句话当成下一轮发出去 —— 那是它自己能做的事，
+    而"这句话到底进没进去"必须有个明确答案。
+    """
+    session_id = str(payload.get("session_id") or "").strip()
+    text = str(payload.get("text") or "").strip()
+    if not session_id:
+        return {"ok": False, "error": "session_id is required"}
+    if not text:
+        return {"ok": False, "error": "text is required"}
+    live = live_turn.status(session_id)
+    if not live.get("running"):
+        return {"ok": True, "accepted": False, "reason": "no_live_turn",
+                "session_id": session_id}
+    out = turn_inbox.submit(session_id, text)
+    if not out.get("ok"):
+        return {**out, "accepted": False, "session_id": session_id}
+    return {"ok": True, "accepted": True, "session_id": session_id,
+            "item": out.get("item"), "pending": out.get("pending")}
+
+
+def chat_cancel(payload: dict[str, Any]) -> dict[str, Any]:
+    """真的停掉这条会话正在跑的那一轮。
+
+    "停止"此前只是调用方断开自己那条事件流 —— 轮次在这边照跑照烧 token，用户看到的
+    是"我点了停止，它还在跑"。现在置中止标志，轮次线程在模型流的下一个事件或下一个
+    工具步边界就收摊：**已经跑出来的东西照常落盘**，然后回一个 `cancelled` 事件。
+
+    正在执行中的那**一个**工具调用不会被打断（写文件、跑命令中途砸断只会留下半个
+    现场）—— 所以最坏要等它结束，但模型不会再往下走一步。
+    """
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        return {"ok": False, "error": "session_id is required"}
+    ok = live_turn.request_cancel(session_id)
+    return {"ok": True, "cancelled": bool(ok), "session_id": session_id,
+            # False = 这条会话本来就没有在跑的轮次（多半刚好收尾了）。
+            # 照实说，别让界面显示"已停止"却其实什么都没停。
+            "reason": "" if ok else "no_live_turn"}
+
+
+def chat_question(payload: dict[str, Any]) -> dict[str, Any]:
+    """回送一次选项卡的答案，解开阻塞在 ask_user_question 上的那一步。"""
+    request_id = str(payload.get("request_id") or "").strip()
+    answers = payload.get("answers")
+    if not request_id:
+        return {"ok": False, "error": "request_id is required"}
+    if not isinstance(answers, dict) or not answers:
+        return {"ok": False, "error": "answers is required"}
+    ok = ask_mod.resolve_question(request_id, answers)
+    return {"ok": ok, "request_id": request_id,
+            # 过期/未知照实说：多半是已经超时按推荐项走了，或者另一个页签先答了。
+            # 前端据此把卡片改成"已失效"，而不是让用户以为自己点进去了。
+            "error": "" if ok else "unknown_or_expired_request"}
 
 
 def chat_session_delete(session_id: str) -> dict[str, Any]:
@@ -2480,6 +2661,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/chat/permissions/pending":
             self._json(200, pending_permissions_state())
             return
+        if parsed.path == "/v1/chat/live-sessions":
+            self._json(200, chat_live_sessions())
+            return
         if parsed.path == "/v1/chat/sessions":
             self._json(200, chat_session_list(limit=_int(_first(qs, "limit"), 20)))
             return
@@ -2748,6 +2932,18 @@ class _Handler(BaseHTTPRequestHandler):
                 # 前端据此把卡片改成"已失效"，而不是让用户以为点成功了。
                 "error": "" if ok else "unknown_or_expired_request",
             })
+            return
+        if parsed.path == "/v1/chat/inject":
+            out = chat_inject(body)
+            self._json(200 if out.get("ok") else 400, out)
+            return
+        if parsed.path == "/v1/chat/question":
+            out = chat_question(body)
+            self._json(200 if out.get("ok") else 404, out)
+            return
+        if parsed.path == "/v1/chat/cancel":
+            out = chat_cancel(body)
+            self._json(200 if out.get("ok") else 400, out)
             return
         if parsed.path == "/v1/chat":
             try:
@@ -3625,6 +3821,9 @@ def _public_session(row: dict[str, Any]) -> dict[str, Any]:
         "updated": row.get("updated"),
         "turns": row.get("turns", 0),
         "preview": security.redact_text(str(row.get("preview") or "")),
+        # 这条会话此刻有没有一轮在跑。左栏据此打闪烁标记 —— 此前它只能显示
+        # "最近更新时间"，而"十分钟内动过"和"正在跑"是两件完全不同的事。
+        "running": bool(live_turn.status(str(row.get("id") or "")).get("running")),
     }
 
 
@@ -3698,6 +3897,11 @@ def _public_session_detail(data: dict[str, Any], *, turns: int = _DETAIL_TURNS_D
         "context": ctx_snapshot,
         "turns": {"total": total, "from": start_turn, "to": end_turn,
                   "has_more": start_turn > 0},
+        # 本页每轮的时刻表（发问时刻 / 收尾时刻 / 挂钟毫秒）。轮号与上面的分页
+        # 口径同源（都按"第几条真实用户消息"数），所以刷新后界面上的"发送于 …"
+        # 和"结束于 … · 用时 …"和当时看到的是同一组数，而不是重新猜一遍。
+        "turn_times": [dict(t) for t in (data.get("turn_times") or [])
+                       if start_turn <= int(t.get("turn", -1)) < end_turn],
     }
 
 

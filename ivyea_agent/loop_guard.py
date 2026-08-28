@@ -154,6 +154,24 @@ class LoopGuard:
                 "请先用 todo_write 修订计划：写下你已经排除了什么、当前最可能的解释是什么、"
                 "下一步准备用什么证据验证它；确实缺信息就停下来问用户。")
 
+    # ── 局面变了 ────────────────────────────────────────────────────────────
+    def note_new_instruction(self) -> None:
+        """用户在这一轮中途追加了新指令 —— 之前攒下的"卡住"判定全部作废。
+
+        不清的话会出现一种很蠢的失败：模型按老目标撞了几次墙、守卫记下了连击，
+        这时用户说"别弄那个了，改成 X"，模型转头去做 X，却因为上一段的连击被
+        当场拦下并被要求"停下来告诉用户你卡在哪"。用户刚说完话就被告知卡住了。
+        """
+        with self._lock:
+            self._calls.clear()
+            self._blocked.clear()
+            self._last_rejection.clear()
+            self._rejection_streak.clear()
+            self._any_rejection_streak.clear()
+            self._bookkeeping_streak = 0
+            self.steps_since_progress = 0
+            self.stall_notices = 0
+
     # ── 观察结果 ────────────────────────────────────────────────────────────
     def observe(self, name: str, args, ok: bool, text: str) -> None:
         """记一次工具结果。在工具执行**之后**调用。"""

@@ -37,6 +37,8 @@ import time
 from collections import deque
 from typing import Any, Callable, Iterator, Optional
 
+from . import turn_inbox
+
 #: 一轮最多留多少条结构化事件。192 步的长任务约 400~600 条；超出就丢最早的，
 #: 并在回放时如实说"前面还有多少条没留下"，绝不假装完整。
 MAX_EVENTS = 4000
@@ -66,6 +68,10 @@ class LiveTurn:
         self.running = True
         self.started = time.time()
         self.ended = 0.0
+        #: 有人按了停止。轮次线程在步/流/工具边界读它 —— **必须是服务端状态**：
+        #: 按停止的那个页面可能刚好断线、或者干脆是另一台机器上的另一个标签页，
+        #: 而"别再烧 token 了"这件事和哪条连接还活着没有关系。
+        self.cancel_requested = False
         self.cond = threading.Condition()
 
     # ── 写端（轮次线程）────────────────────────────────────────────────────
@@ -184,13 +190,49 @@ def begin(session_id: str) -> LiveTurn:
             old.end()          # 让上一轮的跟随者收摊，别永远挂着
         live = LiveTurn(session_id)
         _LIVE[session_id] = live
-        return live
+    # 上一轮没被读到的追加指令不该漏进这一轮：它是对**那一轮**说的话，
+    # 而调用方在上一轮收尾时已经把它端走另做安排了（final 的 injected_pending）。
+    turn_inbox.clear(session_id)
+    return live
 
 
 def get(session_id: str) -> Optional[LiveTurn]:
     with _LOCK:
         _sweep(time.time())
         return _LIVE.get(session_id)
+
+
+def request_cancel(session_id: str) -> bool:
+    """请求中止这条会话正在跑的那一轮。没有活轮返回 False。
+
+    只置一个标志：真正的中止发生在轮次线程读到它的那一刻（模型流的下一个事件、
+    或下一个工具步边界）。**不去杀线程** —— 那会把正在写的文件、正在收尾的落盘
+    停在半路上，而"停止"不该是"把现场砸烂"。
+    """
+    live = get(session_id)
+    if live is None or not live.running:
+        return False
+    with live.cond:
+        live.cancel_requested = True
+        live.cond.notify_all()
+    return True
+
+
+def is_cancelled(session_id: str) -> bool:
+    live = get(session_id)
+    return bool(live is not None and live.cancel_requested)
+
+
+def running_ids() -> list[str]:
+    """此刻真的有一轮在跑的会话 id。
+
+    读的是这个进程的内存，**不扫会话文件** —— 侧边栏要靠它每几秒问一次"哪几条
+    在跑"，扫盘的实现放在那个频率上会把磁盘和 CPU 白白吃掉。
+    """
+    now = time.time()
+    with _LOCK:
+        _sweep(now)
+        return [sid for sid, live in _LIVE.items() if live.running]
 
 
 def status(session_id: str) -> dict[str, Any]:
@@ -202,6 +244,7 @@ def status(session_id: str) -> dict[str, Any]:
         "running": bool(live.running),
         "seq": int(live.seq),
         "started_ms": int(live.started * 1000),
+        "cancelling": bool(live.cancel_requested and live.running),
     }
 
 

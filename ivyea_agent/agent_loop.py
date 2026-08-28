@@ -31,6 +31,8 @@ MCP：用户接了 MCP 服务器时，用 mcp_list_tools/mcp_list_resources/mcp_
 技能：上下文里自动注入的技能**只有正文开头一段**，要照着它真正动手前先 skill_view 读全文（带 references/scripts 的还要按需读附属文件），别凭那一小段就开干。走完一套值得复用的流程后，可以用 skill_write 把它沉淀成技能——但只沉淀**下次还会这么干**的通用流程，一次性的具体任务不要建技能。
 规划与汇报：多步/复杂任务**动手前先用 todo_write 拆成可验证的小步**，再调用 progress_update(kind=start) 向用户说明目标、范围、阶段、完成标准和第一阶段准备做什么；这两项完成前不要调用实际工作工具。执行时同一时间恰好一个 in_progress。每阶段结束先 progress_update(kind=phase_end) 汇报做了什么、状态、证据、未完成和注意事项，再把 Todo 标 completed/blocked/skipped；下一阶段先更新 Todo，再 progress_update(kind=phase_start) 介绍准备做什么。全部结束后必须 progress_update(kind=final)，汇总已做到、未做到、验证和注意事项，再用一句简短正文收尾。单步、明确的小任务别过度汇报。UI/行为类改动，typecheck/编译/测试通过 ≠ 完成，必须在真实界面或运行环境复现目标场景确认后才算完成。
 澄清：当需求**歧义、有多种合理理解、或缺关键输入（ASIN/路径/目标/站点等）**时，先用一两个精准问题反问、停下等用户回答，**别靠假设硬做**；信息足够才进入执行。但简单明确的任务别来回追问。
+拿不准就弹选项：方案分叉、且不同选法会做出不同的东西时，用 ask_user_question 给 2-4 个选项让用户点（工作台会弹选项卡），把你推荐的那项标 recommended。这比"把问题写进回答然后结束这一轮"强得多——用户五分钟不选就按推荐项自动继续，任务不会干等；但那时**收尾总结必须逐条说明哪几项是自动定的、依据是什么、想改怎么改**。看代码/看数据就能自己确定的事不要问，"我可以开始了吗"这类也不要问。
+追加指令：轮次跑到一半时可能收到 `[用户追加指令] …`——那是用户看着你跑、临时补的话，优先级等同于最初那句需求。把它并进手上的任务继续做（该调整方向就调整、该扩范围就扩），**不要从头重做一遍**，也不要只回一句"收到"就结束。
 原则：先拿证据再动手；写操作一律经人工审批，绝不自作主张直接写；动作绑数据、简洁可执行；不要瞎编 ASIN/规格/数字。读文件优先用 read_file 看真实内容，不要假设；**大文件读某几行用 read_file 的 offset/limit，别用 run_command/python 分段读**（那会反复弹审批）。"""
 
 SYSTEM_PROMPT += """
@@ -859,6 +861,47 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
     return _finalize_limit(ctx, messages, status, max_steps)
 
 
+#: 追加指令进上下文时的前缀。用户在这一轮跑着的时候说的话，和一轮开头那句提问
+#: 是同一种东西（都是他的指令），只是到得晚一点 —— 所以它是一条真实的 user 消息，
+#: 加个前缀只为让模型知道"这是插进来的，把它并进手上的任务，别从头再来一遍"。
+INJECT_PREFIX = "[用户追加指令]"
+
+
+def _drain_injections(messages: list, inject_check: Callable[[], list] | None,
+                      on_inject: Callable[[dict], None] | None,
+                      narrate: Callable[[str], None], guard) -> list:
+    """把收件箱里的追加指令插进上下文。返回这次插进去的条目。
+
+    只在**步边界**调用（见 run_turn_stream 的文档）。插进去之后打一次 loop_guard 的
+    复位：局面变了，之前攒的"卡住"判定不该继续压在新指令上。
+    """
+    if inject_check is None:
+        return []
+    try:
+        items = inject_check() or []
+    except Exception:  # noqa: BLE001 —— 取不到追加指令绝不能打断正在跑的轮次
+        return []
+    if not items:
+        return []
+    for item in items:
+        text = str((item or {}).get("text") or "").strip()
+        if not text:
+            continue
+        messages.append({"role": "user", "content": f"{INJECT_PREFIX} {text}"})
+        try:
+            narrate(f"收到追加指令：{text[:80]}")
+        except Exception:  # noqa: BLE001
+            pass
+        if on_inject is not None:
+            try:
+                on_inject(dict(item))
+            except Exception:  # noqa: BLE001
+                pass
+    if guard is not None:
+        guard.note_new_instruction()
+    return items
+
+
 def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
                     max_steps: int | None = None, narrate: Callable[[str], None] = print,
                     render: Callable[[str], None] = None, model: str = "",
@@ -867,7 +910,9 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
                     emit: Callable[[dict], None] | None = None,
                     tools: list | None = None,
                     defer_citation_text: bool = True,
-                    on_answer_reset: Callable[[str], None] | None = None) -> dict:
+                    on_answer_reset: Callable[[str], None] | None = None,
+                    inject_check: Callable[[], list] | None = None,
+                    on_inject: Callable[[dict], None] | None = None) -> dict:
     """流式跑一轮：token 边出边渲染、工具实时叙述、累计用量。
     返回 {text, usage}（usage 为本轮各步累加）。render(token) 逐字输出助手文本。
 
@@ -886,7 +931,13 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
     （引用校验最多来回 2 次）——终端是一条向下的日志、叠着看没问题，但网页把
     token 顺序拼进同一个气泡，用户看到的就是同一张表连出三遍。给了这个回调的
     调用方（serve → 网页）会收到边界，把气泡清空重画；不给（CLI）则一个字都不变。
-    reason: tool_call | gate:verify | gate:progress | gate:citation | gate:critique。"""
+    reason: tool_call | gate:verify | gate:progress | gate:citation | gate:critique。
+
+    inject_check()：**用户在这一轮跑着的时候又说了话**。返回一批 {id, text} 就把它们
+    作为真实的 user 消息追加进上下文，模型下一步就看得见 —— 这是"任务跑起来之后还能
+    补一句"的落点。只在**步边界**排空：assistant(tool_calls) 和它的 tool 结果之间插一条
+    user 消息，provider 会直接拒掉整轮。on_inject(item)：插进去之后回调一次（发事件/记账）。
+    两个都不给 = 现有行为逐字不变。"""
     task_scope.prepare_messages(ctx, messages)
     _adopt_task_plan(ctx)
     _inject_plan_note(ctx, messages)
@@ -934,6 +985,7 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
     guard = _new_loop_guard()
     _ceiling = _hard_step_ceiling(max_steps)
     for step_idx in range(_ceiling):
+        _drain_injections(messages, inject_check, on_inject, narrate, guard)
         if turn_budget.exhausted():
             break
         if step_idx == _ceiling - 1:
@@ -1006,6 +1058,16 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
             if defer_text and content:
                 _render_text(content)
                 render("\n")
+            # 收尾前最后看一眼收件箱。模型正要收工的那一刻恰恰是用户最常补话的
+            # 时刻（"等等，顺便把 X 也改了"）—— 这里不看，那句话就要等到下一轮，
+            # 而用户明明是在这一轮还没结束时说的。
+            if _drain_injections(messages, inject_check, on_inject, narrate, guard):
+                _emit_safe(emit, stream_json.assistant_event(
+                    getattr(ctx, "session_id", ""), content, []))
+                # 这一段正文**没有作废**（用户只是追加了要求），所以 reason 不是 gate:*
+                # —— 前端据此只断段、不清屏（见 answerResetDiscards）。
+                superseded_by = "user_inject"
+                continue
             _emit_safe(emit, stream_json.assistant_event(
                 getattr(ctx, "session_id", ""), content, []))
             return {"text": content, "usage": total_usage}

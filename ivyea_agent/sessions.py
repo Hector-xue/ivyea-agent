@@ -89,6 +89,7 @@ def _lock_for(sid: str) -> threading.RLock:
 # 一条会话最多留多少步执行记录。步骤是给人复盘用的，不参与模型上下文，所以可以封顶；
 # 每条经 stream_json._slim_args 裁过，2000 条约几百 KB 量级。
 _STEPS_MAX = 2000
+_TURN_TIMES_MAX = 2000
 _SKILL_MATCH_MAX = 200
 
 
@@ -101,11 +102,12 @@ def save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[dic
 def _save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[dict] = None,
           created: Optional[float] = None, steps: Optional[list[dict]] = None,
           skill_matches: Optional[list[dict]] = None,
-          stats: Optional[dict] = None) -> None:
+          stats: Optional[dict] = None,
+          turn_times: Optional[list[dict]] = None) -> None:
     p = path_for(sid)
-    # steps/skill_matches/stats 没传时**沿用盘上那份**，不能当成"清空"：`save()` 是整份
-    # 覆盖语义（CLI 每轮就这么写），它不知道也不关心这些，但不该顺手把它们抹掉。
-    if steps is None or skill_matches is None or stats is None:
+    # steps/skill_matches/stats/turn_times 没传时**沿用盘上那份**，不能当成"清空"：
+    # `save()` 是整份覆盖语义（CLI 每轮就这么写），它不知道也不关心这些，但不该顺手把它们抹掉。
+    if steps is None or skill_matches is None or stats is None or turn_times is None:
         prev = load(sid) or {}
         if steps is None:
             steps = list(prev.get("steps") or [])
@@ -113,6 +115,8 @@ def _save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[di
             skill_matches = list(prev.get("skill_matches") or [])
         if stats is None:
             stats = dict(prev.get("stats") or {})
+        if turn_times is None:
+            turn_times = list(prev.get("turn_times") or [])
     data = {"id": sid, "created": created or time.time(), "updated": time.time(),
             "model": model, "messages": messages, "usage": usage or {},
             # 整条会话的累计账（轮数/步数/挂钟时间/模型时间/token）。**存累计而不是
@@ -122,7 +126,12 @@ def _save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[di
             # 执行过程与消息平行存放，**绝不塞进 messages 里的消息 dict**：
             # 那些 dict 会原样回灌给模型 API，多一个自定义键就有被 provider 拒的风险。
             "steps": list(steps)[-_STEPS_MAX:],
-            "skill_matches": list(skill_matches)[-_SKILL_MATCH_MAX:]}
+            "skill_matches": list(skill_matches)[-_SKILL_MATCH_MAX:],
+            # 逐轮的时间账（发问时刻/收尾时刻/挂钟毫秒），**和消息平行存**。
+            # 理由同 steps：messages 里的 dict 会原样回灌给 provider，多一个自定义键
+            # 就有被拒的风险。界面靠它显示"发送于 09:46 / 结束于 09:49 · 用时 3 分"，
+            # 刷新和换台机器打开也还在（此前这些数只活在发起它的那个页面内存里）。
+            "turn_times": list(turn_times)[-_TURN_TIMES_MAX:]}
     # 临时文件名带进程号和随机后缀。固定成 `<id>.json.tmp` 的话，两个**进程**同时
     # 写同一条会话（比如工作台的 serve 和一个 `ivyea chat`）会写进同一个临时文件，
     # 互相踩出半截 JSON。进程内的会话锁管不到跨进程。
@@ -167,6 +176,60 @@ def _merge_stats(prev: dict, turn: dict) -> dict:
         if acc:
             out["usage"] = acc
     return out
+
+
+def _visible_user_count(messages: list[dict]) -> int:
+    """这份消息里有几条**真实的用户提问**（口径与 transcript.turn_slices 一致）。
+
+    逐轮时间账要挂在"第几轮"上，而轮的定义就是"第几条真实用户消息"。用下标或
+    "落盘过几批"都对不上：压缩过、导入过、跨进程交错写过的会话都会错位。
+    """
+    return sum(1 for m in transcript.strip_injected(messages) if m.get("role") == "user")
+
+
+def current_turn_index(sid: str) -> int:
+    """磁盘上最后一条真实用户消息是第几轮（0 起）。没有则 -1。"""
+    with _lock_for(sid):
+        data = load(sid) or {}
+        return _visible_user_count(list(data.get("messages") or [])) - 1
+
+
+def note_turn_time(sid: str, turn: int, *, started_at: Optional[float] = None,
+                   ended_at: Optional[float] = None, ms: Optional[int] = None) -> None:
+    """记/更新第 `turn` 轮的时间账（upsert，只覆盖显式传进来的字段）。
+
+    分两次写是刻意的：**开跑时**就把 started_at 落下（那时用户那句话已经落盘了，
+    但这一轮还要跑几十分钟），**收尾时**再补 ended_at/ms。中途断电/进程被杀时，
+    盘上至少留着"这一轮什么时候开始的"，而不是什么都没有。
+    """
+    if turn < 0:
+        return
+    with _lock_for(sid):
+        data = load(sid)
+        if not data:
+            return
+        times = list(data.get("turn_times") or [])
+        row = next((t for t in times if int(t.get("turn", -1)) == int(turn)), None)
+        if row is None:
+            row = {"turn": int(turn), "started_at": 0.0, "ended_at": 0.0, "ms": 0}
+            times.append(row)
+        if started_at is not None:
+            row["started_at"] = float(started_at)
+        if ended_at is not None:
+            row["ended_at"] = float(ended_at)
+        if ms is not None:
+            row["ms"] = int(ms)
+        times.sort(key=lambda t: int(t.get("turn", 0)))
+        _save(sid, list(data.get("messages") or []), model=str(data.get("model") or ""),
+              usage=data.get("usage") or {}, created=data.get("created"),
+              steps=list(data.get("steps") or []),
+              skill_matches=list(data.get("skill_matches") or []),
+              stats=dict(data.get("stats") or {}), turn_times=times)
+
+
+def turn_times(sid: str) -> list[dict]:
+    data = load(sid) or {}
+    return list(data.get("turn_times") or [])
 
 
 def append_turn(sid: str, system: str, new_messages: list[dict], *, model: str = "",
