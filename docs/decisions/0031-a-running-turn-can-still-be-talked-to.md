@@ -81,7 +81,22 @@
   用户改了主意就抹掉。
 - **发 `cancelled` 而不是 `error`**。界面会把 error 画成红色的失败 —— 而这不是失败。
 
-### 四、时间是服务端的事实
+### 四、`-p` 也要有这三条通道（v1.16.1 补齐）
+
+上面三条通道都长在 serve（常驻 HTTP）上。但**消费方不止 serve**：IvyeaOps 的
+`/agents` 聊天走的是 `ivyea chat -p` 子进程，隔着进程边界够不着 serve 进程里的那些
+注册表。于是同样三件事在那边一件都做不成，而且"停止"只能 SIGTERM —— `_persist()`
+来不及跑，整轮产出蒸发。
+
+所以 `-p` 自己开一条：`--input-format stream-json`，stdin 逐行收控制消息
+（`user_input` / `control_response` / `interrupt`），stdout 混发 `control_request`。
+形状照抄 Claude Code 的 stdio control protocol —— IvyeaOps 的 claude_driver 已经在说
+这套话，消费方少学一套。
+
+读 stdin 的是**守护线程**，轮次线程只在自己的安全点（步边界、模型流的每个事件）
+来取：什么时候有人说话完全取决于人，不能让轮次阻塞在读上。
+
+### 五、时间是服务端的事实
 
 顺带把"这一轮什么时候开始、什么时候结束、跑了多久"落盘（`turn_times`，与 `steps`
 一样**平行于 messages**存 —— message dict 会原样回灌给 provider，多一个自定义键
@@ -93,7 +108,8 @@
 
 ## 结果
 
-- `POST /v1/chat/inject`、`POST /v1/chat/question`、`POST /v1/chat/cancel`、
+- CLI：`ivyea chat -p --input-format stream-json`（v1.16.1）。
+- serve：`POST /v1/chat/inject`、`POST /v1/chat/question`、`POST /v1/chat/cancel`、
   `GET /v1/chat/live-sessions` 四个新端点；`final` 增加 `auto_decisions` / `injected` / `injected_pending` /
   `started_ms` / `ended_ms` / `ms`；SSE 增加 `injected` / `question_request` /
   `question_timeout`。

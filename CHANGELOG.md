@@ -10,6 +10,22 @@
 
 ---
 
+## [v1.16.1] - 2026-08-28
+
+### 新增
+
+- **`-p` 也有输入通道了**：`ivyea chat -p --input-format stream-json` 会从 stdin 逐行读
+  控制消息。此前 `-p` 是一条单行道（喂一句、读一串、退出），中间那几十分钟里调用方
+  没有任何一条路走回来 —— 于是在 IvyeaOps 的 /agents 聊天里，ivyea 这一档既插不进话、
+  也弹不出选项卡，想停只能 SIGTERM，而那样**这一轮跑出来的东西一个字都不落盘**。
+  - `{"type":"user_input","text":"…"}` —— 追加指令，在下一个步边界插进当前这一轮，
+    插进去回一条 `injected` 事件供调用方销账。
+  - `{"type":"control_response","request_id":"…","response":{"answers":{…}}}` ——
+    回答 `ask_user_question` 弹出的选项卡（进程侧发 `control_request`）。
+  - `{"type":"interrupt"}` —— **优雅中止**：在下一个安全点收摊，已经跑出来的正文/
+    执行过程/时间账照常落盘，回一条 `result.subtype=cancelled`，退出码 0。
+  - 不带这个开关时行为逐字不变（stdin 照常不读）。
+
 ## [v1.16.0] - 2026-08-28
 
 ### 新增
