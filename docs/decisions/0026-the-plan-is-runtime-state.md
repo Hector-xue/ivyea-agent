@@ -64,7 +64,33 @@
 - `loop_guard` 豁免轮询类（`bash_output`）与记账类工具：前者同参数反复调用是正确用法，
   后者本来就该重复出现。把它们算进去等于自找误报。
 
-## 还没做
+## 后续：两套步骤表示已经合并（2026-08-28 补记）
 
-计划台账与 `task_runner` 的双向对接（消除两套步骤表示）留到下一期；当前 `plan_store`
-已经记下 `task_id`，接线时不需要改数据结构。
+上面留的"还没做"已经做完，方向定为 **计划台账是唯一真相，`task_runner` 的 `steps`
+降级为它的投影**：
+
+- **计划 → 任务**：`plan_store.save()` 落盘成功后投影进 `~/.ivyea/tasks/<id>.json`
+  （`task_runner.sync_plan_steps`）。此前那张表只有模型显式调 `task_step` 才会动，
+  而模型实际维护的是 `todo_write` —— 于是 `task_continue` 生成续跑提示时
+  （`next_step` → `_default_resume_prompt`）照着一份过期的步骤表指路。
+- **任务 → 计划**：会话绑了 `task_id` 而计划还空着时，用任务步骤给计划播种
+  （`plan_store.adopt_task`，在 `run_turn` 里 `prepare_messages` 之后调用）。
+  这条修的是"人在任务台排好步骤 → agent 接手"：在这之前模型只能从续跑提示里读到
+  一句散文式的"下一步 #2 ..."，计划台账是空的，`[当前计划]` 那段根本不注入。
+- **依赖是单向的**：`plan_store → task_runner`。`task_runner` 不认识计划，所以不会成环；
+  `sync_plan_steps` 见到步骤没变就不落盘，也不会在两边来回写。
+
+三条边界，都是踩过的账：
+
+- **不写空**。`plan_store.reset()`（换一轮查询）会清空计划，那不代表用户在任务台里排的
+  步骤该被抹掉，所以空步骤一律不投影。反过来这还带来一个好性质：reset 之后
+  `adopt_task` 从任务文件重新播种，而任务文件一直在收投影 —— **已推进的进度穿过 reset
+  活了下来**。
+- **播种只种台账，不碰 `ctx.todos`**。`todo_write` 那条路上挂着汇报门禁
+  （`validate_todo_update` 只在 `ctx.todos` 非空时生效），凭空往 `ctx.todos` 里塞步骤
+  等于给模型无声地加了一道它没同意过的门禁。模型读到注回的计划后自己发一次
+  `todo_write`，走的还是原本那条被校验过的路。
+- **`cancelled` 不复活**。人工取消的任务不该被一次步骤同步改回 `in_progress`。
+
+`task_step` 工具保留原样（纯 CLI `ivyea task step` 的老用法必须一字不差照旧能用），
+只在会话已有计划时多回一句提示：步骤的真相在计划台账，请用 `todo_write` 推进。

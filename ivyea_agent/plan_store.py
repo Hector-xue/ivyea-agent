@@ -81,6 +81,25 @@ def load(session_id: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _project_to_task(plan: dict[str, Any]) -> None:
+    """把计划步骤投影进任务文件（``~/.ivyea/tasks/<task_id>.json``）。
+
+    单向依赖：``plan_store → task_runner``。反过来不成立（`task_runner` 不认识计划），
+    所以不会成环，也不会在 save↔sync 之间来回写 —— `sync_plan_steps` 见到步骤没变就
+    直接返回，不落盘。
+
+    投影失败一律吞掉：任务文件是计划的**下游**，下游坏了不该让计划更新跟着失败。
+    """
+    task_id = str(plan.get("task_id") or "")
+    if not task_id or not (plan.get("steps") or []):
+        return
+    try:
+        from . import task_runner
+        task_runner.sync_plan_steps(task_id, list(plan.get("steps") or []))
+    except Exception:  # noqa: BLE001
+        return
+
+
 def save(plan: dict[str, Any]) -> dict[str, Any]:
     """原子落盘。写失败只吞掉不抛 —— 计划台账坏了不该连累这一轮任务。"""
     path = path_for(plan.get("session_id", ""))
@@ -96,6 +115,8 @@ def save(plan: dict[str, Any]) -> dict[str, Any]:
         os.replace(tmp, path)
     except OSError:
         return plan
+    # 落盘成功才投影：任务文件是计划的投影，计划自己都没写成功就没什么可投的。
+    _project_to_task(plan)
     return plan
 
 
@@ -284,6 +305,50 @@ def clear_replan(session_id: str) -> None:
     if plan and plan.get("replan_reason"):
         plan["replan_reason"] = ""
         save(plan)
+
+
+def adopt_task(session_id: str, task_id: str) -> dict[str, Any] | None:
+    """反向：任务已有步骤、计划还空着时，用任务步骤给计划**播种**。
+
+    这条路专治"人在任务台排好步骤 → agent 接手"。在这之前模型只能从续跑提示里读到
+    一句散文式的"下一步 #2 ..."，计划台账是空的，于是 `[当前计划]` 那段根本不注入 ——
+    人排的步骤和运行时状态两张皮。
+
+    **绝不覆盖模型自己的计划**：计划已经有步骤就原样返回。模型在干活途中改出来的计划
+    比任务创建时那份新，这是播种不是同步。
+
+    **只种台账，不碰 `ctx.todos`**：`todo_write` 那条路上挂着汇报门禁
+    （`progress_reporting.validate_todo_update` 只在 `ctx.todos` 非空时生效），凭空把
+    步骤塞进 `ctx.todos` 等于给模型无声地加了一道它没同意过的门禁。模型读到注回的
+    `[当前计划]` 之后自己发一次 `todo_write`，走的是原本那条被校验过的路。
+    """
+    if not _safe_key(session_id) or not str(task_id or "").strip():
+        return None
+    plan = load(session_id)
+    if plan and (plan.get("steps") or []):
+        return plan
+    try:
+        from . import task_runner
+        task = task_runner.load(task_id)
+    except Exception:  # noqa: BLE001 —— 任务不存在/坏了：当作没有任务，行为与改造前一致
+        return plan
+    steps = [
+        {"content": _clip(s.get("title") or "", _STEP_MAX_CHARS),
+         "status": str(s.get("status") or "pending"),
+         "notes": _clip(s.get("notes") or "", 200),
+         "evidence": [], "started_at": 0.0, "ended_at": 0.0,
+         "index": idx}
+        for idx, s in enumerate(task.get("steps") or [], 1)
+        if isinstance(s, dict) and str(s.get("title") or "").strip()
+    ]
+    if not steps:
+        return plan
+    plan = plan or _new_plan(session_id, task_id=task_id, query=_clip(task.get("title") or "", 400))
+    plan["task_id"] = task_id
+    if not plan.get("objective") and task.get("title"):
+        plan["objective"] = _clip(task["title"], 400)
+    plan["steps"] = steps
+    return save(plan)
 
 
 def reset(session_id: str, *, query: str = "", task_id: str = "") -> dict[str, Any] | None:

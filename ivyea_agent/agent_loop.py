@@ -125,6 +125,7 @@ class TurnStatus:
     citation_gate_rounds: int = 0
     critique_rounds: int = 0       # 收尾自查门禁已经逼修正过几轮（封顶 1）
     self_critiqued: bool = False   # 模型自己调过 self_critique —— 调过就不再由运行时代劳
+    compact_warned: bool = False   # 已就"越过压缩阈值但压不动"提醒过一次（每轮至多一次）
 
     def before_model_step(self, step_idx: int, narrate: Callable[[str], None]) -> None:
         remaining = (self.budget.steps_remaining if self.budget is not None
@@ -716,6 +717,22 @@ def _plan_note(ctx: ToolContext) -> str:
         return ""
 
 
+def _adopt_task_plan(ctx: ToolContext) -> None:
+    """会话绑了长任务、计划却还空着时，把任务里排好的步骤搬进计划台账。
+
+    放在 `task_scope.prepare_messages` **之后**：换一轮查询时 `progress_reporting.reset`
+    会把计划清空，播种必须发生在那之后，否则刚种下就被清掉。也正因为清空之后会重新
+    从任务文件播种，而任务文件一直在接收计划的投影，**已推进的进度能穿过 reset 活下来**。
+    """
+    task_id = getattr(ctx, "task_id", "") or ""
+    if not task_id:
+        return
+    try:
+        plan_store.adopt_task(getattr(ctx, "session_id", "") or "", task_id)
+    except Exception:   # noqa: BLE001 —— 播种失败就当没绑任务，行为与改造前一致
+        return
+
+
 def _inject_plan_note(ctx: ToolContext, messages: list) -> None:
     """把计划注回最后一条 user 消息。
 
@@ -767,6 +784,21 @@ def _maybe_compact(messages: list, provider, step_idx: int, narrate: Callable[[s
     est = context.estimate_tokens(messages)
     if not context.should_compact_midturn(est):
         return
+    # 越过阈值 ≠ 压得动。阈值被调到比 system 提示词还低时，用量永远在阈值之上，
+    # 而压缩动不了 system —— 不加这道闸就是每一步都压、每一步都白压（见 context
+    # 的 MIN_COMPACTIBLE_TOKENS）。这里除了跳过，还要**说一声**：默不作声地忽略
+    # 用户设的阈值，比压错更难查。
+    if not context.worth_compacting(messages):
+        if status is not None and not status.compact_warned:
+            status.compact_warned = True
+            narrate(ui.message(
+                "warn",
+                f"上下文约 {est} tok 已越过压缩阈值，但可压缩的历史不足 "
+                f"{context.MIN_COMPACTIBLE_TOKENS} tok —— 占用主要来自 system 提示词与"
+                "工具定义，压缩帮不上忙，本轮跳过。若长期如此，请把 compact_at_tokens "
+                "调到 system 提示词之上（config set compact_at_tokens <n>）。",
+            ))
+        return
     new, summary, usage = context.compact(messages, provider,
                                           extra_note=_plan_note(ctx) if ctx is not None else "",
                                           return_usage=True)
@@ -783,6 +815,7 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
     tools 可传受限工具子集（如只读子 agent）；传 [] = 不挂工具（纯文本生成）；
     None = 全量 TOOL_SCHEMAS。"""
     task_scope.prepare_messages(ctx, messages)
+    _adopt_task_plan(ctx)
     _inject_plan_note(ctx, messages)
     thinking.apply_to(provider, ctx)
     tool_schemas = TOOL_SCHEMAS if tools is None else tools
@@ -855,6 +888,7 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
     调用方（serve → 网页）会收到边界，把气泡清空重画；不给（CLI）则一个字都不变。
     reason: tool_call | gate:verify | gate:progress | gate:citation | gate:critique。"""
     task_scope.prepare_messages(ctx, messages)
+    _adopt_task_plan(ctx)
     _inject_plan_note(ctx, messages)
     thinking.apply_to(provider, ctx)
     tool_schemas = TOOL_SCHEMAS if tools is None else tools

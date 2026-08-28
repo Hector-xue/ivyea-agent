@@ -20,6 +20,14 @@ DEFAULT_HARD_CEILING = 200000
 # 压缩时保留最近 N 条消息原文（对标 Claude Code）：紧接压缩后的几步最依赖近期细节
 # （刚读的文件、刚给的路径），全摘要化会"失忆"重复劳动。config set compact_keep_recent 可调，0=全量摘要。
 DEFAULT_KEEP_RECENT = 6
+# 一次压缩至少要能吃掉这么多 token 才值得跑。压缩本身是一次真花钱的模型调用，
+# 而且把还能直接用的近期原文换成散文摘要 —— 压不动还硬压是净亏。
+#
+# 这条闸真正防的是"反复空压"：`compact_at_tokens` 一旦被调到比 system 提示词本身
+# 还低（小上下文模型、或手滑填了个小数字），用量就**永远**在阈值之上 —— 压缩动不了
+# system，于是每一步都判定"该压了"、每一步都压不下去，来回烧钱还把历史反复摘要化。
+# 判据必须是"这次能压掉多少"，不是"现在用了多少"。
+MIN_COMPACTIBLE_TOKENS = 2000
 
 _SUMMARY_SYS = "你是对话压缩器。把给定的多轮对话压缩成简洁要点，必须保留：关键事实、已做的决策、ASIN/店铺SID/具体数字、用户偏好与未完成事项。用中文分条，不要寒暄。"
 
@@ -96,6 +104,46 @@ def _pair_safe_split(history: list[dict], keep_recent: int) -> int:
     return idx
 
 
+def _keep_recent_setting(keep_recent: Optional[int]) -> int:
+    if keep_recent is not None:
+        return keep_recent
+    try:
+        return int(config.get_setting("compact_keep_recent", DEFAULT_KEEP_RECENT))
+    except (TypeError, ValueError):
+        return DEFAULT_KEEP_RECENT
+
+
+def _split_for_compaction(messages: list[dict], keep_recent: Optional[int] = None):
+    """返回 (system, 待摘要段, 原样保留段)。`compact` 与 `compactible_tokens` 共用同一套
+    切分 —— 判定"值不值得压"和"实际压什么"必须是同一段，否则闸门和执行会各说各话。"""
+    keep_recent = _keep_recent_setting(keep_recent)
+    system = messages[0] if (messages and messages[0].get("role") == "system") else None
+    history = messages[1:] if system else messages
+    split = _pair_safe_split(history, keep_recent)
+    if split < 4 <= len(history):
+        split = _pair_safe_split(history, 0)   # 历史短但需要压（如防溢出）：退回全量摘要
+    return system, history[:split], history[split:]
+
+
+def compactible_tokens(messages: list[dict], keep_recent: Optional[int] = None) -> int:
+    """这次压缩**能吃掉**多少 token：system 与保留区之外的那一段。
+
+    压缩永远动不了 system（`keep_system=True`），也不动保留区。所以"用量越过阈值"
+    从来就不等于"压缩帮得上忙"。太短不值得压的那一段返回 0。
+    """
+    _system, old, _recent = _split_for_compaction(messages, keep_recent)
+    return estimate_tokens(old) if len(old) >= 4 else 0
+
+
+def worth_compacting(messages: list[dict], keep_recent: Optional[int] = None) -> bool:
+    """**自动**压缩该不该跑。手动 `/compact` 不问这一句 —— 用户明确要求就照跑。
+
+    `should_compact*` 回答的是"用量到没到阈值"，这里回答的是另一个问题："压了有用吗"。
+    两个都点头才动手，否则阈值被调到 system 提示词以下时会陷入反复空压。
+    """
+    return compactible_tokens(messages, keep_recent) >= MIN_COMPACTIBLE_TOKENS
+
+
 def compact(messages: list[dict], provider, *, keep_system: bool = True,
             keep_recent: Optional[int] = None, extra_note: str = "",
             return_usage: bool = False):
@@ -112,17 +160,7 @@ def compact(messages: list[dict], provider, *, keep_system: bool = True,
     def _out(msgs, summary, usage=None):
         return (msgs, summary, usage or {}) if return_usage else (msgs, summary)
 
-    if keep_recent is None:
-        try:
-            keep_recent = int(config.get_setting("compact_keep_recent", DEFAULT_KEEP_RECENT))
-        except (TypeError, ValueError):
-            keep_recent = DEFAULT_KEEP_RECENT
-    system = messages[0] if (messages and messages[0].get("role") == "system") else None
-    history = messages[1:] if system else messages
-    split = _pair_safe_split(history, keep_recent)
-    if split < 4 <= len(history):
-        split = _pair_safe_split(history, 0)   # 历史短但需要压（如防溢出）：退回全量摘要
-    old, recent = history[:split], history[split:]
+    system, old, recent = _split_for_compaction(messages, keep_recent)
     if len(old) < 4:
         return _out(messages, "")   # 太短不值得压
     text = _render_history(old)

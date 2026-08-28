@@ -47,6 +47,7 @@ git log 记得住「改了什么」，记不住「为什么不选另一条路」
 | [0027](./0027-thinking-critique-and-evidence.md) | 思考按轮定档、自查由运行时兜底、证据要落盘 | 2026-08-28 |
 | [0028](./0028-agent-authored-skills.md) | 技能改成 agent 自己能读全、能写、能沉淀 | 2026-08-28 |
 | [0029](./0029-roles-budget-and-curation.md) | 子 agent 分工、预算按「干活」算、技能库要有人管 | 2026-08-28 |
+| [0030](./0030-compaction-must-be-able-to-help.md) | 越过压缩阈值 ≠ 压得动 | 2026-08-28 |
 
 相关的工作台侧决策见
 [IvyeaOps 的 ADR 目录](https://github.com/Hector-xue/IvyeaOps/tree/main/docs/decisions)，

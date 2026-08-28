@@ -936,6 +936,25 @@ def _task_id(args: dict, ctx) -> str:
     return str(args.get("task_id") or getattr(ctx, "task_id", "") or "").strip()
 
 
+def _plan_owns_steps_hint(ctx) -> str:
+    """会话已有计划时，提醒模型步骤的真相在计划台账那边。
+
+    ADR-0026 之后任务文件的 `steps` 是计划的**投影**：下一次 `todo_write` 会把整张表
+    按计划重写一遍，`task_step` 单独改的状态到那时就没了。这里只出一句提示、不拦下
+    调用 —— 没绑会话（纯 CLI `ivyea task step`）的老用法必须一字不差地照旧能用。
+    """
+    try:
+        from . import plan_store
+        plan = plan_store.load(getattr(ctx, "session_id", "") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+    if not plan or not (plan.get("steps") or []):
+        return ""
+    return ("\n\n提示：本会话的步骤真相是计划台账，任务文件里的 steps 是它的投影。"
+            "请用 todo_write 推进步骤 —— 下一次 todo_write 会按计划重写这张表，"
+            "这次 task_step 的改动到那时会被覆盖。")
+
+
 def t_task_read(args: dict, ctx) -> str:
     task_id = _task_id(args, ctx)
     if not task_id:
@@ -959,7 +978,7 @@ def t_task_step(args: dict, ctx) -> str:
             str(args.get("status") or ""),
             note=str(args.get("notes") or args.get("note") or ""),
         )
-        return _truncate(task_runner.render(task))
+        return _truncate(task_runner.render(task) + _plan_owns_steps_hint(ctx))
     except Exception as e:  # noqa: BLE001
         return f"更新任务步骤失败：{e}"
 

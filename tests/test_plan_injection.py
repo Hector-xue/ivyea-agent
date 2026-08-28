@@ -74,11 +74,14 @@ def test_plan_survives_midturn_compaction(ivyea_home, monkeypatch):
                         lambda k, d=None: {"compact_hard_ceiling_tokens": 10}.get(k, d))
     ctx = ToolContext(workspace=".", session_id="inj-compact")
     messages = [
+        # 每条 2200 字符（合计 ≈2300 tok）：自动压缩这条路上有 `worth_compacting` 闸，
+        # 可压段不足 MIN_COMPACTIBLE_TOKENS 就不跑。别把它缩回去 —— 缩了这个用例测的
+        # 就不是压缩，而是那道闸。
         {"role": "system", "content": "sys"},
-        {"role": "user", "content": "u" * 60},
-        {"role": "assistant", "content": "a" * 60},
-        {"role": "user", "content": "b" * 60},
-        {"role": "assistant", "content": "c" * 60},
+        {"role": "user", "content": "u" * 2200},
+        {"role": "assistant", "content": "a" * 2200},
+        {"role": "user", "content": "b" * 2200},
+        {"role": "assistant", "content": "c" * 2200},
     ]
     agent_loop._maybe_compact(messages, FakeProvider(), step_idx=1, narrate=lambda _s: None,
                               ctx=ctx)

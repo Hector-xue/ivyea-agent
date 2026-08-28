@@ -334,3 +334,83 @@ def _default_resume_prompt(
         "3. 若仍然接近工具上限，先保存进度并给出下一段续跑提示。",
     ])
     return "\n".join(lines)
+
+
+def _rollup_status(task: dict[str, Any]) -> None:
+    """按步骤状态推算任务状态（`sync_plan_steps` 专用）。
+
+    不复用 `update_step` 里那几行：它是"这一步刚改成 X"的增量口径，而这里拿到的是
+    整张表的快照，两者判定顺序本来就不同（增量口径下"本次改成 blocked"才置 blocked，
+    快照口径下要问"还有没有别的步骤在跑"）。硬合成一个函数只会让两边都别扭。
+
+    `cancelled` 不参与推算 —— 人工取消的任务不该被一次步骤同步复活。
+    """
+    steps = task.get("steps") or []
+    if not steps or task.get("status") == "cancelled":
+        return
+    if all(s.get("status") in {"completed", "skipped"} for s in steps):
+        task["status"] = "completed"
+    elif any(s.get("status") == "in_progress" for s in steps):
+        # 进行中优先于阻塞：第 1 步卡住、模型已经在跑第 3 步，任务就是在推进，
+        # 报成 blocked 会让任务台上一堆"卡住"的任务其实都在跑。
+        task["status"] = "in_progress"
+    elif any(s.get("status") == "blocked" for s in steps):
+        task["status"] = "blocked"
+    elif task.get("status") == "completed":
+        task["status"] = "in_progress"   # 计划又长出新步骤：已完成的任务重新打开
+
+
+def sync_plan_steps(task_id: str, steps: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """用计划台账的步骤覆盖任务步骤表。**只由 `plan_store` 调**。
+
+    为什么要有这一条：`task_runner` 的步骤表有自己的消费方 —— `ivyea task show`、
+    `/v1/task/{id}`，以及**续跑提示**（`task_continue` 按 `next_step` 生成"下一步该干
+    什么"）。在这之前那份表只有模型显式调 `task_step` 才会动，而模型实际维护的是
+    `todo_write`：一份计划两处记，结果就是续跑照着一份过期的步骤表指路。
+
+    为什么是覆盖而不是合并：任务文件里的 `steps` 从此是计划的**投影**，不是第二份
+    真相。ADR-0026 留下的"两套步骤表示"就是靠这一条消除的 —— 合并只会把分歧原样留下。
+
+    不写空：`steps` 为空一律原样返回。计划在换一轮查询时会被 `plan_store.reset` 清空，
+    那不代表用户在任务台里排的步骤该被抹掉。
+    """
+    if not task_id or not steps:
+        return None
+    try:
+        task = load(task_id)
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+        return None                      # 任务文件没了/坏了：投影是增益，不能反过来炸掉计划
+    if task.get("status") == "cancelled":
+        return task
+    new_steps: list[dict[str, Any]] = []
+    for idx, step in enumerate(steps, 1):
+        status = str(step.get("status") or "pending")
+        if status not in STEP_STATUSES:
+            status = "pending"
+        note = str(step.get("notes") or "")
+        evidence = [str(e) for e in (step.get("evidence") or []) if str(e).strip()]
+        if not note and evidence:
+            note = evidence[-1]          # 续跑要的是"上一步拿到了什么"，证据比空备注有用
+        new_steps.append({
+            "index": idx,
+            "title": security.redact_text(str(step.get("content") or step.get("title") or "")),
+            "status": status,
+            "notes": security.redact_text(note),
+        })
+    previous = task.get("steps") or []
+    if new_steps == previous:
+        return task                      # 没变就不写：events 不该被每次 todo_write 刷成流水账
+    task["steps"] = new_steps
+    _rollup_status(task)
+    # 只有**步骤或状态**变了才记事件。挂证据（`attach_evidence`）也会走到这里，那只改备注 ——
+    # 给它记一条和上一条一字不差的"计划同步：2/4 完成"，等于把真事件挤出最近 8 条。
+    def _shape(steps):
+        return [(s.get("title"), s.get("status")) for s in steps]
+    if _shape(new_steps) != _shape(previous):
+        done = sum(1 for s in new_steps if s.get("status") in {"completed", "skipped"})
+        running = next((s for s in new_steps if s.get("status") == "in_progress"), None)
+        text = f"计划同步：{done}/{len(new_steps)} 完成"
+        if running:
+            text += f"，进行中 #{running['index']} {running['title']}"
+        add_event(task, "plan", text)
+    return _save(task)

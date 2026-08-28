@@ -2454,7 +2454,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if ctx.todos:                        # 供 TUI 在轮末渲染计划面板（与行式对齐）
             from . import panels as _panels
             out["todos_panel"] = _panels.render_todos(ctx.todos, color=True)
-        if ctx_mod.should_compact(int((out.get("usage") or {}).get("prompt_tokens") or 0)):
+        # worth_compacting：阈值到了还得压得动。阈值低于 system 提示词时用量永远在阈值
+        # 之上，少了这一句就是每轮都压、每轮都白压（手动 /compact 不受这道闸限制）。
+        if (ctx_mod.should_compact(int((out.get("usage") or {}).get("prompt_tokens") or 0))
+                and ctx_mod.worth_compacting(messages)):
             messages, _s = ctx_mod.compact(messages, provider)
             if _s:
                 memory.remember_summary(_s, sid)
@@ -2688,7 +2691,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 if hint:
                     print(f"{_C['d']}  💡 {hint}{_C['x']}")
                 # 自动压缩默认关闭；长上下文只提醒，避免完整任务中途被压缩打断。
-                if ctx_mod.should_compact(int((out.get('usage') or {}).get('prompt_tokens') or 0)):
+                if (ctx_mod.should_compact(int((out.get('usage') or {}).get('prompt_tokens') or 0))
+                        and ctx_mod.worth_compacting(messages)):
                     messages, _s = ctx_mod.compact(messages, provider)
                     if _s:
                         memory.remember_summary(_s, sid)
