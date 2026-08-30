@@ -3811,6 +3811,16 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     return 0 if result["ok"] else 1
 
 
+def _cmd_answer_eval(args: argparse.Namespace) -> int:
+    from . import answer_evals
+    domains = set(getattr(args, "domain", []) or []) or None
+    result = answer_evals.run(limit=int(getattr(args, "limit", 0) or 0), domains=domains)
+    print(answer_evals.render(result, baseline=answer_evals.load_baseline()))
+    if getattr(args, "save_baseline", False) and result.get("results"):
+        print(f"基线已保存：{answer_evals.save_baseline(result)}")
+    return 0 if result.get("ok") else 1
+
+
 def _read_optional_text(path: str = "", text: str = "") -> str:
     if text:
         return text
@@ -4546,6 +4556,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     pev = sub.add_parser("eval", help="业务质量回归：规则引擎/知识召回/skill召回/安全脱敏")
     pev.set_defaults(func=_cmd_eval)
+
+    pae = sub.add_parser("answer-eval", help="答案级评测：真跑主脑生成回答 + rubric 判分（慢、要花钱，不进门禁）")
+    pae.add_argument("--limit", type=int, default=0, help="只跑前 N 个案例")
+    pae.add_argument("--domain", action="append", default=[], help="只跑指定域，可重复")
+    pae.add_argument("--save-baseline", action="store_true", help="把这次结果存成对比基线")
+    pae.set_defaults(func=_cmd_answer_eval)
 
     plis = sub.add_parser("listing", help="Listing 转化诊断：audit")
     plis.add_argument("action", choices=["audit"])
