@@ -18,7 +18,7 @@ import zipfile
 from importlib import resources
 from pathlib import Path
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from . import config, locking, security
@@ -42,7 +42,12 @@ ALIASES = {
     "单量": ["orders", "order volume", "sales"],
     "销量": ["sales", "units sold", "order volume"],
     "客单价": ["average selling price", "asp", "price"],
-    "跟卖": ["offer", "buy box", "featured offer", "counterfeit", "hijack"],
+    "跟卖": ["offer", "buy box", "featured offer", "other sellers", "counterfeit"],
+    "购物车": ["buy box", "featured offer", "offer display"],
+    "黄金购物车": ["buy box", "featured offer", "offer display"],
+    "删差评": ["review", "report abuse", "review policy"],
+    "刷评": ["review manipulation", "review policy", "incentivized"],
+    "测评": ["review manipulation", "review policy", "vine"],
     "差评": ["negative review", "review", "customer reviews", "product rating"],
     "断货": ["out of stock", "stranded inventory", "restock", "inventory"],
     "补货": ["restock", "replenishment", "inventory", "inventory management"],
@@ -151,20 +156,37 @@ ALIASES = {
     "营销云": ["Amazon Marketing Cloud", "AMC", "clean room", "privacy"],
 }
 
-_HIGH_RISK_TERMS = (
-    "注册", "身份验证", "验证失败", "上架报错", "报错", "错误码", "error code",
-    "绩效", "账户状况", "account health", "停用", "封号", "suspension", "deactivation",
-    "申诉", "appeal", "政策", "规则", "合规", "知识产权", "侵权", "费用", "fee",
-    "限制", "restricted", "受限商品", "危险品", "危品", "hazmat", "sds", "税务", "vat",
-    "gst", "消费税", "jct", "インボイス", "适格请求书", "适格請求書",
-    "gtin", "条码豁免", "知识产权投诉", "税务", "结算", "对账", "退款", "索赔", "safe-t",
+#: 高风险词分两类，因为这个 agent 同时是编码助手。
+#:
+#: 下面这些是**亚马逊专有**的说法，单独出现就足以判定是亚马逊问题。
+_HIGH_RISK_STANDALONE = (
+    "身份验证", "验证失败", "上架报错", "账户状况", "account health", "封号",
+    "suspension", "deactivation", "受限商品", "危险品", "危品", "hazmat", "sds",
+    "vat", "gst", "消费税", "jct", "インボイス", "适格请求书", "適格請求書",
+    "gtin", "条码豁免", "知识产权投诉", "safe-t", "seller central",
 )
+
+#: 这些词**本身是通用的**，必须同时出现亚马逊域信号才算数。
+#: "编译链接报错 undefined symbol" 曾经因为一个裸的"报错"被判成高风险亚马逊问题，
+#: 把一整段亚马逊证据注进编码对话里。"注册"（注册页面）、"费用"、"规则"、"限制"
+#: （受限访问）都有同样的毛病。
+_HIGH_RISK_NEEDS_DOMAIN = (
+    "注册", "报错", "错误码", "error code", "绩效", "停用", "申诉", "appeal",
+    "政策", "规则", "合规", "知识产权", "侵权", "费用", "fee", "限制", "restricted",
+    "税务", "结算", "对账", "退款", "索赔",
+)
+
+_HIGH_RISK_TERMS = _HIGH_RISK_STANDALONE + _HIGH_RISK_NEEDS_DOMAIN
 _AMAZON_DOMAIN_TERMS = (
     "amazon", "亚马逊", "seller central", "sp-api", "asin", "fba", "listing", "广告",
     "sponsored products", "sponsored brands", "sponsored display", "acos", "roas", "ctr", "cpc", "cvr",
     "attribution", "placement", "否词", "关键词", "搜索词", "竞价", "出价",
     "预算", "流量", "算法", "排名", "转化", "主图", "五点", "a+", "库存", "店铺",
-    "卖家", "上架", "绩效", "注册", "报错", "错误码", "高点击", "零单", "点击", "订单",
+    "卖家", "上架", "绩效", "高点击", "零单", "点击", "订单",
+    # 注意：**"注册"/"报错"/"错误码" 刻意不在这里**。它们同时也是高风险词，留在
+    # 域词表里就等于自己给自己提供"这是亚马逊话题"的证据——于是"编译链接报错
+    # undefined symbol"、"帮我写个用户注册页面"都会被判成高风险亚马逊问题。
+    # 它们现在只在 _HIGH_RISK_NEEDS_DOMAIN 里，要靠别的词证明是亚马逊话题才算数。
     "account health", "product type", "英国站", "欧洲站", "日本站", "受限商品", "危险品",
     "危品", "gtin", "条码豁免", "变体", "父子体", "佣金", "sku", "upc", "ean", "parent_sku",
     "归因", "广告报表", "搜索词报告", "广告位", "竞价策略", "自然排名", "流量池", "权重",
@@ -179,6 +201,7 @@ _AMAZON_DOMAIN_TERMS = (
     # link/编译链接、"评论"是 code review、"索引"是数据库索引——收进来会把亚马逊
     # 证据注进编码对话里。只收亚马逊运营专有的说法。
     "曝光", "出单", "自然单", "爆单", "单量", "销量", "转化率", "客单价",
+    "购物车", "黄金购物车", "buy box", "featured offer",
     "跟卖", "差评", "断货", "补货", "类目", "详情页", "促销", "秒杀", "优惠券",
     "coupon", "站内信", "复购", "利润", "毛利",
 )
@@ -229,6 +252,14 @@ def _query_markets(query_low: str) -> set[str]:
                 found |= markets
                 break
     return found
+
+#: 所有「X站」的说法都算亚马逊域信号，从站点表自动派生——别再手工往域词表里
+#: 一个个抄站点名：之前域词表里有"日本站"却漏了"墨西哥站"，于是
+#: "墨西哥站注册需要什么资料" 直接判成不检索。
+#: 只收「站」后缀那一档：裸的"日本""加拿大"在编码/闲聊里太常见，收进来会误触发。
+_SITE_DOMAIN_TERMS = tuple(sorted({
+    term for terms, _markets in _MARKET_TERMS for term in terms if term.endswith("站")
+}))
 
 
 METHODOLOGY = """\
@@ -753,6 +784,11 @@ def search(query: str, limit: int = 5) -> list[dict[str, Any]]:
     for card, body, counts, doc_len in hits_by_card:
         if not counts:
             continue
+        # 命中质量门槛：至少要有一个**整词或别名**（权重 ≥1.0）命中，光靠 n-gram 碎片
+        # 不算数。n-gram 是补召回的，但它会产出"在的""的东""全不"这类虚词碎片——它们
+        # 因为稀有反而拿到高 IDF，于是"完全不存在的东西"这种查询也能凑出高分。
+        if not any(weights[term] >= 1.0 for term in counts):
+            continue
         norm = 1.0 - _BM25_B + _BM25_B * (doc_len / avg_len)
         lexical = 0.0
         for term, n in counts.items():
@@ -1192,8 +1228,20 @@ def _fused_candidates(query: str, limit: int) -> list[dict[str, Any]]:
 def retrieval_decision(query: str) -> dict[str, Any]:
     """Decide whether Amazon evidence should be injected and how strict to be."""
     low = str(query or "").lower().strip()
-    high_matches = sorted({term for term in _HIGH_RISK_TERMS if term in low})
-    domain_matches = sorted({term for term in _AMAZON_DOMAIN_TERMS if term in low})
+    domain_matches = sorted({
+        term for term in _AMAZON_DOMAIN_TERMS + _SITE_DOMAIN_TERMS if term in low
+    })
+    generic_risk = sorted({term for term in _HIGH_RISK_NEEDS_DOMAIN if term in low})
+    if not domain_matches and generic_risk and _query_markets(low):
+        # 裸国名（"加拿大 费用 referral fee"，没带"站"）本身太弱——"帮我写个日本语言包"
+        # 也会命中。但**裸国名 + 通用高风险词**就足够了：那个组合不会出现在编码语境里。
+        domain_matches = sorted(set(generic_risk) | {"amazon_marketplace_mention"})
+    high_matches = sorted({term for term in _HIGH_RISK_STANDALONE if term in low})
+    if domain_matches or high_matches:
+        # 通用高风险词只有在确认是亚马逊话题时才算数
+        high_matches = sorted(set(high_matches) | {
+            term for term in _HIGH_RISK_NEEDS_DOMAIN if term in low
+        })
     diagnostic_issue = bool(domain_matches) and any(
         term in low for term in (
             "错误", "失败", "异常", "被拒", "不通过", "报错", "issue", "suppressed", "invalid", "required",
@@ -1230,6 +1278,60 @@ def retrieval_decision(query: str) -> dict[str, Any]:
         "reason": "no_amazon_domain_signal",
         "matched_terms": [],
     }
+
+
+#: 证据里一张权威卡都没有时挂上来的护栏卡。它讲的就是"区分官方事实 / 数据推断 /
+#: 运营假设，证据不足要说知识缺口"。
+_EVIDENCE_STANDARD_CARD = "governance.professional_knowledge_standard"
+
+
+#: 问"某某认证/等级/权重/指数怎么拿"这类**具名机制**问题时，最容易出现的失败不是
+#: 答不出来，而是顺着问题把一个不存在的机制编圆。命中这些词就挂上证据标准卡。
+_MECHANISM_CLAIM_TERMS = (
+    "算法", "权重", "流量池", "自然排名", "organic rank",
+    "认证", "等级", "评级", "分级", "指数", "评分", "打分", "tier", "level",
+)
+
+
+def _ensure_evidence_standard(query: str, hits: list[dict[str, Any]],
+                              requested: int) -> list[dict[str, Any]]:
+    """按需把"证据标准"那张护栏卡挂进证据里。
+
+    两种触发，处理方式不同：
+
+    - **一张权威卡都没命中**：最危险的情形不是"没有证据"（那时模型会说不知道），
+      而是**只有一堆用户上传的长文章**——手里有材料、又没有任何官方依据，最容易
+      顺着问题编。这时把护栏卡放最前面。
+    - **问的是具名机制**（某某认证/等级/权重/指数）：权威卡可能命中了，但命中的
+      跟问的那个机制根本不是一回事（问"卖家等级 S3 认证"却召回 Featured Offer 卡）。
+      这时把护栏卡**追加在最后**，不打乱已有排序。
+    """
+    if any(str(hit.get("id") or "") == _EVIDENCE_STANDARD_CARD for hit in hits):
+        return hits
+    has_authority = any(
+        str(hit.get("authority_tier") or "").startswith("primary")
+        or str(hit.get("authority_tier") or "") == "internal_governance"
+        for hit in hits
+    )
+    low = str(query or "").lower()
+    mechanism_claim = any(term in low for term in _MECHANISM_CLAIM_TERMS)
+    if has_authority and not mechanism_claim:
+        return hits
+    card = get_card(_EVIDENCE_STANDARD_CARD)
+    if card is None:
+        return hits
+    body = _read_body(card)
+    guard = {
+        **card,
+        "score": 0,
+        "lexical_score": 0,
+        "authority_score": _authority_score(card),
+        "snippet": _snippet(body, ["evidence", "official", "assumption"]),
+        "match": "evidence_standard_guard",
+    }
+    if not has_authority:
+        return [guard] + hits[: max(0, requested - 1)]
+    return hits[: max(0, requested - 1)] + [guard]
 
 
 def evidence_context(query: str, limit: int = 4, max_chars: int = 2600) -> dict[str, Any]:
@@ -1333,6 +1435,12 @@ def evidence_context(query: str, limit: int = 4, max_chars: int = 2600) -> dict[
         -evidence_priority(hit)[2], evidence_priority(hit)[3],
     ))
     hits = hits[:requested]
+    # 证据强度要在挂护栏卡**之前**记：护栏卡自己是 internal_governance 档，
+    # 挂上之后再看就永远是"有权威证据"。
+    # 证据强度要在挂护栏卡**之前**取一份快照：护栏卡自己是 internal_governance 档，
+    # 挂上之后再看就永远是"有权威证据"。
+    gap_hits = list(hits)
+    hits = _ensure_evidence_standard(query, hits, requested)
     freshness_review_required = any(
         hit.get("freshness") in {"stale_needs_review", "aging_review_soon", "undated"} for hit in hits
     )
@@ -1358,20 +1466,28 @@ def evidence_context(query: str, limit: int = 4, max_chars: int = 2600) -> dict[
         )
 
     #: 摘录短于这个长度就没有论证价值了，宁可少给一条证据也不要给一堆碎片。
-    _MIN_EXCERPT = 90
-    while hits:
-        fixed = len(header) + len(footer) + sum(
-            len(_meta_line(f"K{i}", hit)) + 1 for i, hit in enumerate(hits, 1)
+    _PREFERRED_MIN_EXCERPT = 90
+    #: 但调用方明确要了很小的预算时，缩短摘录**优于**砍掉整条证据来源——
+    #: 他要的是紧凑，不是更少的出处。低到这个值才真的没意义、才开始丢。
+    _HARD_MIN_EXCERPT = 40
+
+    def _fixed_cost(rows: list[dict[str, Any]]) -> int:
+        return len(header) + len(footer) + sum(
+            len(_meta_line(f"K{i}", hit)) + 1 for i, hit in enumerate(rows, 1)
         )
-        budget = max_chars - fixed
+
+    _MIN_EXCERPT = _PREFERRED_MIN_EXCERPT
+    if hits and (max_chars - _fixed_cost(hits)) < _PREFERRED_MIN_EXCERPT * len(hits):
+        if (max_chars - _fixed_cost(hits)) >= _HARD_MIN_EXCERPT * len(hits):
+            _MIN_EXCERPT = _HARD_MIN_EXCERPT
+    while hits:
+        budget = max_chars - _fixed_cost(hits)
         if budget >= _MIN_EXCERPT * len(hits) or len(hits) == 1:
             break
         hits = hits[:-1]      # 已按证据优先级排过序，砍掉的是最弱的那条
     # 预算**加权**分配，不是平摊：hits 已按证据优先级排过序，K1 是最该被读懂的
     # 那条。平摊会让每条都只剩不到一百字的碎片，谁也支撑不了结论。
-    available = max_chars - len(header) - len(footer) - sum(
-        len(_meta_line(f"K{i}", hit)) + 1 for i, hit in enumerate(hits, 1)
-    )
+    available = max_chars - _fixed_cost(hits)
     count = max(1, len(hits))
     shares = [count - i for i in range(count)]
     total_share = sum(shares) or 1
@@ -1415,6 +1531,7 @@ def evidence_context(query: str, limit: int = 4, max_chars: int = 2600) -> dict[
         ]
         citations = [pair[0] for pair in visible_pairs]
         hits = [pair[1] for pair in visible_pairs]
+    _record_retrieval(query, gap_hits, decision)
     return {
         **decision,
         "text": text,
@@ -1423,6 +1540,118 @@ def evidence_context(query: str, limit: int = 4, max_chars: int = 2600) -> dict[
         "hits": hits,
         "freshness_review_required": freshness_review_required,
     }
+
+
+def retrieval_log_file() -> Path:
+    return _user_base() / "retrieval_log.jsonl"
+
+
+#: 日志最多留这么多条。它是用来排"下一批补哪些卡"的，不是审计台账，不该无限长。
+_RETRIEVAL_LOG_MAX = 2000
+
+
+def _record_retrieval(query: str, hits: list[dict[str, Any]], decision: dict[str, Any]) -> None:
+    """记一笔亚马逊域检索的证据强度。
+
+    为什么只记录、不自动判定"这是不是知识缺口"：试过两种自动判据（有没有权威卡、
+    权威卡的词法分够不够），都不可靠——问一个库里根本没有的机制时，照样会有官方卡
+    因为撞上"亚马逊""申请"这类泛词拿到不低的分。**判不准就别替人判**，把证据强度
+    如实记下来，按最弱排给人看。
+
+    补卡优先级本该按真实提问频次排，但会话历史里现在只有 21 条非命令提问、且基本是
+    开发调试——那份数据不存在。这个日志就是去把它攒出来。
+
+    写失败一律吞掉：记日志不能影响检索本身。
+    """
+    try:
+        from . import security
+        authority = [
+            hit for hit in hits
+            if str(hit.get("authority_tier") or "").startswith("primary")
+            or str(hit.get("authority_tier") or "") == "internal_governance"
+        ]
+        top = authority[0] if authority else None
+        path = retrieval_log_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "query": security.redact_text(str(query or ""))[:300],
+            "risk": decision.get("risk", ""),
+            "authority_hits": len(authority),
+            "top_id": str(top.get("id") or "") if top else "",
+            "top_lexical": int(top.get("lexical_score") or 0) if top else 0,
+        }
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) > _RETRIEVAL_LOG_MAX:
+            path.write_text("\n".join(lines[-_RETRIEVAL_LOG_MAX:]) + "\n", encoding="utf-8")
+    except Exception:      # noqa: BLE001
+        return
+
+
+def knowledge_gaps(limit: int = 20) -> dict[str, Any]:
+    """按证据最弱排序，给出"下一批该补哪些卡"的候选清单。
+
+    排序依据是**证据强度**，不是某条自动判定：权威卡越少、词法分越低的问法排越前。
+    最终补不补、补什么，由人看着这份清单决定。
+    """
+    path = retrieval_log_file()
+    rows: list[dict[str, Any]] = []
+    if path.exists():
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:      # noqa: BLE001
+                continue
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        query = str(row.get("query") or "").strip()
+        if not query:
+            continue
+        item = grouped.setdefault(query, {
+            "query": query, "count": 0, "risk": row.get("risk", ""),
+            "authority_hits": int(row.get("authority_hits") or 0),
+            "top_lexical": int(row.get("top_lexical") or 0),
+            "top_id": row.get("top_id", ""), "last_seen": row.get("ts", ""),
+        })
+        item["count"] += 1
+        item["authority_hits"] = min(item["authority_hits"], int(row.get("authority_hits") or 0))
+        item["top_lexical"] = min(item["top_lexical"], int(row.get("top_lexical") or 0))
+        if str(row.get("ts") or "") > str(item["last_seen"] or ""):
+            item["last_seen"] = row.get("ts", "")
+            item["top_id"] = row.get("top_id", "")
+    ranked = sorted(
+        grouped.values(),
+        key=lambda r: (r["authority_hits"], r["top_lexical"], -r["count"], r["query"]),
+    )
+    return {"total_events": len(rows), "distinct_queries": len(grouped),
+            "weakest": ranked[:max(1, limit)], "log": str(path)}
+
+
+def render_knowledge_gaps(result: dict[str, Any] | None = None) -> str:
+    result = result or knowledge_gaps()
+    lines = [
+        "Ivyea 知识覆盖薄弱处（按证据强度从弱到强排）：",
+        f"- 累计 {result['total_events']} 次亚马逊域检索 · 去重 {result['distinct_queries']} 个问法",
+        f"- 日志：{result['log']}",
+    ]
+    if not result["weakest"]:
+        lines.append("- 暂无记录。这份清单要靠真实提问攒，用一段时间再回来看。")
+        return "\n".join(lines)
+    lines.append("")
+    lines.append("  权威卡  词法分  次数  问法")
+    for item in result["weakest"]:
+        lines.append(
+            f"  {item['authority_hits']:>5}  {item['top_lexical']:>6}  {item['count']:>4}  {item['query'][:52]}"
+        )
+    lines.append("")
+    lines.append("权威卡 0 或词法分很低 = 证据是靠语义近似凑出来的，多半没有真正覆盖这个问法。")
+    lines.append("这只是候选清单，补不补由人判断——自动判定「是不是缺口」实测不可靠。")
+    return "\n".join(lines)
 
 
 def citation_keys(text: str) -> list[str]:

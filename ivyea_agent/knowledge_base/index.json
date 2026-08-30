@@ -1372,5 +1372,43 @@
     "marketplaces": ["JP"],
     "locales": ["ja-JP", "zh-CN"],
     "tags": ["jct", "japan", "consumption-tax", "qualified-invoice", "invoice", "インボイス"]
+  },
+  {
+    "id": "listing.featured_offer_and_other_sellers",
+    "title": "Featured Offer (Buy Box) and other sellers on the same listing",
+    "category": "listing",
+    "source_type": "official",
+    "version": "2026.08",
+    "retrieved_at": "2026-08-30",
+    "path": "listing/featured_offer_and_other_sellers.md",
+    "source_url": "https://sell.amazon.com/blog/buy-box-featured-offer",
+    "marketplaces": ["GLOBAL"],
+    "tags": [
+      "featured-offer",
+      "buy-box",
+      "other-sellers",
+      "pricing",
+      "shipping-speed",
+      "diagnostics"
+    ]
+  },
+  {
+    "id": "returns.customer_reviews_and_ratings",
+    "title": "Customer product reviews and star ratings: what sellers may and may not do",
+    "category": "returns_claims",
+    "source_type": "official",
+    "version": "2026.08",
+    "retrieved_at": "2026-08-30",
+    "path": "returns/customer_reviews_and_ratings.md",
+    "source_url": "https://sell.amazon.com/tools/customer-reviews",
+    "marketplaces": ["GLOBAL"],
+    "tags": [
+      "reviews",
+      "ratings",
+      "vine",
+      "request-a-review",
+      "review-policy",
+      "account-health"
+    ]
   }
 ]

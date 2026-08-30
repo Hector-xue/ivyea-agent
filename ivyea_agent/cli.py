@@ -3226,6 +3226,10 @@ def _cmd_knowledge(args: argparse.Namespace) -> int:
     if args.action == "freshness":
         print(knowledge_governance.render_freshness())
         return 0
+    if args.action == "gaps":
+        print(knowledge.render_knowledge_gaps(knowledge.knowledge_gaps(limit=max(args.limit or 20, 20))))
+        return 0
+
     if args.action == "quality":
         result = knowledge_quality.run()
         print(knowledge_quality.render(result))
@@ -4170,8 +4174,18 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 
 def _cmd_retrieval(args: argparse.Namespace) -> int:
-    from . import retrieval
+    from . import retrieval, retrieval_index
     import json
+    if getattr(args, "dense", None) is not None:
+        from . import config as _cfg
+        _cfg.set_setting(retrieval_index.DENSE_SETTING, bool(args.dense))
+        if args.dense:
+            print("知识索引已切到稠密向量。**还没生效** —— 跑一次 `ivyea retrieval sync` 完成编码"
+                  "（首次要把全部分块过一遍模型，本机约 2.5 分钟；之后只重编改动过的分块）。")
+        else:
+            print("知识索引已退回词频稀疏向量。跑一次 `ivyea retrieval sync` 让它重新编码。")
+        if not args.action:
+            return 0
     if args.action == "capabilities":
         data = {"ok": True, "retrieval": retrieval.capabilities()}
         if args.json:
@@ -4843,6 +4857,11 @@ def build_parser() -> argparse.ArgumentParser:
     pret.add_argument("--allow-download", action="store_true", help="允许 sentence-transformers 在重建索引时下载模型")
     pret.add_argument("--no-download", action="store_true", help="禁止自动下载模型，仅使用本地 model-path")
     pret.add_argument("--probe", action="store_true", help="真实加载/编码一次，检查 dense embedding 是否可用")
+    pret.add_argument("--dense", dest="dense", action="store_true", default=None,
+                      help="知识索引改用稠密向量。打开后需要跑一次 `retrieval sync`，"
+                           "首次会把全部分块过一遍模型（本机约 2.5 分钟）")
+    pret.add_argument("--no-dense", dest="dense", action="store_false",
+                      help="知识索引退回词频稀疏向量（默认）")
     pret.add_argument("--json", action="store_true", help="输出 JSON，便于 IvyeaOps/脚本消费")
     pret.set_defaults(func=_cmd_retrieval)
 
@@ -4854,7 +4873,7 @@ def build_parser() -> argparse.ArgumentParser:
         "evidence-list", "evidence-schema", "evidence-plan", "evidence-apply",
         "ads-capabilities", "ads-analyze",
         "plan", "apply", "import", "url", "rebuild",
-        "index", "conflicts",
+        "index", "conflicts", "gaps",
     ])
     pk.add_argument("query", nargs="?")
     pk.add_argument("--limit", type=int, default=5)

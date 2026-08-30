@@ -153,13 +153,38 @@ def test_vector_path_degrades_on_error(monkeypatch):
     assert hits  # 词法路照常出结果
 
 
-def test_quality_gate_excludes_known_gaps():
-    """known_gap 案例不计门禁，但必须继续出现在结果里。"""
+def test_quality_gate_excludes_known_gaps(monkeypatch):
+    """known_gap 机制：标了的案例不计门禁，但必须继续出现在结果里。
+
+    测的是**机制**而不是"当前存在几个缺口"——缺口补完之后前者依然要成立。
+    合成一个必然失败的 known_gap 案例：它不该把门禁拉红，但必须留在结果里可见。
+    """
+    real_cases = knowledge_quality.cases()
+    synthetic = dict(real_cases[0])
+    synthetic.update({
+        "id": "synthetic.known_gap", "known_gap": True,
+        "query": "一个知识库里肯定没有的问法 zzz",
+        "expected_ids": ["definitely.not.a.real.card"], "max_rank": 1,
+    })
+    monkeypatch.setattr(knowledge_quality, "cases", lambda: real_cases + [synthetic])
+
     result = knowledge_quality.run()
     gaps = [row for row in result["results"] if row.get("known_gap")]
-    assert gaps, "known_gap 案例被删了——缺口必须保持可见"
-    assert result["summary"]["cases"] == len(result["results"]) - len(gaps)
-    assert result["summary"]["known_gaps"] == len(gaps)
+    assert len(gaps) == 1
+    assert gaps[0]["ok"] is False               # 它确实是红的
+    assert result["ok"] is True                 # 但门禁不该被它拉红
+    assert result["summary"]["known_gaps"] == 1
+    assert result["summary"]["cases"] == len(result["results"]) - 1
+    # 红的必须留在结果里可见——删掉换绿色是假的
+    assert any(row["id"] == "synthetic.known_gap" for row in result["results"])
+
+
+def test_all_known_gaps_are_currently_closed():
+    """当前不该有遗留缺口。新标 known_gap 是允许的，但要显式改这条断言。"""
+    result = knowledge_quality.run()
+    assert result["summary"]["known_gaps"] == 0, (
+        "有新的 known_gap 出现，确认是真修不了再更新这条断言"
+    )
 
 
 def test_quality_cases_have_answer_level_assertions():
@@ -174,3 +199,53 @@ def test_hallucination_trap_retrieves_guardrail_card():
     """问一个亚马逊没有的机制时，护栏卡必须在证据里。"""
     evidence = knowledge.evidence_context("亚马逊 A10 算法的官方权重表是多少", limit=5)
     assert any(card_id.startswith("governance.") for card_id in evidence["ids"])
+
+
+# ---- 证据强度日志（补卡优先级的数据来源）----
+
+def test_retrieval_log_records_evidence_strength(ivyea_home):
+    """每次亚马逊域检索都要留一笔证据强度。
+
+    补卡优先级本该按真实提问频次排，但会话历史里只有 21 条非命令提问、且基本是开发
+    调试——那份数据不存在。这个日志就是去把它攒出来。
+    """
+    knowledge.evidence_context("广告花了钱不出单", limit=4)
+    knowledge.evidence_context("亚马逊超级铂金标怎么申请", limit=4)
+    result = knowledge.knowledge_gaps()
+    assert result["total_events"] >= 2
+    queries = {row["query"] for row in result["weakest"]}
+    assert "广告花了钱不出单" in queries
+
+
+def test_retrieval_log_ranks_weakest_evidence_first(ivyea_home):
+    """排序按证据强度：权威卡少、词法分低的排前面。"""
+    knowledge.evidence_context("有人跟卖我的链接怎么办", limit=4)      # 有真覆盖
+    knowledge.evidence_context("亚马逊超级铂金标怎么申请", limit=4)     # 编造的机制
+    rows = knowledge.knowledge_gaps()["weakest"]
+    order = [r["query"] for r in rows]
+    assert order.index("亚马逊超级铂金标怎么申请") < order.index("有人跟卖我的链接怎么办")
+
+
+def test_non_amazon_query_is_not_logged(ivyea_home):
+    """编码类问题不该进这份清单——它压根不是亚马逊检索。"""
+    knowledge.evidence_context("编译链接报错 undefined symbol", limit=4)
+    assert knowledge.knowledge_gaps()["total_events"] == 0
+
+
+def test_logging_failure_never_breaks_retrieval(ivyea_home, monkeypatch):
+    """记日志失败也必须把证据正常返回。"""
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(knowledge, "retrieval_log_file", boom)
+    evidence = knowledge.evidence_context("广告花了钱不出单", limit=4)
+    assert evidence["citations"]
+
+
+def test_evidence_standard_guard_attached_for_invented_mechanism(ivyea_home):
+    """问一个具名机制（某某认证/等级）时必须挂上证据标准护栏卡。
+
+    最容易出事的不是答不出来，是顺着问题把一个不存在的机制编圆。
+    """
+    evidence = knowledge.evidence_context("亚马逊卖家等级 S3 认证怎么申请", limit=5)
+    assert "governance.professional_knowledge_standard" in evidence["ids"]
