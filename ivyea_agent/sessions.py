@@ -94,20 +94,29 @@ _SKILL_MATCH_MAX = 200
 
 
 def save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[dict] = None,
-         created: Optional[float] = None) -> None:
+         created: Optional[float] = None, origin: Optional[str] = None,
+         cwd: Optional[str] = None) -> None:
     with _lock_for(sid):
-        _save(sid, messages, model=model, usage=usage, created=created)
+        _save(sid, messages, model=model, usage=usage, created=created,
+              origin=origin, cwd=cwd)
 
 
 def _save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[dict] = None,
           created: Optional[float] = None, steps: Optional[list[dict]] = None,
           skill_matches: Optional[list[dict]] = None,
           stats: Optional[dict] = None,
-          turn_times: Optional[list[dict]] = None) -> None:
+          turn_times: Optional[list[dict]] = None,
+          origin: Optional[str] = None, cwd: Optional[str] = None) -> None:
     p = path_for(sid)
-    # steps/skill_matches/stats/turn_times 没传时**沿用盘上那份**，不能当成"清空"：
+    # steps/skill_matches/stats/turn_times/origin/cwd 没传时**沿用盘上那份**，不能当成"清空"：
     # `save()` 是整份覆盖语义（CLI 每轮就这么写），它不知道也不关心这些，但不该顺手把它们抹掉。
-    if steps is None or skill_matches is None or stats is None or turn_times is None:
+    #
+    # origin/cwd 尤其必须在这份名单里。一条会话会被**两个写入方**轮流整份覆盖
+    # （CLI 的 _persist 每轮 save 一次，serve 的收尾走 append_turn），谁都只带自己
+    # 关心的字段。漏掉的话就是：serve 写下的 origin 被 CLI 的下一轮抹掉、反之亦然，
+    # 于是左栏的「终端」标记时有时无 —— 这种"偶尔不对"最难查。
+    if (steps is None or skill_matches is None or stats is None or turn_times is None
+            or origin is None or cwd is None):
         prev = load(sid) or {}
         if steps is None:
             steps = list(prev.get("steps") or [])
@@ -117,6 +126,10 @@ def _save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[di
             stats = dict(prev.get("stats") or {})
         if turn_times is None:
             turn_times = list(prev.get("turn_times") or [])
+        if origin is None:
+            origin = str(prev.get("origin") or "")
+        if cwd is None:
+            cwd = str(prev.get("cwd") or "")
     data = {"id": sid, "created": created or time.time(), "updated": time.time(),
             "model": model, "messages": messages, "usage": usage or {},
             # 整条会话的累计账（轮数/步数/挂钟时间/模型时间/token）。**存累计而不是
@@ -131,7 +144,16 @@ def _save(sid: str, messages: list[dict], *, model: str = "", usage: Optional[di
             # 理由同 steps：messages 里的 dict 会原样回灌给 provider，多一个自定义键
             # 就有被拒的风险。界面靠它显示"发送于 09:46 / 结束于 09:49 · 用时 3 分"，
             # 刷新和换台机器打开也还在（此前这些数只活在发起它的那个页面内存里）。
-            "turn_times": list(turn_times)[-_TURN_TIMES_MAX:]}
+            "turn_times": list(turn_times)[-_TURN_TIMES_MAX:],
+            # 这条会话是从哪儿开的（"cli" / "serve"），以及开它时人在哪个目录。
+            # IvyeaOps 任务台左栏靠 origin 把终端里敲的会话标成「终端」—— 在这之前
+            # 它们混在列表里，没有来源、没有归属，看着像一堆无主会话。
+            #
+            # cwd 只是**展示用的标签**，绝不会被拿去建工作区：ops 那边给工作区绑目录
+            # 是一次授权行为（agent 的文件类工具会落在那儿，仅限管理员），从 cwd
+            # 自动建工作区等于静默把访问面开出去。
+            "origin": str(origin or ""),
+            "cwd": str(cwd or "")}
     # 临时文件名带进程号和随机后缀。固定成 `<id>.json.tmp` 的话，两个**进程**同时
     # 写同一条会话（比如工作台的 serve 和一个 `ivyea chat`）会写进同一个临时文件，
     # 互相踩出半截 JSON。进程内的会话锁管不到跨进程。
@@ -313,7 +335,11 @@ def listing(limit: int = 20) -> list[dict[str, Any]]:
                                and not transcript.is_injected_user_message(m.get("content"))), "")
             out.append({"id": d.get("id", f.stem), "updated": d.get("updated"),
                         "turns": transcript.visible_turns(msgs),
-                        "preview": (first_user or "")[:50]})
+                        "preview": (first_user or "")[:50],
+                        # 来源与起始目录：ops 左栏据此把终端会话标成「终端」。
+                        # 老会话文件里没有这两个键，取空串 —— 消费方按"空=未知"处理。
+                        "origin": str(d.get("origin") or ""),
+                        "cwd": str(d.get("cwd") or "")})
         except Exception:
             pass
     return out

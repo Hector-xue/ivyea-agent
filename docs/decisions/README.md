@@ -49,6 +49,7 @@ git log 记得住「改了什么」，记不住「为什么不选另一条路」
 | [0029](./0029-roles-budget-and-curation.md) | 子 agent 分工、预算按「干活」算、技能库要有人管 | 2026-08-28 |
 | [0030](./0030-compaction-must-be-able-to-help.md) | 越过压缩阈值 ≠ 压得动 | 2026-08-28 |
 | [0031](./0031-a-running-turn-can-still-be-talked-to.md) | 一轮跑着的时候，人还能说话（也能叫停） | 2026-08-28 |
+| [0032](./0032-session-attachments-are-not-knowledge.md) | 会话附件不是知识：只抽正文、不进知识库 | 2026-08-30 |
 
 相关的工作台侧决策见
 [IvyeaOps 的 ADR 目录](https://github.com/Hector-xue/IvyeaOps/tree/main/docs/decisions)，

@@ -292,6 +292,7 @@ def manifest() -> dict[str, Any]:
             {"method": "DELETE", "path": "/v1/knowledge/file", "description": "delete one user knowledge/upload file by relative path"},
             {"method": "GET", "path": "/v1/knowledge/uploads", "description": "list knowledge upload history"},
             {"method": "POST", "path": "/v1/knowledge/upload", "description": "save an uploaded document, extract text, and build an import draft"},
+            {"method": "POST", "path": "/v1/files/extract", "description": "extract text from a document without touching the knowledge base"},
             {"method": "POST", "path": "/v1/knowledge/uploads/apply", "description": "apply a confirmed upload draft into the knowledge base"},
             {"method": "GET", "path": "/v1/knowledge/audit", "description": "structured source quality and freshness audit"},
             {"method": "GET", "path": "/v1/knowledge/sources", "description": "knowledge source registry and review summary"},
@@ -1379,6 +1380,73 @@ def knowledge_file_delete(path: str) -> dict[str, Any]:
 def knowledge_uploads(limit: int = 50) -> dict[str, Any]:
     data = knowledge.list_uploads(limit=limit)
     return {"ok": True, "root": data.get("root", ""), "uploads": [_public_knowledge_upload(row) for row in data.get("uploads") or []]}
+
+
+#: 会话附件抽出来的正文上限。比知识库那条链宽得多 —— 知识库是要切片入索引的，
+#: 而这里只是把一份文档塞进**这一轮**的上下文，够模型答题就行；再大就该让它自己
+#: 去读文件，而不是把几十万字灌进一轮对话。
+_EXTRACT_TEXT_MAX = 200_000
+
+
+def _looks_binary(text: str) -> bool:
+    """这段"正文"其实是二进制字节被硬解出来的吗。
+
+    knowledge.extract_document_text 对不认识的后缀会退回 `_decode_text`，只在结果
+    短于 20 字时才报 `unknown_binary_or_empty_text` —— 于是一个 .zip 会"成功抽出"
+    几万个控制字符，一个 warning 都不给，然后被整段注进模型的上下文（实测就是这样）。
+    那既烧上下文又什么忙都帮不上，还可能把请求体撑坏。
+
+    判据是可打印字符占比：正常文本（含中日韩）几乎全是可打印的，而二进制里塞满了
+    控制字节和替换符 U+FFFD。只看前 4000 字，够判且不为一份大文件多扫一遍。
+    """
+    sample = text[:4000]
+    if not sample:
+        return False
+    bad = sum(1 for ch in sample
+              if ch == "�" or (ord(ch) < 32 and ch not in "\t\n\r") or ord(ch) == 127)
+    return bad / len(sample) > 0.10
+
+
+def files_extract(payload: dict[str, Any]) -> dict[str, Any]:
+    """只把一份文档抽成正文，**不写知识库、不建索引、不留档**。
+
+    为什么要有这个端点：IvyeaOps 任务台此前上传任何文件都直接走 knowledge/upload
+    进了知识库 —— 而用户的原话是"有些文件只是会话的时候用，并不需要纳入知识库"。
+    要给"只给这轮对话看"留一条路，ops 就需要一个纯抽取能力；它是 HTTP 客户端，
+    没法 import agent 的函数，而它自己只装了 pypdf/openpyxl（**没有 python-docx**），
+    自己抽会漏 docx 且和这边的实现分叉成两套。
+
+    抽取逻辑与 knowledge.upload_document 共用同一个 extract_document_text，
+    所以两条路对同一份文件读出来的字是一模一样的。
+    """
+    filename = str(payload.get("filename") or payload.get("name") or "upload.txt")
+    raw = str(payload.get("content_base64") or payload.get("data_base64") or "")
+    if not raw:
+        raise ValueError("content_base64 is required")
+    try:
+        data = base64.b64decode(raw.encode("ascii"), validate=True)
+    except (binascii.Error, UnicodeEncodeError) as exc:
+        raise ValueError("invalid content_base64") from exc
+    out = knowledge.extract_document_text(filename, data)
+    text = str(out.get("text") or "")
+    warnings = list(out.get("warnings") or [])
+    if _looks_binary(text):
+        # 抽出来的是二进制垃圾 —— **正文一并清空**，绝不把它交出去。留着的话调用方
+        # 多半会照单全收（"有 text 就是抽到了"），然后几万个控制字符就进了上下文。
+        text = ""
+        if "unknown_binary_or_empty_text" not in warnings:
+            warnings.append("unknown_binary_or_empty_text")
+        warnings.append("looks_binary")
+    truncated = len(text) > _EXTRACT_TEXT_MAX
+    return {
+        "ok": True,
+        "filename": filename,
+        "extension": out.get("extension") or "",
+        "text": text[:_EXTRACT_TEXT_MAX],
+        "chars": len(text),
+        "truncated": truncated,
+        "warnings": warnings,
+    }
 
 
 def knowledge_upload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2999,6 +3067,12 @@ class _Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._json(400, {"ok": False, "error": str(exc)})
             return
+        if parsed.path == "/v1/files/extract":
+            try:
+                self._json(200, files_extract(body))
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+            return
         if parsed.path == "/v1/knowledge/uploads/apply":
             try:
                 self._json(200, knowledge_upload_apply(body))
@@ -3657,6 +3731,13 @@ ATTACHMENT_MARKER = "\n\n[用户附图 —— 视觉模型代读的内容]"
 _ATTACHMENTS_MAX = 4
 _ATTACHMENT_TEXT_MAX = 6000
 
+#: 会话附件（文档）。和附图**分开计数、分开限长**，不能共用上面那两个数：
+#: 那是按"视觉模型对一张图的描述"定的，一段描述几百字就够了；而一份 PDF 动辄
+#: 几万字，塞进 6000 的池子里等于每次都被腰斩，而且贴 4 张图就能把文档整个挤掉。
+DOCUMENT_MARKER = "\n\n[用户附件 —— 文档正文]"
+_DOCUMENTS_MAX = 4
+_DOCUMENT_TEXT_MAX = 60000
+
 
 def _attachments_note(payload: dict[str, Any]) -> str:
     """把调用方读出来的附图内容并进**这一轮的 user 消息**，而不是 system。
@@ -3681,30 +3762,59 @@ def _attachments_note(payload: dict[str, Any]) -> str:
     rows = payload.get("attachments")
     if not isinstance(rows, list):
         return ""
+    # 先按 kind 分流。**没有 kind 的一律当图片**：这个字段是随会话附件一起加的，
+    # 老 ops 送上来的 attachments 只有图、且不带 kind，默认成文档会把它们的
+    # 描述文字摆到错误的段落里去。
+    images = [r for r in rows if isinstance(r, dict) and str(r.get("kind") or "image") != "document"]
+    documents = [r for r in rows if isinstance(r, dict) and str(r.get("kind") or "") == "document"]
+
+    blocks: list[str] = []
+
     picked: list[tuple[str, str, str, str]] = []
-    for row in rows[:_ATTACHMENTS_MAX]:
-        if not isinstance(row, dict):
-            continue
+    for row in images[:_ATTACHMENTS_MAX]:
         text = str(row.get("text") or "").strip()[:_ATTACHMENT_TEXT_MAX]
         if not text:
             continue          # 没读出内容的附图不写进去：宁可没有，也不摆一条空壳
         picked.append((str(row.get("name") or "").strip(),
                        str(row.get("ref") or "").strip(),
                        str(row.get("by") or "").strip()[:120], text))
-    if not picked:
-        return ""
-    head = (
-        f"{ATTACHMENT_MARKER}\n本轮用户上传了 {len(picked)} 张图。图片本体不在你的上下文里，"
-        "下面是视觉模型逐张读出的内容 —— 这就是用户看到的那张图，可以据此作答。"
-        "用户问你是怎么看到图的，如实说「图由视觉模型代读成文字后交给我」，"
-        "**不要否认收到过图，也不要把这段描述说成是自己编的**。"
-    )
-    lines = [head]
-    for idx, (name, ref, by, text) in enumerate(picked, 1):
-        tag = "、".join(x for x in (name, (f"代读模型 {by}" if by else ""),
-                                   (f"原图句柄 {ref}" if ref else "")) if x)
-        lines.append(f"第 {idx} 张{f'（{tag}）' if tag else ''}：\n{text}")
-    return "\n".join(lines)
+    if picked:
+        lines = [
+            f"{ATTACHMENT_MARKER}\n本轮用户上传了 {len(picked)} 张图。图片本体不在你的上下文里，"
+            "下面是视觉模型逐张读出的内容 —— 这就是用户看到的那张图，可以据此作答。"
+            "用户问你是怎么看到图的，如实说「图由视觉模型代读成文字后交给我」，"
+            "**不要否认收到过图，也不要把这段描述说成是自己编的**。"
+        ]
+        for idx, (name, ref, by, text) in enumerate(picked, 1):
+            tag = "、".join(x for x in (name, (f"代读模型 {by}" if by else ""),
+                                       (f"原图句柄 {ref}" if ref else "")) if x)
+            lines.append(f"第 {idx} 张{f'（{tag}）' if tag else ''}：\n{text}")
+        blocks.append("\n".join(lines))
+
+    docs: list[tuple[str, str, str]] = []
+    for row in documents[:_DOCUMENTS_MAX]:
+        text = str(row.get("text") or "").strip()[:_DOCUMENT_TEXT_MAX]
+        if not text:
+            continue
+        docs.append((str(row.get("name") or "文档").strip(),
+                     # 原件句柄。对这边是**完全不透明的一串字符**（就像附图那条路上的
+                     # ivyea-ref://），只是原样抄进注入段，好让展示端把附件小标做成
+                     # 一个能点开的下载链接。
+                     str(row.get("ref") or "").strip(), text))
+    if docs:
+        lines = [
+            f"{DOCUMENT_MARKER}\n本轮用户随消息带了 {len(docs)} 份文档，正文抄在下面。"
+            "**这些文档只属于这次对话，没有进知识库** —— 所以不要说「我在知识库里找到」，"
+            "也不要因为知识库里搜不到就说没有这份材料。下次对话它们不会自动还在。"
+        ]
+        for idx, (name, ref, text) in enumerate(docs, 1):
+            # 分隔符用全角竖线：文件名里几乎不会出现它，展示端才好把名字和句柄
+            # 稳稳切开（半角的 | 在文件名里并不罕见）。
+            tag = f"{name}｜原件 {ref}" if ref else name
+            lines.append(f"第 {idx} 份（{tag}）：\n{text}")
+        blocks.append("\n".join(lines))
+
+    return "".join(blocks)
 
 
 def _auto_skill_context(message: str, messages: list) -> list[dict[str, Any]]:
@@ -3824,6 +3934,11 @@ def _public_session(row: dict[str, Any]) -> dict[str, Any]:
         # 这条会话此刻有没有一轮在跑。左栏据此打闪烁标记 —— 此前它只能显示
         # "最近更新时间"，而"十分钟内动过"和"正在跑"是两件完全不同的事。
         "running": bool(live_turn.status(str(row.get("id") or "")).get("running")),
+        # 会话是在哪儿开的（"cli" = 终端里敲的 `ivyea chat`，空 = 未知/老会话）
+        # 和开它时所在的目录。这两个字段**必须在这里显式列出**：这个函数是个
+        # 白名单，listing() 里加了字段而不改这儿的话，ops 一个字都收不到。
+        "origin": str(row.get("origin") or ""),
+        "cwd": security.redact_text(str(row.get("cwd") or "")),
     }
 
 
