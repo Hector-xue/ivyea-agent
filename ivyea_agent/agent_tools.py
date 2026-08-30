@@ -280,6 +280,13 @@ TOOL_SCHEMAS = [
             "old": {"type": "string", "description": "replace/remove 的原文，必须唯一命中"}},
             "required": ["block", "operation"]}}},
     {"type": "function", "function": {
+        "name": "show_image",
+        "description": "把一张**已经存在的**图片文件展示给用户看。你截的图、跑出来的图表、读到的产品图，想让用户亲眼看看就用它 —— 光用文字描述用户是看不见的。在 IvyeaOps 网页里会直接渲染成图（这时要把返回的 `![说明](地址)` 原样写进你的回答正文）；在终端里不渲染画面，只报路径。作图请用 image_generate，这个工具只负责展示已有文件。",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "图片文件路径"},
+            "caption": {"type": "string", "description": "一句话说明，会变成图的 alt 文字"}},
+            "required": ["path"]}}},
+    {"type": "function", "function": {
         "name": "ivyea_ops_list_tools",
         "description": "仅 IvyeaOps 嵌入模式可用：列出当前用户可调用的 IvyeaOps 板块工具，包括 Home、市场、Listing、广告审计、领星、资讯、监控，**以及 AI 作图（image_generate）**。用户提出作图/出图/画一张/生成主图之类的需求时，先用这个查一下 —— 宿主机器上通常已经配好了生图链路，别直接回答\"我没有图像生成能力\"。",
         "parameters": {"type": "object", "properties": {
@@ -811,6 +818,72 @@ def _ops_tool_catalog(ctx: ToolContext) -> dict[str, dict[str, Any]]:
     return catalog
 
 
+#: show_image 认得的图片魔数。**按文件头判，不看扩展名** —— 扩展名是模型说了算的。
+_IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpg"),
+    (b"GIF87a", "gif"), (b"GIF89a", "gif"), (b"BM", "bmp"),
+)
+
+
+def _sniff_image_ext(head: bytes) -> str:
+    for magic, ext in _IMAGE_MAGIC:
+        if head.startswith(magic):
+            return ext
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    if head[4:8] == b"ftyp" and head[8:12] in (b"avif", b"avis"):
+        return "avif"
+    return ""
+
+
+def _t_show_image(args: dict, ctx: ToolContext) -> str:
+    """把一张图给用户看。**两种宿主，两种结果，但只有一个工具名。**
+
+    · 嵌进 IvyeaOps（serve）→ 委托给 ops 的同名工具。图片本体不进模型：ops 读文件、
+      复制进会话图库、回一个站内地址，模型把 `![](地址)` 写进正文，网页上就渲染成图。
+      **权限边界也在 ops 那边**（只读已绑定目录的工作区），这边不自己开一套。
+    · 终端（CLI）→ 没有浏览器可送，也没有出口可挂，所以只做一件诚实的事：确认这
+      确实是一张图、把绝对路径报回去。用户在终端里看不到画面，但至少知道是哪张图 ——
+      这正是用户描述的形态（"虽然在 CLI 端不会显示"）。
+
+    **绝不往 stdout 打字**：`-p --output-format stream-json` 下 stdout 是协议通道，
+    多一行就把调用方的解析打断了。要说的话一律走返回值。
+    """
+    raw = str(args.get("path") or "").strip()
+    caption = str(args.get("caption") or "").strip()
+    if not raw:
+        return "错误：需要提供 path（图片文件路径）。"
+
+    bridge = ctx.ops_bridge if isinstance(ctx.ops_bridge, dict) else {}
+    if bridge.get("base_url"):
+        data = _ops_bridge_request(
+            ctx, "/call", {"name": "show_image",
+                           "arguments": {"path": raw, "caption": caption}}, timeout=60.0)
+        return _compact_json_text(data)
+
+    # —— CLI ——
+    from pathlib import Path as _P
+    try:
+        target = _P(raw).expanduser().resolve()
+    except OSError as exc:
+        return f"错误：路径解不开：{exc}"
+    if not target.is_file():
+        return f"错误：{target} 不是一个文件（或不存在）。"
+    try:
+        with open(target, "rb") as fh:
+            head = fh.read(16)
+        size = target.stat().st_size
+    except OSError as exc:
+        return f"错误：读不了这个文件：{exc}"
+    ext = _sniff_image_ext(head)
+    if not ext:
+        return (f"错误：{target} 不是图片（按文件头判定；支持 png/jpg/gif/webp/bmp/avif）。")
+    return (f"[图片] {target}（{ext}，{size} 字节）"
+            + (f" —— {caption}" if caption else "")
+            + "\n终端里不渲染画面，把这个路径告诉用户即可；他在网页端（IvyeaOps 任务台）"
+              "问同一件事时，同一个工具会把图直接显示出来。")
+
+
 def _t_ivyea_ops_call_tool(args: dict, ctx: ToolContext) -> str:
     name = str(args.get("name") or "").strip()
     if not name:
@@ -930,6 +1003,7 @@ _DISPATCH = {
     "run_image_audit": _t_run_image_audit,
     "run_image_ocr": _t_run_image_ocr,
     "recall": _t_recall,
+    "show_image": _t_show_image,
     "ivyea_ops_list_tools": _t_ivyea_ops_list_tools,
     "ivyea_ops_call_tool": _t_ivyea_ops_call_tool,
     **tools_general.GENERAL_DISPATCH,

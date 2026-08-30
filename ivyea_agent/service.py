@@ -3791,20 +3791,27 @@ def _attachments_note(payload: dict[str, Any]) -> str:
             lines.append(f"第 {idx} 张{f'（{tag}）' if tag else ''}：\n{text}")
         blocks.append("\n".join(lines))
 
-    docs: list[tuple[str, str]] = []
+    docs: list[tuple[str, str, str]] = []
     for row in documents[:_DOCUMENTS_MAX]:
         text = str(row.get("text") or "").strip()[:_DOCUMENT_TEXT_MAX]
         if not text:
             continue
-        docs.append((str(row.get("name") or "文档").strip(), text))
+        docs.append((str(row.get("name") or "文档").strip(),
+                     # 原件句柄。对这边是**完全不透明的一串字符**（就像附图那条路上的
+                     # ivyea-ref://），只是原样抄进注入段，好让展示端把附件小标做成
+                     # 一个能点开的下载链接。
+                     str(row.get("ref") or "").strip(), text))
     if docs:
         lines = [
             f"{DOCUMENT_MARKER}\n本轮用户随消息带了 {len(docs)} 份文档，正文抄在下面。"
             "**这些文档只属于这次对话，没有进知识库** —— 所以不要说「我在知识库里找到」，"
             "也不要因为知识库里搜不到就说没有这份材料。下次对话它们不会自动还在。"
         ]
-        for idx, (name, text) in enumerate(docs, 1):
-            lines.append(f"第 {idx} 份（{name}）：\n{text}")
+        for idx, (name, ref, text) in enumerate(docs, 1):
+            # 分隔符用全角竖线：文件名里几乎不会出现它，展示端才好把名字和句柄
+            # 稳稳切开（半角的 | 在文件名里并不罕见）。
+            tag = f"{name}｜原件 {ref}" if ref else name
+            lines.append(f"第 {idx} 份（{tag}）：\n{text}")
         blocks.append("\n".join(lines))
 
     return "".join(blocks)
