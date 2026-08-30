@@ -260,8 +260,14 @@ def test_continuous_quality_suite_and_schedule(ivyea_home):
 
     result = knowledge_quality.run()
     assert result["ok"] is True
-    assert result["summary"]["cases"] == 41
+    # 用下限而不是等值：案例集是要持续加题的，等值断言会让每次加题都炸在这里。
+    # 下限同样能挡住"案例被悄悄删掉"。
+    assert result["summary"]["cases"] >= 49
     assert result["summary"]["pass_rate"] == 1.0
+    # known_gap（已确认的知识缺口）不计门禁但持续可见。当前缺口已全部补上，
+    # 所以这里只断言字段存在且自洽——机制本身在 test_knowledge_retrieval_fusion 里测。
+    assert result["summary"]["known_gaps"] == 0
+    assert result["summary"]["total_cases"] == result["summary"]["cases"]
     assert len(result["summary"]["domains"]) >= 8
     ok, text = schedule.run_task("knowledge_quality")
     assert ok is True

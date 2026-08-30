@@ -39,11 +39,25 @@ def test_search_playbooks():
 
 
 def test_context_for_query_compact():
+    """极小预算下：条数会变少，但**每一条都有真正的正文**。
+
+    以前这里能凑够 2 条，靠的是"拼完超长砍尾巴"——第 2 条的引证键留在文本里、正文
+    却被切没了，等于报了一条空证据。现在宁可少一条，也不给切了一半的。
+    """
     text, ids = knowledge.context_for_query("高点击零单要不要否词", limit=2, max_chars=400)
     assert text and ids
     assert len(text) <= 404
-    assert any("negative" in i or "playbook" in i for i in ids)
     assert "confidence=" in text and "freshness=" in text
+    # 每条被报出来的引证都必须带着实际摘录，不能是被截断剩下的空壳
+    for key in knowledge.citation_keys(text):
+        assert f"[{key}]" in text
+    assert "excerpt: " in text and len(text.split("excerpt: ")[-1].strip()) >= 40
+
+
+def test_context_for_query_normal_budget_covers_negative_playbook():
+    """预算正常时，否词类问题必须能拿到否词相关的证据。"""
+    _text, ids = knowledge.context_for_query("高点击零单要不要否词", limit=3, max_chars=2600)
+    assert any("negative" in i or "playbook" in i for i in ids), ids
 
 
 def test_professional_retrieval_routes_high_risk_and_cites_official_cards():

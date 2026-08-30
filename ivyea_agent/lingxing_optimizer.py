@@ -14,10 +14,11 @@ M1 只读：产出候选清单 + 报告，不写入。每个杠杆独立 try/exc
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
-from . import config, memory
+from . import config, memory, term_taxonomy
 from .lingxing_cache import fetch_dataset   # 带缓存的取数（签名同 lingxing_datasets）
 from .lingxing_openapi import LingXingError
 
@@ -29,6 +30,10 @@ _DEFAULTS = {
     "lingxing_opt_window_days": 30, "lingxing_opt_exclude_recent_days": 2,
     "lingxing_target_acos_factor": 0.7, "lingxing_bid_floor": 0.02,
     "lingxing_target_acos_override": 0, "lingxing_margin_override": 0,
+    # 否词护栏用的词表（逗号/空格分隔）。默认空 = 保持既有行为，只是候选上会带
+    # "未配置品牌词" 的警告 —— 不静默改变任何老用户已有的结果。
+    "lingxing_brand_tokens": "", "lingxing_competitor_tokens": "",
+    "lingxing_strategic_tokens": "",
 }
 
 
@@ -56,6 +61,36 @@ def _add(b: dict[str, float], r: dict[str, Any]) -> None:
     b["spend"] += _f(r.get("cost")); b["sales"] += _f(r.get("sales"))
     b["orders"] += _f(r.get("orders")); b["clicks"] += _f(r.get("clicks"))
     b["impressions"] += _f(r.get("impressions"))
+
+
+def _split_tokens(raw: Any) -> set[str]:
+    """把配置里的词表切成 token 集。中英文逗号/顿号/空格/分号都当分隔符。"""
+    return {t for t in re.split(r"[,\s;，、]+", str(raw or "").lower()) if t}
+
+
+def _term_context(buckets: dict[Any, dict[str, Any]], margin: Optional[float],
+                  queries: list[str]) -> term_taxonomy.TermContext:
+    """用本窗口的搜索词报表汇总出账户基线，拼出否词护栏要的上下文。
+
+    账户均值必须**从同一批数据算**：拿别处的口径来比，比出来的"高于均值"没有意义。
+    """
+    ctx = term_taxonomy.TermContext(
+        brand_tokens=_split_tokens(_cfg("lingxing_brand_tokens")),
+        competitor_tokens=_split_tokens(_cfg("lingxing_competitor_tokens")),
+        strategic_tokens=_split_tokens(_cfg("lingxing_strategic_tokens")),
+    )
+    total = _bucket()
+    for bk in buckets.values():
+        for key in total:
+            total[key] += bk["_b"][key]
+    if total["clicks"] > 0:
+        ctx.account_cvr = total["orders"] / total["clicks"]
+    if total["impressions"] > 0:
+        ctx.account_ctr = total["clicks"] / total["impressions"]
+    if margin and total["orders"] > 0:
+        ctx.profit_per_order = margin * (total["sales"] / total["orders"])
+    ctx.inferred_competitor_tokens = term_taxonomy.infer_competitor_tokens(queries, ctx)
+    return ctx
 
 
 def _metrics(b: dict[str, float]) -> dict[str, Any]:
@@ -237,14 +272,22 @@ def run_store(sid: int, days: Optional[int] = None, progress: Optional[Callable]
                   lambda r: (str(r.get("campaign_id")), str(r.get("query") or "")) if r.get("query") else None,
                   capture=("query", "campaign_id", "ad_group_id", "match_type"),
                   progress=progress, label="搜索词报表")
+        term_ctx = _term_context(st, margin, [str(q) for (_c, q) in st])
         for (cid, q), bk in st.items():
             m = _metrics(bk["_b"])
             if m["clicks"] >= neg_clicks and m["orders"] == 0:
                 ok, why = guard(q, "negative")
+                # 「不能否」清单：品牌词/战略词/竞品词/疑似 Listing 承接问题一律拦下。
+                # 历史否决和冷却已经在 guard 里判过，这里只补词性维度。
+                verdict = term_taxonomy.negation_guard(q, m, term_ctx)
+                if ok and not verdict["allowed"]:
+                    ok, why = False, verdict["reason"]
                 cands.append({
                     "lever": "否词", "op_type": "negate_keyword", "sid": sid, "campaign_id": cid,
                     "target_name": q, "metrics": m, "opt_target": tgt(), "opt_breakeven": brk(),
                     "blocked": not ok, "block_reason": why,
+                    "term_category": verdict["category"],
+                    "guard_warnings": verdict["warnings"],
                     "rule": f"搜索词「{q}」{m['clicks']}点击/0单（≥{neg_clicks}点击）→ 否定(negativeExact)",
                     "significance": f"{m['clicks']}点击 0单 · 花费{m['spend']}",
                     "rationale": f"近{win}天该搜索词 {m['clicks']} 次点击 0 转化、花费 {m['spend']}，纯无效花费，建议否定。",
@@ -336,7 +379,8 @@ def run_store(sid: int, days: Optional[int] = None, progress: Optional[Callable]
     order = {"否词": 0, "收割": 1, "降bid": 2, "加bid": 3, "加预算": 4, "错误": 9}
     cands.sort(key=lambda c: (order.get(c["lever"], 8), -(c.get("metrics", {}).get("spend") or 0)))
     return {"sid": sid, "window_days": win, "margin": margin, "target_acos": target,
-            "breakeven_acos": breakeven, "note": note, "count": len(cands), "candidates": cands}
+            "breakeven_acos": breakeven, "note": note, "count": len(cands), "candidates": cands,
+            "uncovered_guards": list(term_taxonomy.UNCOVERED_GUARDS)}
 
 
 def _bid_cand(lever, sid, kid, name, cur, new_bid, m, target, breakeven, ok, why, rule, rationale):

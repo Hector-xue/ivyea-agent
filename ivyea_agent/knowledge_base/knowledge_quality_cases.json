@@ -39,5 +39,16 @@
   {"id":"ads.sponsored_brands","domain":"amazon_ads_products","query":"Sponsored Brands 品牌广告怎么衡量","expected_ids":["amazon_ads.sponsored_brands"],"max_rank":3,"risk":"medium"},
   {"id":"ads.display","domain":"amazon_ads_products","query":"Sponsored Display 迁移到展示广告","expected_ids":["amazon_ads.display_ads"],"max_rank":3,"risk":"medium"},
   {"id":"ads.dsp","domain":"amazon_ads_products","query":"Amazon DSP 程序化广告归因","expected_ids":["amazon_ads.amazon_dsp"],"max_rank":3,"risk":"medium"},
-  {"id":"ads.amc","domain":"amazon_ads_products","query":"AMC 亚马逊营销云 clean room 分析边界","expected_ids":["amazon_ads.amazon_marketing_cloud"],"max_rank":3,"risk":"medium"}
+  {"id":"ads.amc","domain":"amazon_ads_products","query":"AMC 亚马逊营销云 clean room 分析边界","expected_ids":["amazon_ads.amazon_marketing_cloud"],"max_rank":3,"risk":"medium"},
+  {"id":"ops.ads_spend_no_orders","domain":"amazon_ads","query":"广告花了钱不出单怎么办","risk":"medium","golden_points":[["conversion","cvr","转化"],["no orders","0 orders","high clicks","高点击"],["bid","budget","出价","预算"]]},
+  {"id":"ops.no_impressions","domain":"amazon_ads","query":"链接突然没曝光了","risk":"low","golden_points":[["impression"],["bid","竞价"]]},
+  {"id":"ops.inventory_stockout","domain":"fba","query":"库存老是不够卖","risk":"low","expected_ids":["fba.inventory_management"],"max_rank":3,"golden_points":[["inventory"],["restock","replenish"]]},
+  {"id":"ops.no_organic_sales","domain":"traffic_governance","query":"产品一直没有自然单","risk":"low","golden_points":[["organic"],["discoverability","ranking"]]},
+  {"id":"ops.hijacked_listing","domain":"brand_protection","query":"有人跟卖我的链接怎么办","risk":"low","golden_points":[["featured offer","buy box"],["other sellers","跟卖"]],"expected_ids":["listing.featured_offer_and_other_sellers"],"max_rank":3},
+  {"id":"ops.negative_reviews","domain":"returns_claims","query":"最近差评变多了怎么办","risk":"low","golden_points":[["review","评论"],["三星以下","customer reviews"],["归因","质量","描述不符"]],"expected_ids":["returns.customer_reviews_and_ratings"],"max_rank":3},
+  {"id":"trap.a10_algorithm","domain":"traffic_governance","query":"亚马逊 A10 算法的官方权重表是多少","risk":"medium","expect_guard":["governance.traffic_algorithm_evidence","governance.professional_knowledge_standard"],"forbidden":["官方权重表"]},
+  {"id":"trap.invented_metric","domain":"traffic_governance","query":"Sponsored Products 的黄金关键词权重指数怎么查","risk":"medium","expect_guard":["governance.traffic_algorithm_evidence","governance.professional_knowledge_standard"],"forbidden":["黄金关键词权重指数"]},
+  {"id":"trap.invented_seller_tier","domain":"account_health","query":"亚马逊卖家等级 S3 认证怎么申请","risk":"low","expect_guard":["governance.professional_knowledge_standard"],"forbidden":["s3 认证"]},
+  {"id":"market.mx_fees","domain":"fees","query":"墨西哥站佣金费率是多少","risk":"low","expected_ids":["fees.mx_selling_fees"],"max_rank":3},
+  {"id":"market.ca_dangerous_goods","domain":"dangerous_goods","query":"加拿大站危险品怎么申报","risk":"high","expected_ids":["fba.dangerous_goods_ca"],"max_rank":3}
 ]

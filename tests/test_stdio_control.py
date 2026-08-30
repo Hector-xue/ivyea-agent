@@ -48,7 +48,7 @@ def test_interrupt_sets_the_cancel_flag():
 def test_ask_round_trip():
     """选项卡：发 control_request → 调用方回 control_response → 拿到答案。"""
     sent: list = []
-    reader, writer = io.StringIO(), None
+    reader = io.StringIO()
     ctrl = StdioControl(sent.append)
 
     # 手工喂一条答案：先拿到 request_id，再按它回
