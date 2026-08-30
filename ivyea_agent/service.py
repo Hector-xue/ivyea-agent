@@ -3824,6 +3824,11 @@ def _public_session(row: dict[str, Any]) -> dict[str, Any]:
         # 这条会话此刻有没有一轮在跑。左栏据此打闪烁标记 —— 此前它只能显示
         # "最近更新时间"，而"十分钟内动过"和"正在跑"是两件完全不同的事。
         "running": bool(live_turn.status(str(row.get("id") or "")).get("running")),
+        # 会话是在哪儿开的（"cli" = 终端里敲的 `ivyea chat`，空 = 未知/老会话）
+        # 和开它时所在的目录。这两个字段**必须在这里显式列出**：这个函数是个
+        # 白名单，listing() 里加了字段而不改这儿的话，ops 一个字都收不到。
+        "origin": str(row.get("origin") or ""),
+        "cwd": security.redact_text(str(row.get("cwd") or "")),
     }
 
 

@@ -1898,11 +1898,23 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     # 完整流式默认开（tty 下逐字出字、收尾重排 markdown，对标 Claude）；/stream 可切、可持久化覆盖
     stream_live = bool(cfg.get_setting("stream_live", True))
 
+    # 开会话时人在哪个目录。**只取一次**：取的是"这条会话是在哪儿开的"，
+    # 而不是"此刻进程的 cwd" —— 后者会被中途的目录切换改掉，那就不是同一件事了。
+    try:
+        _session_cwd = os.getcwd()
+    except OSError:
+        _session_cwd = ""      # 目录被删了照样要能聊天，这只是个展示标签
+
     def _persist():
         try:
             sessions.save(sid, messages, model=cfg.get_model_config().get("model", ""),
                           usage={"cost": meter.cost, "turns": meter.turns,
-                                 "prompt": meter.prompt, "completion": meter.completion})
+                                 "prompt": meter.prompt, "completion": meter.completion},
+                          # 每轮都带上：会话文件是**整份覆盖**写的，而 serve 那边的
+                          # append_turn 也会覆盖同一个文件。两边都只带自己关心的字段，
+                          # 靠 _save 里"None 就沿用盘上那份"保住对方的。这里传实值，
+                          # 是让终端会话从第一轮起就带着来源标记。
+                          origin="cli", cwd=_session_cwd)
         except Exception as e:
             from . import log
             log.dbg("chat.persist", f"会话保存失败 sid={sid}: {e!r}")
