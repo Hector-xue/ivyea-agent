@@ -26,7 +26,12 @@ def _line(c: dict[str, Any]) -> str:
     metric = (f"{m.get('clicks', 0)}点击/{m.get('orders', 0)}单/"
               f"花费{m.get('spend', 0)}/ACOS {_acos(m)}") if m else ""
     flag = "  ⛔" + c.get("block_reason", "") if c.get("blocked") else ""
-    return f"  · {c.get('target_name', '')} — {c.get('rule', '')}\n      {metric}{flag}\n      理由: {c.get('rationale', '')}"
+    out = (f"  · {c.get('target_name', '')} — {c.get('rule', '')}\n      {metric}{flag}\n"
+           f"      理由: {c.get('rationale', '')}")
+    # 护栏警告要露出来。放行但"拿不准在哪"不写给人看，等于没有护栏。
+    for warning in c.get("guard_warnings") or []:
+        out += f"\n      ⚠️ {warning}"
+    return out
 
 
 def render(result: dict[str, Any], *, color: bool = True) -> str:
@@ -74,8 +79,15 @@ def render(result: dict[str, Any], *, color: bool = True) -> str:
         lines.append("（窗口内无符合规则的候选——可能近期广告暂停/数据延迟，或确实健康。）")
     else:
         lines.append(f"{_DIM if color else ''}可执行候选 {executable} 条 · "
-                     f"被拦截 {result.get('count', 0) - executable} 条（历史否决/冷却）。"
+                     f"被拦截 {result.get('count', 0) - executable} 条（历史否决/冷却/词性护栏）。"
                      f"写入需后续里程碑的人工审批。{_RESET if color else ''}")
+    # 如实交代哪些护栏**没有**覆盖。不说的话，读报告的人会默认全覆盖了。
+    uncovered = result.get("uncovered_guards") or []
+    if uncovered:
+        lines.append("")
+        lines.append("## 护栏未覆盖项")
+        for item in uncovered:
+            lines.append(f"  · {item}")
     return "\n".join(lines).strip() + "\n"
 
 

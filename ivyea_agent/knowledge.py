@@ -41,7 +41,6 @@ ALIASES = {
     "爆单": ["sales spike", "orders", "demand"],
     "单量": ["orders", "order volume", "sales"],
     "销量": ["sales", "units sold", "order volume"],
-    "转化率": ["conversion rate", "cvr", "conversion"],
     "客单价": ["average selling price", "asp", "price"],
     "跟卖": ["offer", "buy box", "featured offer", "counterfeit", "hijack"],
     "差评": ["negative review", "review", "customer reviews", "product rating"],
@@ -58,7 +57,6 @@ ALIASES = {
     "毛利": ["margin", "gross margin", "profit"],
     "下架": ["suppressed", "inactive", "removed", "listing quality"],
     "被封": ["deactivated", "suspension", "account health", "appeal"],
-    "申诉": ["appeal", "plan of action", "reinstatement", "account health"],
     "否词": ["negative", "negative targeting", "negative keywords"],
     "否定": ["negative", "negative targeting"],
     "预算": ["budget", "daily budget"],
@@ -103,7 +101,7 @@ ALIASES = {
     "绩效": ["account health", "performance", "policy compliance"],
     "账户状况": ["account health", "policy compliance"],
     "停用": ["suspension", "deactivation", "account health", "appeal"],
-    "申诉": ["appeal", "plan of action", "account health"],
+    "申诉": ["appeal", "plan of action", "reinstatement", "account health"],
     "政策": ["policy", "policies", "compliance"],
     "规则": ["policy", "requirements", "guidelines", "compliance"],
     "合规": ["compliance", "policy", "requirements"],
@@ -118,7 +116,7 @@ ALIASES = {
     "展示量": ["impressions", "ctr", "measurement"],
     "点击率": ["ctr", "click-through rate", "impressions", "clicks"],
     "点击成本": ["cpc", "cost per click", "spend", "clicks"],
-    "转化率": ["cvr", "conversion rate", "attributed orders", "clicks"],
+    "转化率": ["cvr", "conversion rate", "conversion", "attributed orders", "clicks"],
     "广告报表": ["ads reporting", "search term report", "targeting report", "placement report"],
     "搜索词报告": ["search term report", "click-filter", "inferred search term", "asin"],
     "广告位": ["placement", "top of search", "rest of search", "product pages"],
@@ -249,7 +247,9 @@ METHODOLOGY = """\
 
 异常归因（低效词不要只说"CVR低"）：无关流量 / Listing承接不足 / 价格或转化问题 / 信号混杂 / 需人工看Listing。
 
-护栏铁律：不投 SBV；不走 Vine；拒绝评论操控；不删 campaign；单次降 bid ≤20%；调整后留 5 天稳定期；不否同义词；不预设产品配置（缺信息写"未指定"）。
+护栏铁律：不投 SBV；不走 Vine；拒绝评论操控；不删 campaign；单次调 bid 步长 ≤15%；同一目标调整后 7 天冷却期内不再动；不否同义词；不预设产品配置（缺信息写"未指定"）。
+不能否（说建议时必须先排除）：品牌词、竞品词、战略大词、新品期差词、数据不足词、高转化低流量词、疑似 Listing 承接问题而非流量问题的词。
+以上步长/冷却是本系统的运营口径（可在设置里调），不是亚马逊官方规则，别说成官方要求。
 
 证据标签：结论绑证据，区分 [报告]（来自搜索词报表数据）与 [推断]（基于现有信息的判断），不把猜测写成事实。
 """

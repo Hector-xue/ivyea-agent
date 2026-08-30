@@ -26,7 +26,7 @@ Community basis:
 - High ACOS with orders: reduce bid gradually instead of negating.
 - Healthy ACOS with repeat orders: consider bid increase if impression share or placement is constrained.
 - Broad discovery terms should usually bid lower than phrase/exact harvest terms.
-- Default single bid step should be small, normally within 10-20%.
+- Default single bid step should be small; this system caps it at 15% per change (operator setting, not an Amazon rule).
 - Do not repeatedly change bid before enough post-change data arrives.
 
 ## Budget Rules

@@ -81,3 +81,49 @@ def test_rejected_term_blocked(patched):
     negs = [c for c in res["candidates"] if c["lever"] == "否词"]
     assert len(negs) == 1 and negs[0]["blocked"] is True
     assert "否决" in negs[0]["block_reason"]
+
+
+# ---- 否词护栏接线（term_taxonomy 有没有真的挂到引擎上）----
+
+def test_brand_term_is_blocked_in_engine(patched, monkeypatch):
+    """配了品牌词后，品牌搜索词必须在引擎里被拦下——否掉它会直接掐掉品牌流量。"""
+    opt, holder = patched
+    monkeypatch.setattr(opt, "_cfg", lambda k: {"lingxing_brand_tokens": "ivyea"}.get(
+        k, opt._DEFAULTS.get(k)))
+    _one_day(opt, holder, [
+        {"campaign_id": "C1", "query": "ivyea karaoke", "clicks": 20, "orders": 0, "cost": 15, "sales": 0},
+        {"campaign_id": "C1", "query": "free music download", "clicks": 20, "orders": 0, "cost": 15, "sales": 0},
+    ])
+    res = opt.run_store(1876, days=30)
+    negs = {c["target_name"]: c for c in res["candidates"] if c["lever"] == "否词"}
+    assert negs["ivyea karaoke"]["blocked"] is True
+    assert "品牌词" in negs["ivyea karaoke"]["block_reason"]
+    assert negs["ivyea karaoke"]["term_category"] == "brand_term"
+    # 普通无效词照样放行，护栏不能把杠杆整体废掉
+    assert negs["free music download"]["blocked"] is False
+
+
+def test_missing_brand_config_surfaces_warning(patched):
+    """没配品牌词时不静默放行，候选上要带得出警告。"""
+    opt, holder = patched
+    _one_day(opt, holder, [
+        {"campaign_id": "C1", "query": "junk term", "clicks": 20, "orders": 0, "cost": 15, "sales": 0},
+    ])
+    res = opt.run_store(1876, days=30)
+    neg = [c for c in res["candidates"] if c["lever"] == "否词"][0]
+    assert neg["blocked"] is False
+    assert any("未配置品牌词" in w for w in neg["guard_warnings"])
+
+
+def test_uncovered_guards_reported(patched):
+    opt, holder = patched
+    _one_day(opt, holder, [
+        {"campaign_id": "C1", "query": "junk term", "clicks": 20, "orders": 0, "cost": 15, "sales": 0},
+    ])
+    res = opt.run_store(1876, days=30)
+    assert any("新品期" in item for item in res["uncovered_guards"])
+
+    from ivyea_agent import lingxing_report
+    md = lingxing_report.render_md(res)
+    assert "护栏未覆盖项" in md
+    assert "⚠️" in md          # 警告要出现在报告里
