@@ -703,8 +703,15 @@ def test_service_chat_stream_with_fake_provider(ivyea_home):
 
     assert result["ok"] is True
     assert result["text"] == "流式完成"
-    assert events[0][0] == "start"
-    assert [e for e, _ in events].count("token") >= 2
+    # start 是**第一条非 stage 事件**，而不是第一条事件。
+    # v1.16.6 起准备阶段会先发若干条 stage（"载入会话历史与记忆"…），
+    # 而且**刻意排在 start 之前** —— start 之前那段慢活正是要照亮的黑盒，
+    # 等到 start 才说话就等于"干完了才告诉你要开始干"。见 test_service_stage_events。
+    names = [e for e, _ in events]
+    assert "start" in names
+    assert names[0] == "stage", "准备阶段的第一条提示没有排在最前面"
+    assert next(e for e in names if e != "stage") == "start"
+    assert names.count("token") >= 2
     assert events[-1][0] == "final"
 
 

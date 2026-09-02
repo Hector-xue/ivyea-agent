@@ -1844,7 +1844,23 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
     # 这一轮的起点。created_at 是**会话**的创建时刻（_chat_messages 从存档里取的），
     # 拿它当起点算出来的是这条会话开了多久，不是这一轮跑了多久 —— 差着几天。
     turn_started = time.time()
+
+    # ── 「正在准备」不该是黑盒 ─────────────────────────────────────────────
+    # 在第一个 token 之前，这里要干的事不少：载入会话历史、召回记忆、注入知识证据、
+    # 组工具清单（可能要连 MCP）、语义匹配技能。这些加起来动辄几十秒，而此前
+    # **一个字节都不发** —— 连 start 都在 _chat_messages 之后，前端只能干等，
+    # 屏幕上就一句"正在准备"，用户不知道它在准备什么、还要多久（用户原话：
+    # "有点黑盒的感觉，有时候准备几十秒甚至更久，不知道在准备什么"）。
+    #
+    # 所以每跨过一个准备阶段就发一条 stage。第一条**在任何慢活之前**就发出去，
+    # 保证前端最迟在毫秒级就能看到"开始了，正在做 X"。
+    def stage(name: str, label: str) -> None:
+        send("stage", {"stage": name, "label": label,
+                       "elapsed_ms": int((time.time() - turn_started) * 1000)})
+
+    stage("intake", "读取这一轮的输入")
     try:
+        stage("context", "载入会话历史与记忆")
         messages, created_at, turn_base = _chat_messages(message, payload, ctx, route)
     except ValueError as exc:
         data = {"ok": False, "error": str(exc)}
@@ -1861,6 +1877,8 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
 
     # 上下文占用：**在第一个 token 之前就发**。进度条要回答"这轮带了多少东西进去"，
     # 等收尾再说就晚了 —— 那时候用户已经在等回答，看不看进度条都无所谓了。
+    # 组工具清单可能要连 MCP（外部进程/网络），是准备阶段里最容易卡住的一步
+    stage("tools", "准备可用工具")
     turn_tools = _tools_for(payload, route)
     send("context", context.snapshot(messages, turn_tools, model_cfg.get("model", "")))
 
@@ -1872,6 +1890,7 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
             and not route.is_chat and not route.is_quick
             # 同一道领域闸：写代码的轮次不该被塞进一本运营手册
             and _wants_domain_context(task_scope._user_said(message), ctx)):
+        stage("skills", "匹配技能")
         matched = _auto_skill_context(message, messages)
         if matched:
             send("skill_match", stream_json.skill_match_event(ctx.session_id, matched))
@@ -2031,6 +2050,10 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
         _record_turn_memory(payload, ctx, message, _answer)
 
     try:
+        # 准备阶段的最后一条：从这里开始等的是模型，不再是我们自己在忙。
+        # 这条尤其重要 —— 用户看到"等待模型响应"就知道该等的是网络和模型，
+        # 而不是怀疑本地卡住了。
+        stage("model", "等待模型响应")
         provider = provider or build_chain(model_cfg, api_key, narrate=narrate)
         out = agent_loop.run_turn_stream(
             provider,
