@@ -116,7 +116,11 @@ def resolve(questions: list[dict], ask_fn: Optional[AskFn],
 
     返回 `{answers, auto, reason, auto_filled}`：auto=True 表示整份答案都不是人选的；
     `auto_filled` 是**其中哪几问是替用户填的**（按推荐项）。
-    reason: ""（全是人选的）/ partial / no_channel / timeout / error。
+    reason: ""（全是人选的）/ partial（答了一部分）/ skipped（人在场，按了跳过）/
+    no_channel / timeout / error。
+
+    `skipped` 和 `timeout` 的答案完全一样（都按推荐项），但**说法必须不一样**：
+    一个是用户主动放权，一个是没人在。前者说成后者就是在对用户撒谎。
 
     `auto_filled` 必须端出去，调用方才记得了账。只回一个 auto 布尔是不够的：
     一次可以问四问，人只点了第一问就提交（界面会拦，但别的客户端不一定），
@@ -133,8 +137,14 @@ def resolve(questions: list[dict], ask_fn: Optional[AskFn],
                 "reason": "error", "auto_filled": everything}
     answers = _clean_answers(questions, got)
     if not answers:
+        # 一个答案都没有，但**为什么**没有分两种，不能混作一谈：
+        #   · 通道返回 None  = 真的没人理（超时 / 页面关了 / 非 tty）
+        #   · 通道返回 dict  = 人在场，按了"跳过"，让我们按推荐来
+        # 混着报的后果是对用户撒谎 —— 他明明点了跳过，收尾却说"你 5 分钟没有选择"。
+        skipped = got is not None
         return {"answers": recommended_answers(questions), "auto": True,
-                "reason": "timeout", "auto_filled": everything}
+                "reason": "skipped" if skipped else "timeout",
+                "auto_filled": everything}
     # 只答了一部分：没答的按推荐补齐，并如实说是哪几问补的。
     filled: list[str] = []
     for q in questions:
@@ -235,8 +245,22 @@ class RemoteAsk:
 
 # ── 终端通道（CLI / TUI）────────────────────────────────────────────────────
 
+#: 菜单里那两个不是"选项"的选项。用不可能撞上真 label 的前缀，免得模型某天真写了
+#: 一个叫「跳过」的选项就把这条支路劫走。
+OTHER_KEY = "\x00ivyea:other"
+SKIP_KEY = "\x00ivyea:skip"
+
+
 class TerminalAsk:
     """AskFn 的终端实现：一问一个菜单（tui.select）。
+
+    菜单末尾固定挂两项，和工作台那张卡对齐：
+      · ✎ 自己写一个答案 —— 给的选项都不对时，用户得能说自己的话；
+      · ⤼ 跳过这题     —— 明确把这题交回给模型，按推荐项走。
+
+    「跳过」放在最后不是随手排的：`tui.select` 的降级路径（非 tty 的编号菜单）约定
+    空输入/无效输入落到最后一项，而"不选＝跳过＝按推荐继续"正好是这里想要的兜底。
+    交互菜单那条路回车确认的是高亮项，不受这个约定影响。
 
     多选在终端上退化成单选 —— 菜单本身只能选一项，与其做一个半吊子的多选界面，
     不如让模型知道终端上只会拿到一项（工具描述里写清楚了）。
@@ -250,15 +274,24 @@ class TerminalAsk:
         answers: dict[str, str] = {}
         for q in questions:
             options = [(opt["label"], _terminal_label(opt)) for opt in q["options"]]
+            options.append((OTHER_KEY, "✎ 自己写一个答案…"))
+            options.append((SKIP_KEY, "⤼ 跳过这题（按推荐项继续）"))
             title = q["question"]
-            body = "（未选择则按推荐项继续）"
+            # 只说「跳过」，**不要**写成"直接回车＝按推荐项继续"：交互菜单里回车确认的是
+            # 当前高亮项，而高亮默认落在第一项上，推荐项未必排第一 —— 那句话会骗人。
+            body = "（选「跳过这题」＝按推荐项继续）"
             try:
                 picked = tui.select(title, body, options, kind="info")
+                if picked == OTHER_KEY:
+                    # 空串＝他打开了输入又改主意了，当作这题没答（后面按推荐补齐）。
+                    picked = tui.prompt_text(q["question"], "给的选项都不合适？写你自己的答案")
             except (KeyboardInterrupt, EOFError):
-                return None
-            if picked:
+                return None        # 整个卡都不要了 → 当作没人答
+            if picked and picked != SKIP_KEY:
                 answers[q["question"]] = picked
-        return {"answers": answers} if answers else None
+        # 注意这里**一律返回 dict**，哪怕一个都没答：空 dict 是"人在场、他跳过了"，
+        # None 才是"没人答"。resolve 靠这个区分，说法完全不同（见它的 docstring）。
+        return {"answers": answers}
 
 
 def _terminal_label(opt: dict) -> str:

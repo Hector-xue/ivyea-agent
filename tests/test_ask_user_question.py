@@ -201,3 +201,199 @@ def test_a_partly_answered_card_still_records_what_was_auto_filled():
     assert ctx.auto_decisions[0]["chosen"] == "记下来"
     assert ctx.auto_decisions[0]["reason"] == "partial"
     assert "自动定的" in out                                # 也要提醒模型在总结里说
+
+
+# ── 跳过 vs 没人答：答案一样，说法必须不一样 ──────────────────────────────
+def test_skip_is_not_reported_as_timeout():
+    """人在场按了「跳过」，不能说成"你 5 分钟没有选择" —— 那是冤枉他。
+
+    两者的答案完全一样（都按推荐项），区别只在通道回的是 dict 还是 None。
+    """
+    from ivyea_agent import ask
+
+    qs = ask.normalize([{"question": "走哪条", "options": [
+        {"label": "A", "recommended": True}, {"label": "B"}]}])
+
+    skipped = ask.resolve(qs, lambda q, t: {"answers": {}}, 1.0)
+    assert skipped["reason"] == "skipped"
+    assert skipped["answers"]["走哪条"] == "A" and skipped["auto"] is True
+    assert skipped["auto_filled"] == ["走哪条"]      # 照样记账，收尾要说明
+
+    nobody = ask.resolve(qs, lambda q, t: None, 1.0)
+    assert nobody["reason"] == "timeout"
+    assert nobody["answers"] == skipped["answers"]   # 答案一样，说法不一样
+
+
+def test_tool_wording_for_skip_does_not_blame_the_user(tmp_path, monkeypatch):
+    from ivyea_agent import agent_tools
+
+    ctx = agent_tools.ToolContext(workspace=str(tmp_path))
+    ctx.ask_fn = lambda questions, timeout: {"answers": {}}      # 人在场，全跳过
+    out = agent_tools.dispatch("ask_user_question", {"questions": [
+        {"question": "走哪条", "options": [{"label": "A", "recommended": True}, {"label": "B"}]}]}, ctx)
+    assert "跳过" in out and "没有选择" not in out
+    assert ctx.auto_decisions and ctx.auto_decisions[0]["reason"] == "skipped"
+
+
+# ── 终端：自己写 / 跳过 ────────────────────────────────────────────────────
+def _tty(monkeypatch):
+    import sys
+    monkeypatch.setattr(sys, "stdin", type("S", (), {"isatty": staticmethod(lambda: True)})())
+
+
+def test_terminal_free_text_becomes_the_answer(monkeypatch):
+    """给的选项都不对时，用户写的那句话就是答案 —— 后端对值不做校验。"""
+    from ivyea_agent import ask, tui
+
+    _tty(monkeypatch)
+    monkeypatch.setattr(tui, "select", lambda *a, **k: ask.OTHER_KEY)
+    monkeypatch.setattr(tui, "prompt_text", lambda *a, **k: "YAML，我要自己定")
+    qs = ask.normalize([{"question": "什么格式", "options": [
+        {"label": "MD", "recommended": True}, {"label": "JSON"}]}])
+    assert ask.TerminalAsk().ask(qs, 5.0) == {"answers": {"什么格式": "YAML，我要自己定"}}
+
+
+def test_terminal_free_text_left_empty_counts_as_unanswered(monkeypatch):
+    """打开输入又改主意（空串）＝这题没答，交给 resolve 按推荐补。"""
+    from ivyea_agent import ask, tui
+
+    _tty(monkeypatch)
+    monkeypatch.setattr(tui, "select", lambda *a, **k: ask.OTHER_KEY)
+    monkeypatch.setattr(tui, "prompt_text", lambda *a, **k: "")
+    qs = ask.normalize([{"question": "什么格式", "options": [
+        {"label": "MD", "recommended": True}, {"label": "JSON"}]}])
+    assert ask.TerminalAsk().ask(qs, 5.0) == {"answers": {}}
+
+
+def test_terminal_skip_returns_a_dict_not_none(monkeypatch):
+    """跳过必须回**空 dict**，不是 None —— None 会被 resolve 当成"没人答"。"""
+    from ivyea_agent import ask, tui
+
+    _tty(monkeypatch)
+    monkeypatch.setattr(tui, "select", lambda *a, **k: ask.SKIP_KEY)
+    qs = ask.normalize([{"question": "什么格式", "options": [
+        {"label": "MD", "recommended": True}, {"label": "JSON"}]}])
+    got = ask.TerminalAsk().ask(qs, 5.0)
+    assert got == {"answers": {}}
+    assert ask.resolve(qs, lambda q, t: got, 1.0)["reason"] == "skipped"
+
+
+def test_terminal_menu_always_offers_both_ways_out(monkeypatch):
+    """菜单末尾固定两项，顺序也钉住：跳过在最后（降级菜单的空输入落到它）。"""
+    from ivyea_agent import ask, tui
+
+    _tty(monkeypatch)
+    seen: list = []
+    monkeypatch.setattr(tui, "select",
+                        lambda t, b, options, **k: (seen.append(options), options[0][0])[1])
+    qs = ask.normalize([{"question": "什么格式", "options": [
+        {"label": "MD", "recommended": True}, {"label": "JSON"}]}])
+    ask.TerminalAsk().ask(qs, 5.0)
+    keys = [k for k, _ in seen[0]]
+    assert keys == ["MD", "JSON", ask.OTHER_KEY, ask.SKIP_KEY]
+
+
+def test_terminal_ctrl_c_still_means_nobody_answered(monkeypatch):
+    """整张卡按 Ctrl-C 掉 ≠ 跳过：那是没人答，reason 要落到 timeout。"""
+    from ivyea_agent import ask, tui
+
+    _tty(monkeypatch)
+    def _boom(*a, **k):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(tui, "select", _boom)
+    qs = ask.normalize([{"question": "什么格式", "options": [
+        {"label": "MD", "recommended": True}, {"label": "JSON"}]}])
+    assert ask.TerminalAsk().ask(qs, 5.0) is None
+
+
+def test_prompt_text_never_blocks_a_pipe(monkeypatch):
+    """非 tty 直接返回空串 —— 在管道里等 input() 会把整轮吊死。"""
+    import sys
+
+    from ivyea_agent import tui
+
+    monkeypatch.setattr(sys, "stdin", type("S", (), {"isatty": staticmethod(lambda: False)})())
+    monkeypatch.setattr(tui, "_ACTIVE_PROMPT", None)
+    assert tui.prompt_text("问题", "说明") == ""
+
+
+# ── 全屏 TUI：自由作答走主输入框（工具线程 marshal 回 app）──────────────────
+def test_tui_prompt_is_marshalled_to_the_running_app(monkeypatch):
+    """挂了 active prompt 就必须走它，不能自己 input() —— 终端归 app 管，
+    工具线程直接 input() 打出来的字会串进画面。"""
+    from ivyea_agent import tui
+
+    monkeypatch.setattr(tui, "_ACTIVE_PROMPT", lambda title, body: "  从 app 收到的  ")
+    assert tui.prompt_text("问题", "说明") == "从 app 收到的"
+
+
+def test_chat_tui_prompt_round_trip():
+    """`_prompt_text` 阻塞工具线程，主 app 提交那一行把它唤醒。"""
+    import threading
+
+    from ivyea_agent.chat_tui import ChatTUI
+
+    app = ChatTUI(status_fn=lambda: "", turn_fn=lambda *a, **k: {"text": ""})
+    got: list[str] = []
+    worker = threading.Thread(target=lambda: got.append(app._prompt_text("走哪条", "自己写")))
+    worker.start()
+    for _ in range(200):                       # 等工具线程把提示挂上去
+        if app.pending_prompt is not None:
+            break
+        time.sleep(0.01)
+    assert app.pending_prompt == {"title": "走哪条", "body": "自己写"}
+    app._answer_prompt("我自己的答案")
+    worker.join(timeout=3)
+    assert got == ["我自己的答案"] and app.pending_prompt is None
+
+
+def test_chat_tui_empty_submission_is_a_valid_non_answer():
+    """空回车＝这题不答。必须收下并唤醒，不能当成"什么都没发生"卡住工具线程。"""
+    import threading
+
+    from ivyea_agent.chat_tui import ChatTUI
+
+    app = ChatTUI(status_fn=lambda: "", turn_fn=lambda *a, **k: {"text": ""})
+    got: list[str] = []
+    worker = threading.Thread(target=lambda: got.append(app._prompt_text("走哪条")))
+    worker.start()
+    for _ in range(200):
+        if app.pending_prompt is not None:
+            break
+        time.sleep(0.01)
+    app._answer_prompt("")
+    worker.join(timeout=3)
+    assert got == [""]
+
+
+def test_chat_tui_free_answer_outranks_queueing_while_running():
+    """接线钉死：回车分支里，自由作答必须排在 `self.running` 排队之前。
+
+    自由作答**就发生在**工具跑着的时候。顺序反了，用户的答案会被当成"追加指令"
+    排进队列，选项卡那边永远等不到 —— 而且这种错跑一次正常对话根本看不出来。
+    """
+    from pathlib import Path
+
+    from ivyea_agent import chat_tui
+
+    src = Path(chat_tui.__file__).read_text(encoding="utf-8")
+    body = src[src.index('@kb.add("enter")'):]
+    assert body.index("self.pending_prompt is not None") < body.index("if self.running:")
+
+
+def test_chat_tui_registers_and_clears_the_prompt_channel():
+    """挂上和摘掉必须成对：交互命令挂起 app 时也要摘，否则 marshal 到已挂起的
+    app 就是死锁（选择器那条早就踩过，这里照抄它的成对写法）。"""
+    from pathlib import Path
+
+    from ivyea_agent import chat_tui
+
+    # 只数真调用：那段注释里也写着 `set_active_selector(None)`，按整份文本 count
+    # 会把它算进去（第一版就是这么写错的）。
+    calls = [ln.strip() for ln in Path(chat_tui.__file__).read_text(encoding="utf-8").splitlines()
+             if ln.strip().startswith("_tui_mod.set_active_")]
+    sel = [c for c in calls if "set_active_selector(" in c]
+    prompt = [c for c in calls if "set_active_prompt(" in c]
+    assert len(sel) == len(prompt) == 4, (sel, prompt)
+    # 挂上两次（启动 + 交互命令跑完装回）、摘掉两次（退出 + 交互命令挂起前）
+    assert sum("None" in c for c in prompt) == 2

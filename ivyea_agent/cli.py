@@ -2405,10 +2405,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         # 只在命中时置 True 的话，一句"你好"会把汇报纪律一路关到下一个真任务上。
         route = routing.classify(line, ops_bridge=bool(getattr(ctx, "ops_bridge", None)))
         ctx.route_lane = route.lane      # 供 thinking.apply_to 按路线定思考深度
-        ctx.progress_reporting_disabled = route.is_chat or route.is_board
+        ctx.progress_reporting_disabled = route.is_chat or route.is_quick or route.is_board
         scope_note = task_scope.prepare_query(ctx, line, messages, base=os.getcwd())
         # 闲聊不扫工程上下文：那是一次真实的目录扫描，为一句问候跑它纯属浪费。
-        ectx = "" if route.is_chat else engineering_context.build(ctx.workspace or os.getcwd(), line)
+        ectx = "" if (route.is_chat or route.is_quick) else engineering_context.build(ctx.workspace or os.getcwd(), line)
         _inject = (not route.is_chat) and (
             bool(getattr(ctx, "asin", "")) or _is_amazon_domain(line) or not _looks_like_code_task(line))
         kev = knowledge.evidence_context(line, limit=4) if _inject else {
@@ -2431,6 +2431,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             user_content += "\n\n" + scope_note
         if route.is_board:
             user_content += routing.board_hint(route)
+            user_content += routing.quick_hint(route)
         if ectx:
             user_content += "\n\n[工程上下文]\n" + ectx
             narrate(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))
@@ -2648,9 +2649,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             # 同上（TUI 那一份的注释）：路线判定与 serve 共用，且每轮都要赋值。
             route = routing.classify(line, ops_bridge=bool(getattr(ctx, "ops_bridge", None)))
             ctx.route_lane = route.lane      # 供 thinking.apply_to 按路线定思考深度
-            ctx.progress_reporting_disabled = route.is_chat or route.is_board
+            ctx.progress_reporting_disabled = route.is_chat or route.is_quick or route.is_board
             scope_note = task_scope.prepare_query(ctx, line, messages, base=os.getcwd())
-            ectx = "" if route.is_chat else engineering_context.build(ctx.workspace or os.getcwd(), line)
+            ectx = "" if (route.is_chat or route.is_quick) else engineering_context.build(ctx.workspace or os.getcwd(), line)
             # 门控：工程/代码任务且无广告域信号(也无 ASIN) → 不注入亚马逊知识/skill，
             # 避免污染上下文、烧 token、把模型往运营方向带偏。广告/通用/模糊任务一律照常注入。
             # 闲聊路线更进一步：知识和技能都不注。
@@ -2678,6 +2679,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
                 user_content += "\n\n" + scope_note
             if route.is_board:
                 user_content += routing.board_hint(route)
+            user_content += routing.quick_hint(route)
             if ectx:
                 user_content += "\n\n[工程上下文]\n" + ectx
                 print(ui.stage("Code", "计划 → 读上下文 → 修改/生成补丁 → 测试 → 复查"))

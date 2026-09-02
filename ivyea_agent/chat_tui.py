@@ -190,6 +190,11 @@ class ChatTUI:
         self.pending = None                  # {"title","body","options","idx"}
         self._approval_ev = None
         self._approval_result = None
+        # 自由作答（选项卡的"✎ 自己写一个答案"）：同样是工具线程投递、主 app 收一行。
+        # 不另开输入框 —— 底下那个已经在了，临时把它的提交改道过来就够。
+        self.pending_prompt = None           # {"title","body"}
+        self._prompt_ev = None
+        self._prompt_result = None
 
     # ---- 供后台线程调用的输出回调（线程安全：仅追加 + invalidate）----
     def render(self, token: str = "") -> None:
@@ -251,6 +256,36 @@ class ChatTUI:
         self._invalidate()
         ev.wait()                      # 阻塞工具线程，直到主 app 选定
         return self._approval_result or (options[-1][0] if options else "")
+
+    def _prompt_text(self, title: str, body: str = "") -> str:
+        """工具线程要一行自由文本：亮出提示，等主 app 把用户打的那行递回来。
+
+        和 `_approve` 一样阻塞调用线程。差别是它不画自己的菜单 —— 用的是底下那个
+        一直都在的输入框，用户直接打字回车即可。
+        """
+        ev = threading.Event()
+        self._prompt_ev = ev
+        self._prompt_result = None
+        self.pending_prompt = {"title": title, "body": body}
+        self._invalidate()
+        ev.wait()
+        return self._prompt_result or ""
+
+    def _answer_prompt(self, text: str) -> None:
+        """把这一行交回去。空串是合法答案：意思是"这题我不答"。"""
+        self._prompt_result = text or ""
+        self.pending_prompt = None
+        if self._prompt_ev is not None:
+            self._prompt_ev.set()
+        self._invalidate()
+
+    def _prompt_lines(self) -> list[str]:
+        p = self.pending_prompt
+        out = [f"\033[36m  ▌ {p['title']}\033[0m"]
+        for ln in str(p.get("body") or "").splitlines():
+            out.append("    " + ln)
+        out.append("\033[2m  在下面直接打字作答 · Enter 提交 · 空着回车＝不答这一问\033[0m")
+        return out
 
     def _confirm_approval(self, idx: int) -> None:
         opts = self.pending["options"] if self.pending else []
@@ -346,6 +381,7 @@ class ChatTUI:
         # handler 的 tui.select 走终端交互而非 marshal 到已挂起的主 app（会死锁）。
         def _call():
             _tui_mod.set_active_selector(None)
+            _tui_mod.set_active_prompt(None)
             saved = sys.stdout
             try:
                 if sys.__stdout__ is not None:
@@ -354,6 +390,7 @@ class ChatTUI:
             finally:
                 sys.stdout = saved
                 _tui_mod.set_active_selector(self._approve)
+                _tui_mod.set_active_prompt(self._prompt_text)
         try:
             import asyncio
             from prompt_toolkit.application import run_in_terminal
@@ -383,12 +420,14 @@ class ChatTUI:
         if self.live is not None:
             parts.append("\033[2m" + self.live + "\033[0m")   # 流式中 dim 显示原文
         # 思考中（还没吐字 / 工具间隙）：把"生成中"放在内容即将出现的位置（transcript 末尾）
-        elif self.running and self.pending is None:
+        elif self.running and self.pending is None and self.pending_prompt is None:
             frame = _SPIN[int((time.time() - self.started) * 10) % len(_SPIN)]
             secs = int(time.time() - self.started)
             parts.append(f"\033[2m{frame} 生成中 {secs}s…\033[0m")
         if self.pending is not None:
             parts.append("\n".join(self._approval_lines()))   # 审批面板置于末尾
+        if self.pending_prompt is not None:
+            parts.append("\n".join(self._prompt_lines()))     # 自由作答提示同样置于末尾
         text = "\n\n".join(p for p in parts if p) or "（开始对话吧。输入 /exit 退出。）"
         # 按显示宽度裁到"末屏 - scroll"：scroll=0 显示底部(贴底跟随)，PgUp/滚轮增大 scroll 看更早
         width = shutil.get_terminal_size((100, 30)).columns
@@ -553,7 +592,9 @@ class ChatTUI:
 
         @kb.add("c-c")
         def _(event):
-            if self.pending is not None:     # 审批中：Ctrl-C = 选最后一项(约定=停止)
+            if self.pending_prompt is not None:   # 正在写自由答案：Ctrl-C = 这题不答
+                self._answer_prompt("")
+            elif self.pending is not None:   # 审批中：Ctrl-C = 选最后一项(约定=停止)
                 self._confirm_approval(len(self.pending["options"]) - 1)
             elif self.running:               # 运行中：请求中断当前轮
                 self.cancel_requested = True
@@ -576,6 +617,12 @@ class ChatTUI:
                 return
             text = ta.text.strip()
             ta.text = ""
+            if self.pending_prompt is not None:
+                # 必须排在 `self.running` 前面：自由作答**就发生在**工具跑着的时候，
+                # 落到下面那条就成了"追加指令排队"，用户的答案永远回不到选项卡。
+                # 空串也要收下 —— 那是"这题我不答"，不是"什么都没发生"。
+                self._answer_prompt(text)
+                return
             if not text:
                 return
             if self.running:                 # 运行中：回车把指令排队，本轮结束后自动继续
@@ -689,6 +736,7 @@ def run(status_fn: Callable[[], str], slash_commands: list,
                   scrollback=scrollback, intro=intro)
     from . import tui as _tui_mod
     _tui_mod.set_active_selector(tui._approve)   # 工具线程的审批 marshal 回本 app
+    _tui_mod.set_active_prompt(tui._prompt_text)  # 同上：选项卡里"自己写一个答案"
     if scrollback and intro:
         _ptprint(intro)                          # banner/欢迎框打到滚动缓冲区（输入框在其下方钉底）
     try:
@@ -700,4 +748,5 @@ def run(status_fn: Callable[[], str], slash_commands: list,
             tui.build_app().run()
     finally:
         _tui_mod.set_active_selector(None)
+        _tui_mod.set_active_prompt(None)
     return 0

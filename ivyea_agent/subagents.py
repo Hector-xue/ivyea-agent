@@ -110,7 +110,7 @@ BUILTIN_ROLES: dict[str, Role] = {
         system=("你是只读知识核查子 agent。对给定结论逐条核：这是亚马逊官方事实、账户数据推断，"
                 "还是运营经验假设？来源是否真实可查？站点/类目/时间会不会改变结论？"
                 "算法未被官方披露的东西不得包装成官方规则。核不实的直接说核不实。" + _COMMON_TAIL),
-        tools=("knowledge_search", "skill_search", "skill_view", "web_fetch", "web_search",
+        tools=("knowledge_search", "skill_search", "skill_view", "web_fetch", "web_search", "web_images",
                "read_file", "memory_search", "memory_read"),
         max_steps=16,
     ),

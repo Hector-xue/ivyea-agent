@@ -20,6 +20,36 @@ def set_active_selector(fn: Optional[Callable[[str, str, list, str], str]]) -> N
     _ACTIVE_SELECTOR = fn
 
 
+# 活动文本输入：和 _ACTIVE_SELECTOR 同一个道理 —— 全屏 TUI 跑着的时候，工具线程
+# 不能自己 input()（终端归 app 管，打出来的字会串进画面）。挂上之后 marshal 回
+# 主 app，用它**已经在那儿的输入框**收一行。默认 None = 直接 input()。
+_ACTIVE_PROMPT: Optional[Callable[[str, str], str]] = None
+
+
+def set_active_prompt(fn: Optional[Callable[[str, str], str]]) -> None:
+    global _ACTIVE_PROMPT
+    _ACTIVE_PROMPT = fn
+
+
+def prompt_text(title: str, body: str = "", *,
+                input_fn: Optional[Callable[[str], str]] = None) -> str:
+    """收一行自由文本。拿不到（非 tty / 用户直接回车 / 中断）一律返回空串。
+
+    空串的含义交给调用方定 —— 在选项卡这边是"那就别算我答过这一问"。
+    """
+    if _ACTIVE_PROMPT is not None:          # 全屏 TUI：交给主 app 的输入框
+        try:
+            return (_ACTIVE_PROMPT(title, body) or "").strip()
+        except Exception:                   # noqa: BLE001 —— marshal 失败就走下面的普通路径
+            pass
+    reader = input_fn or _default_input
+    if not (input_fn or (sys.stdin and sys.stdin.isatty())):
+        return ""                           # 管道里没人打字，别把整轮堵在 input() 上
+    print()
+    print(ui.panel(title, body or "（直接回车＝不答这一问）", kind="info"))
+    return (reader("你的答案: ") or "").strip()
+
+
 def _default_input(prompt: str) -> str:
     try:
         return input(prompt).strip()
