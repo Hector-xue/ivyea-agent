@@ -159,7 +159,7 @@ def test_page_hero_image_reads_og_image(monkeypatch):
     monkeypatch.setattr(tg, "_stream_text",
                         lambda url, **k: ("text/html", _hero_html("/pic/a.jpg")))
     assert tg._page_hero_image("https://example.com/x") == (
-        "https://example.com/pic/a.jpg", "某公司 官网")
+        "https://example.com/pic/a.jpg", "某公司 官网", "")
 
 
 def test_page_hero_image_reads_reversed_meta_order(monkeypatch):
@@ -178,6 +178,16 @@ def test_page_hero_image_skips_logo_and_non_html(monkeypatch):
     assert tg._page_hero_image("https://example.com/") is None
 
 
+def test_page_hero_image_also_grabs_description(monkeypatch):
+    """摘要要顺手带回来 —— 少这一段，模型就得再跑一次 web_search。"""
+    html = ('<html><head><title>某公司</title>'
+            '<meta property="og:image" content="https://cdn/x.jpg">'
+            '<meta property="og:description" content="一家做数字孪生的公司，2015 年成立。">'
+            '</head></html>')
+    monkeypatch.setattr(tg, "_stream_text", lambda url, **k: ("text/html", html))
+    assert tg._page_hero_image("https://a.com")[2] == "一家做数字孪生的公司，2015 年成立。"
+
+
 def test_good_picture_rejects_icons_and_strips():
     assert tg._good_picture((1200, 630))
     assert not tg._good_picture(None)
@@ -190,18 +200,19 @@ def test_web_images_returns_markdown(monkeypatch):
     monkeypatch.setattr(tg, "_search_results",
                         lambda q, limit=8: [("某公司", "https://a.com/1"), ("旧闻", "https://b.com/2")])
     monkeypatch.setattr(tg, "_page_hero_image",
-                        lambda url: ("https://cdn/" + url[-1] + ".jpg", "页面标题"))
+                        lambda url: ("https://cdn/" + url[-1] + ".jpg", "页面标题", "一段摘要"))
     monkeypatch.setattr(tg, "_image_dims", lambda url: (1200, 630))
     out = tg.t_web_images({"query": "某公司", "limit": 2}, None)
     assert "![页面标题](https://cdn/1.jpg)" in out
     assert "https://a.com/1" in out                 # 来源要留，方便核实
+    assert "摘要：一段摘要" in out                   # 摘要要一起给，省掉一次 web_search
     assert out.count("![") == 2
 
 
 def test_web_images_dedupes_and_honours_limit(monkeypatch):
     monkeypatch.setattr(tg, "_search_results",
                         lambda q, limit=8: [("x", f"https://s{i}.com") for i in range(6)])
-    monkeypatch.setattr(tg, "_page_hero_image", lambda url: ("https://cdn/same.jpg", "同一张"))
+    monkeypatch.setattr(tg, "_page_hero_image", lambda url: ("https://cdn/same.jpg", "同一张", ""))
     monkeypatch.setattr(tg, "_image_dims", lambda url: (900, 600))
     out = tg.t_web_images({"query": "x", "limit": 4}, None)
     assert out.count("![") == 1                     # 六个页面共用一张图 → 只留一张

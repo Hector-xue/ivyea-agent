@@ -1833,10 +1833,10 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
                              or payload.get("references")),
     )
     ctx.route_lane = route.lane      # 供 thinking.apply_to 按路线定思考深度
-    if route.is_chat or route.is_board:
-        # 闲聊没有阶段可汇报；板块工具本身就是一次长任务、自己会回报进度 ——
-        # 这两种情况下 todo + 阶段汇报的状态机只会挡在实际动作前面（实测一句
-        # 「测试」18 步里 17 步花在这上面）。
+    if route.is_chat or route.is_quick or route.is_board:
+        # 闲聊没有阶段可汇报；知识型提问就是"查一下、答出来"，没有阶段可分；板块
+        # 工具本身就是一次长任务、自己会回报进度 —— 这几种情况下 todo + 阶段汇报的
+        # 状态机只会挡在实际动作前面（实测一句「测试」18 步里 17 步花在这上面）。
         ctx.progress_reporting_disabled = True
 
     # 这一轮的起点。created_at 是**会话**的创建时刻（_chat_messages 从存档里取的），
@@ -1867,7 +1867,7 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
     # 闲聊路线不选技能：一句问候配一本 1600 字的运营手册，除了把模型往
     # "按手册做审计"带没有别的作用。
     if (payload.get("auto_skill") and not str(payload.get("skill") or "").strip()
-            and not route.is_chat):
+            and not route.is_chat and not route.is_quick):
         matched = _auto_skill_context(message, messages)
         if matched:
             send("skill_match", stream_json.skill_match_event(ctx.session_id, matched))
@@ -3456,6 +3456,10 @@ def _tools_for(payload: dict[str, Any], route: "routing.Route | None" = None) ->
         return []
     if route is not None and route.is_chat:
         return []
+    if route is not None and route.is_quick:
+        # 知识型提问：只挂只读检索那一小撮。省下的不是零头 —— 实测全量工具
+        # schema 占单轮上下文的 65%（8539 / 13170 token），而且每一步都重发。
+        return routing.quick_tool_schemas()
     return None
 
 
@@ -3674,6 +3678,8 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext,
     user_content = message
     if route is not None and route.is_board:
         user_content += routing.board_hint(route)
+    if route is not None and route.is_quick:
+        user_content += routing.quick_hint(route)
     # 用户真正打的那句话（切掉历史注入块）—— 检索判据只能看人说的话。
     said = task_scope._user_said(message)
     trivial = memory.is_trivial_prompt(said)

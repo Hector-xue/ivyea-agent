@@ -225,6 +225,12 @@ _IMG_META_REV = re.compile(          # content 写在 property 前面的写法�
     r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']?'
     r'(og:image(?::secure_url|:url)?|twitter:image(?::src)?)["\']?', re.I)
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+_DESC_META = re.compile(
+    r'<meta[^>]+(?:property|name)=["\']?(?:og:description|description)["\']?'
+    r'[^>]+content=["\']([^"\']{20,})["\']', re.I)
+_DESC_META_REV = re.compile(
+    r'<meta[^>]+content=["\']([^"\']{20,})["\'][^>]+(?:property|name)=["\']?'
+    r'(?:og:description|description)["\']?', re.I)
 # 图标/头像/占位图不是配图，长得再对也别要
 _IMG_JUNK = re.compile(
     r"(logo|icon|favicon|sprite|avatar|placeholder|blank|spacer|1x1|pixel|图标|logo图)", re.I)
@@ -261,8 +267,13 @@ def _stream_text(url: str, max_bytes: int = 200_000) -> tuple[str, str]:
         return "", ""
 
 
-def _page_hero_image(url: str) -> tuple[str, str] | None:
-    """抓一个页面，返回它声明的配图 (图片URL, 页面标题)。抓不到就 None。"""
+def _page_hero_image(url: str) -> tuple[str, str, str] | None:
+    """抓一个页面，返回 (配图URL, 页面标题, 页面摘要)。抓不到配图就 None。
+
+    摘要是顺手捡的：HTML 已经在手上了，`og:description` 就在旁边那一行。带上它，
+    模型问"某某公司是做什么的"时**一次调用**就同时拿到图和资料，不必先 web_search
+    再 web_images —— 实测那一轮为此多走了两步，每步都是一次完整的模型往返。
+    """
     ctype, html = _stream_text(url)
     if "html" not in ctype or not html:
         return None
@@ -281,7 +292,9 @@ def _page_hero_image(url: str) -> tuple[str, str] | None:
         return None
     t = _TITLE_RE.search(html)
     title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", t.group(1))).strip()[:60] if t else ""
-    return src, title
+    dm = _DESC_META.search(html) or _DESC_META_REV.search(html)
+    desc = re.sub(r"\s+", " ", dm.group(1)).strip()[:220] if dm else ""
+    return src, title, desc
 
 
 def _image_dims(url: str) -> tuple[int, int] | None:
@@ -368,27 +381,29 @@ def t_web_images(args: dict, ctx) -> str:
     deadline = time.monotonic() + _BUDGET_S
     heroes = _map_within(lambda row: _page_hero_image(row[1]), results, deadline)
 
-    candidates: list[tuple[str, str, str]] = []     # (图片URL, 说明, 来源页)
+    candidates: list[tuple[str, str, str, str]] = []   # (图片URL, 说明, 来源页, 摘要)
     seen_img: set[str] = set()
     for (title, page), hero in zip(results, heroes):
         if not hero or hero[0] in seen_img:
             continue
         seen_img.add(hero[0])
-        candidates.append((hero[0], hero[1] or title, page))
+        candidates.append((hero[0], hero[1] or title, page, hero[2]))
     if not candidates:
         return "（这些页面都没有声明配图，配不出图）"
 
     dims = _map_within(lambda c: _image_dims(c[0]), candidates, deadline)
-    picked = [(img, cap, page) for (img, cap, page), d in zip(candidates, dims)
-              if _good_picture(d)][:limit]
+    picked = [c for c, d in zip(candidates, dims) if _good_picture(d)][:limit]
 
     if not picked:
         return "（找到的图都取不回来，配不出图）"
-    lines = ["配到 %d 张图。要用就把下面的 markdown **原样**抄进回答正文，"
-             "一张图配一句说明，别只贴链接：" % len(picked)]
-    for img, cap, page in picked:
+    lines = ["配到 %d 张图，来源页的摘要一起给你了 —— 要介绍这个主题的话，"
+             "**这一次调用拿到的信息就够了，不用再 web_search**。"
+             "用图就把 markdown **原样**抄进回答正文，一张图配一句说明，别只贴链接：" % len(picked)]
+    for img, cap, page, desc in picked:
         lines.append(f"![{cap}]({img})")
         lines.append(f"  ↑ 来源：{page}")
+        if desc:
+            lines.append(f"  摘要：{desc}")
     return "\n".join(lines)
 
 
