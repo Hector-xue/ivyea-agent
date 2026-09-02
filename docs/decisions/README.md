@@ -53,6 +53,7 @@ git log 记得住「改了什么」，记不住「为什么不选另一条路」
 | [0033](./0033-retrieval-fusion-and-answer-level-evals.md) | 中文查询要真的能检索，评测要测回答而不是召回 | 2026-08-30 |
 | [0034](./0034-negation-guardrails-live-in-ivyea-not-the-vendored-script.md) | 否词护栏放在自己这边，不动 vendor 进来的脚本 | 2026-08-30 |
 | [0035](./0035-knowledge-gaps-must-build-their-own-priority-list.md) | 补哪些知识卡，让数据自己排，别替人判 | 2026-08-30 |
+| [0036](./0036-illustrations-come-from-og-image.md) | 回答里的配图去网页上找，不去模型里画 | 2026-09-02 |
 
 相关的工作台侧决策见
 [IvyeaOps 的 ADR 目录](https://github.com/Hector-xue/IvyeaOps/tree/main/docs/decisions)，

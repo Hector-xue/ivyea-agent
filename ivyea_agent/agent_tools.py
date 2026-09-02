@@ -1013,7 +1013,7 @@ _DISPATCH = {
 # 可安全并行的只读工具：纯文件系统/网络读，不弹审批、不写共享状态（DB/索引文件）。
 # 故意保守：DB 检索（knowledge/skill/recall）和会写索引文件的 code_search/symbols/impact
 # 不在此列，避免 SQLite 跨线程或索引文件写竞争。
-PARALLEL_SAFE = {"read_file", "list_dir", "web_fetch", "web_search", "grep", "glob",
+PARALLEL_SAFE = {"read_file", "list_dir", "web_fetch", "web_search", "web_images", "grep", "glob",
                  "code_search", "code_symbols", "bash_output",
                  # 子 agent 只读且各自独立 sub_ctx/messages/PermissionState，可并行 fan-out。
                  # 前提：provider 实例无共享可变状态（openai_compat/anthropic/gemini 均为

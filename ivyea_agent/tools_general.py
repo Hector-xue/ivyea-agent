@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import subprocess
 from pathlib import Path
 
@@ -173,28 +174,222 @@ def t_web_fetch(args: dict, ctx) -> str:
     return _truncate(text)
 
 
+def _search_results(q: str, limit: int = 8) -> list[tuple[str, str]]:
+    """搜索 → [(标题, URL)]。尽力而为：DuckDuckGo lite（无 key，可能受限）。
+
+    抽成独立函数是因为 web_search 和 web_images 要的是同一批结果：前者只把它排版
+    成文本，后者还要顺着这些 URL 去摸配图。
+    """
+    import httpx
+    r = httpx.post("https://lite.duckduckgo.com/lite/", data={"q": q}, timeout=30,
+                   headers={"User-Agent": "Mozilla/5.0"})
+    rows = re.findall(r'<a[^>]+class="result-link"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', r.text, re.S)
+    if not rows:
+        rows = re.findall(r'<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>', r.text, re.S)
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for href, title in rows:
+        title = re.sub(r"<[^>]+>", "", title).strip()
+        if not title or not href.startswith("http") or href in seen:
+            continue
+        seen.add(href)
+        out.append((title, href))
+        if len(out) >= limit:
+            break
+    return out
+
+
 def t_web_search(args: dict, ctx) -> str:
     """尽力而为：DuckDuckGo lite（无 key，可能受限）。"""
     q = args.get("query", "")
     if not q:
         return "query 为空。"
     try:
-        import re
-
-        import httpx
-        r = httpx.post("https://lite.duckduckgo.com/lite/", data={"q": q}, timeout=30,
-                       headers={"User-Agent": "Mozilla/5.0"})
-        rows = re.findall(r'<a[^>]+class="result-link"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', r.text, re.S)
-        if not rows:
-            rows = re.findall(r'<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>', r.text, re.S)
-        out = []
-        for href, title in rows[:8]:
-            title = re.sub(r"<[^>]+>", "", title).strip()
-            if title:
-                out.append(f"  · {title}\n    {href}")
-        return "\n".join(out) if out else "（无结果，或搜索源受限）"
+        rows = _search_results(q, 8)
     except Exception as e:  # noqa: BLE001
         return f"搜索失败（尽力而为）：{e}"
+    out = [f"  · {title}\n    {href}" for title, href in rows]
+    return "\n".join(out) if out else "（无结果，或搜索源受限）"
+
+
+# ── 配图（og:image）─────────────────────────────────────────────────────────
+#
+# 找图不是画图：一个公司/产品/地点长什么样，网上早就有权威的照片（官网首图、
+# 新闻配图），比生成一张更快也更真。绝大多数正经网页都会给自己声明一张分享用的
+# 预览图（og:image / twitter:image），这就是现成的配图源，不需要任何图片搜索 key。
+
+_IMG_META = re.compile(
+    r'<meta[^>]+(?:property|name)=["\']?(og:image(?::secure_url|:url)?|twitter:image(?::src)?)["\']?'
+    r'[^>]+content=["\']([^"\']+)["\']', re.I)
+_IMG_META_REV = re.compile(          # content 写在 property 前面的写法也不少
+    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']?'
+    r'(og:image(?::secure_url|:url)?|twitter:image(?::src)?)["\']?', re.I)
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+# 图标/头像/占位图不是配图，长得再对也别要
+_IMG_JUNK = re.compile(
+    r"(logo|icon|favicon|sprite|avatar|placeholder|blank|spacer|1x1|pixel|图标|logo图)", re.I)
+# 分阶段超时：慢站要么连不上要么读不动，卡在哪一段都不该拖住整个配图。
+_NET_TIMEOUT = {"connect": 3.0, "read": 4.0, "write": 3.0, "pool": 3.0}
+_BUDGET_S = 20.0        # 配图总预算：超了就用手上已有的图交差，不等齐
+
+
+def _abs_url(base: str, u: str) -> str:
+    from urllib.parse import urljoin
+    return urljoin(base, (u or "").strip())
+
+
+def _stream_text(url: str, max_bytes: int = 200_000) -> tuple[str, str]:
+    """读一个页面的开头，返回 (content-type, 文本)。抓不到就 ("", "")。
+
+    只读开头：og:* 全在 `<head>` 里，为了一行 meta 把整篇文章拉下来纯属浪费。
+    单独抽出来是为了可测 —— 上层的挑图逻辑不该为了测试去 mock httpx 的流。
+    """
+    import httpx
+    try:
+        with httpx.stream("GET", url, timeout=httpx.Timeout(**_NET_TIMEOUT), follow_redirects=True,
+                          headers={"User-Agent": "Mozilla/5.0 (compatible; ivyea-agent/0.2)"}) as r:
+            if r.status_code >= 400:
+                return "", ""
+            ctype = r.headers.get("content-type", "")
+            head = b""
+            for chunk in r.iter_bytes():
+                head += chunk
+                if len(head) > max_bytes:
+                    break
+            return ctype, head.decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return "", ""
+
+
+def _page_hero_image(url: str) -> tuple[str, str] | None:
+    """抓一个页面，返回它声明的配图 (图片URL, 页面标题)。抓不到就 None。"""
+    ctype, html = _stream_text(url)
+    if "html" not in ctype or not html:
+        return None
+    src = ""
+    m = _IMG_META.search(html)
+    if m:
+        src = m.group(2)
+    else:
+        m2 = _IMG_META_REV.search(html)
+        if m2:
+            src = m2.group(1)
+    if not src:
+        return None
+    src = _abs_url(url, src)
+    if not src.startswith(("http://", "https://")) or _IMG_JUNK.search(src):
+        return None
+    t = _TITLE_RE.search(html)
+    title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", t.group(1))).strip()[:60] if t else ""
+    return src, title
+
+
+def _image_dims(url: str) -> tuple[int, int] | None:
+    """图真的在、真是图、并量出它的像素尺寸。抓不到或不是图就 None。
+
+    量尺寸而不是量字节数：字节数分不清"一张压得很狠的大图"和"一枚 PNG 图标"，
+    实测站点 logo 有 40KB 的、正经配图有 12KB 的。Pillow 的增量 Parser 拿到文件头
+    就能报 size，所以只需要读开头几十 KB，不用整张下载。
+    """
+    import httpx
+    from PIL import ImageFile
+    try:
+        with httpx.stream("GET", url, timeout=httpx.Timeout(**_NET_TIMEOUT), follow_redirects=True,
+                          headers={"User-Agent": "Mozilla/5.0"}) as r:
+            if r.status_code >= 400:
+                return None
+            if not r.headers.get("content-type", "").lower().startswith("image/"):
+                return None
+            parser = ImageFile.Parser()
+            read = 0
+            for chunk in r.iter_bytes(8192):
+                parser.feed(chunk)
+                read += len(chunk)
+                if parser.image is not None:
+                    return parser.image.size
+                if read > 96_000:          # 头都读不出尺寸，不折腾了
+                    break
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _good_picture(dims: tuple[int, int] | None) -> bool:
+    """够不够格当配图。挡掉图标/头像/细长的装饰条。"""
+    if not dims:
+        return False
+    w, h = dims
+    if w < 320 or h < 200:
+        return False
+    ratio = w / h if h else 99
+    return 0.25 <= ratio <= 4.0
+
+
+def _map_within(fn, items: list, deadline: float, workers: int = 8) -> list:
+    """并发跑 fn，但只等到 deadline 为止 —— 没跑完的按"没结果"处理。
+
+    配图是锦上添花：慢站拖到天荒地老也不能让整轮回答跟着卡住。ThreadPoolExecutor
+    的 map(timeout=) 会抛异常丢掉全部结果，所以自己按 future 收，收到几个算几个。
+    """
+    from concurrent.futures import ThreadPoolExecutor, wait
+    out: list = [None] * len(items)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(fn, it): i for i, it in enumerate(items)}
+        wait(list(futs), timeout=max(deadline - time.monotonic(), 0.1))
+        for fut, i in futs.items():
+            if fut.done() and not fut.cancelled():
+                try:
+                    out[i] = fut.result()
+                except Exception:  # noqa: BLE001
+                    out[i] = None
+            else:
+                fut.cancel()
+    return out
+
+
+def t_web_images(args: dict, ctx) -> str:
+    """搜一批相关网页，把它们各自声明的配图收上来。"""
+    q = (args.get("query") or "").strip()
+    if not q:
+        return "query 为空。"
+    try:
+        limit = max(1, min(int(args.get("limit") or 4), 8))
+    except (TypeError, ValueError):
+        limit = 4
+
+    try:
+        # 候选要开得比 limit 大得多：一半页面没声明配图，声明了的还有一批是 logo。
+        results = _search_results(q, max(limit * 4, 12))
+    except Exception as e:  # noqa: BLE001
+        return f"配图搜索失败（尽力而为）：{e}"
+    if not results:
+        return "（没搜到相关网页，配不出图）"
+
+    deadline = time.monotonic() + _BUDGET_S
+    heroes = _map_within(lambda row: _page_hero_image(row[1]), results, deadline)
+
+    candidates: list[tuple[str, str, str]] = []     # (图片URL, 说明, 来源页)
+    seen_img: set[str] = set()
+    for (title, page), hero in zip(results, heroes):
+        if not hero or hero[0] in seen_img:
+            continue
+        seen_img.add(hero[0])
+        candidates.append((hero[0], hero[1] or title, page))
+    if not candidates:
+        return "（这些页面都没有声明配图，配不出图）"
+
+    dims = _map_within(lambda c: _image_dims(c[0]), candidates, deadline)
+    picked = [(img, cap, page) for (img, cap, page), d in zip(candidates, dims)
+              if _good_picture(d)][:limit]
+
+    if not picked:
+        return "（找到的图都取不回来，配不出图）"
+    lines = ["配到 %d 张图。要用就把下面的 markdown **原样**抄进回答正文，"
+             "一张图配一句说明，别只贴链接：" % len(picked)]
+    for img, cap, page in picked:
+        lines.append(f"![{cap}]({img})")
+        lines.append(f"  ↑ 来源：{page}")
+    return "\n".join(lines)
 
 
 # ── 代码导航（只读，自动放行）────────────────────────────────────────────────
@@ -1176,6 +1371,13 @@ GENERAL_TOOL_SCHEMAS = [
         {"url": {"type": "string"}}, ["url"]),
     _fn("web_search", "网页搜索关键词（尽力而为，无 key）。",
         {"query": {"type": "string"}}, ["query"]),
+    _fn("web_images", "给回答配图：搜一批相关网页，把它们各自声明的配图（og:image）取回来，"
+        "返回可直接写进正文的 markdown。只读，自动放行，无需任何 key。"
+        "**什么时候用**：回答里出现具体的公司、产品、地点、实物、界面、人物时，"
+        "一张真实的图比三段描述有用 —— 先调它拿图，再把返回的 `![说明](地址)` 原样写进正文。"
+        "抽象概念、纯数字结论、代码问题不要配图。作图请用 image_generate，这个工具只负责**找**已有的图。",
+        {"query": {"type": "string", "description": "配图主题，用具体名字，如「51WORLD 五一视界 数字孪生」"},
+         "limit": {"type": "integer", "description": "要几张，默认 4，最多 8"}}, ["query"]),
     _fn("grep", "在代码库里做内容正则搜索（ripgrep 风格），返回 file:line 命中行。只读，自动放行。找代码先用它，别瞎猜路径。",
         {"pattern": {"type": "string", "description": "正则表达式"},
          "glob": {"type": "string", "description": "可选：只搜匹配此 glob 的文件，如 *.py"},
@@ -1297,7 +1499,7 @@ GENERAL_DISPATCH = {
     "write_file": t_write_file, "edit_file": t_edit_file,
     "run_python": t_run_python, "run_command": t_run_command,
     "bash_output": t_bash_output, "kill_bash": t_kill_bash,
-    "web_fetch": t_web_fetch, "web_search": t_web_search,
+    "web_fetch": t_web_fetch, "web_search": t_web_search, "web_images": t_web_images,
     "grep": t_grep, "glob": t_glob, "code_search": t_code_search,
     "code_symbols": t_code_symbols, "code_impact": t_code_impact,
     "code_apply_patch": t_code_apply_patch, "run_tests": t_run_tests, "code_repair": t_code_repair,

@@ -187,7 +187,7 @@ _TOOL_VERBS = {
     "grep": "搜索内容", "search_code": "搜索代码", "code_search": "搜索代码",
     "run_command": "执行命令", "run_python": "执行 Python", "run_tests": "运行测试",
     "bash_output": "查看后台输出", "kill_bash": "终止后台任务",
-    "web_search": "联网搜索", "web_fetch": "抓取网页",
+    "web_search": "联网搜索", "web_fetch": "抓取网页", "web_images": "找配图",
     "knowledge_search": "查知识库", "skill_search": "查 skill", "recall": "回忆记忆",
     # 记忆那一组：两边（这里和 IvyeaOps 的 lib/stepLabels）必须同步，见文件头。
     "memory_write": "记住", "memory_search": "翻记忆", "memory_read": "读记忆",
@@ -212,7 +212,7 @@ def _tool_detail(name: str, args: dict) -> str | None:
         return str(g("pattern") or g("glob") or "") or None
     if name == "run_tests":
         return _short_path(g("path")) if g("path") else (str(g("target") or "") or "全部")
-    if name in ("web_search", "knowledge_search", "skill_search", "recall"):
+    if name in ("web_search", "web_images", "knowledge_search", "skill_search", "recall"):
         return str(g("query") or g("q") or g("pattern") or "") or None
     if name == "web_fetch":
         return str(g("url") or "") or None
