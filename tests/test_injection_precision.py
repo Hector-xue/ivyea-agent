@@ -172,3 +172,51 @@ def test_serve_and_cli_share_one_domain_judgement():
     src = Path(service.__file__).read_text(encoding="utf-8")
     assert "_looks_like_code_task" in src and "_is_amazon_domain" in src, \
         "serve 的领域闸必须复用 chat_ui 那两个函数"
+
+
+# ── 索引层：少而重要的类别不许被条目多的类别挤没 ────────────────────────────
+def test_index_layer_reserves_a_slot_for_every_category(ivyea_home):
+    """预算按类别顺序先到先得时，排在后面的类别会整类消失。
+
+    实测：133 条的库里 project 占 120 条，吃掉大半预算，排在 CATEGORIES 最后的
+    domain（6 条运营打法）**一条都没露出来** —— 而那恰恰是少而重要、最该常驻的一类。
+    随着项目记录变多，"可复用的打法"会安静地从模型眼前消失，且没有任何迹象。
+    """
+    import re
+
+    from ivyea_agent import memory_store
+
+    root = memory_store.mem_dir()
+
+    def write(cat: str, name: str, desc: str) -> None:
+        d = root / cat
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{memory_store.slugify(name)}.md").write_text(
+            f"---\nname: {name}\ndescription: {desc}\ncategory: {cat}\nkeywords: \n"
+            f"created: 2026-09-02\nupdated: 2026-09-02\nsource: user\nconfidence: 1.00\n---\n\n内容\n",
+            encoding="utf-8")
+
+    for i in range(120):
+        write("project", f"项目记录 {i:03d}", f"第 {i} 项工程进展与约束的完整描述，包含服务名与联调对象")
+    for i in range(4):
+        write("user", f"偏好 {i}", f"用户长期偏好第 {i} 条")
+    for i in range(6):
+        write("domain", f"打法 {i}", f"可复用的运营结论第 {i} 条")
+
+    idx = memory_store.index_digest()
+    shown = {cat: len(re.findall(rf"^- \[{cat}/", idx, re.M)) for cat in ("user", "project", "domain")}
+    assert shown["domain"] >= 4, f"domain 被挤没了：{shown}\n索引层：\n{idx[:400]}"
+    assert shown["user"] >= 4, f"user 被挤没了：{shown}"
+    assert shown["project"] > 10, f"保底不该把大类饿死：{shown}"
+    assert len(idx) <= memory_store.MAX_INDEX_CHARS + 200, "索引层必须有上界"
+
+
+def test_reflection_reads_the_full_index_not_the_trimmed_one():
+    """反思靠目录判断"这条已经有了"。给它摘要版会让它重复建记忆。"""
+    from pathlib import Path
+
+    from ivyea_agent import memory_reflect, memory_store
+
+    src = Path(memory_reflect.__file__).read_text(encoding="utf-8")
+    assert src.count("REFLECTION_INDEX_CHARS") == 2, "反思的两个调用点都要用全量索引"
+    assert memory_store.REFLECTION_INDEX_CHARS > memory_store.MAX_INDEX_CHARS

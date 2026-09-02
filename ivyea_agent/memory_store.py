@@ -43,6 +43,20 @@ DUPLICATE_THRESHOLD = 0.55
 # 老记忆仍然可以被 memory_search 检索到，只是不再免费常驻上下文。
 MAX_INDEX_CHARS = 3000
 
+#: 索引层里每个类别的**保底名额**。
+#:
+#: 没有它，预算就是按 `CATEGORIES` 的顺序先到先得：实测 133 条的库里 project 有 120 条，
+#: 它把 3000 字符吃掉大半，排在最后的 domain（6 条运营打法）**一条都没露出来**。
+#: 也就是说，随着项目记录变多，"可复用的打法"会安静地从模型眼前消失 —— 而那恰恰是
+#: 少而重要、最该常驻的一类。
+#:
+#: 4 条是权衡：五个类别全占满也才 20 行，占不到预算的三分之一，剩下的仍按分数先到先得。
+RESERVED_PER_CATEGORY = 4
+
+#: 反思用的索引预算。反思靠这份目录判断"这条记忆已经有了，该 update 不该 add"，
+#: 看不全就会重复建记忆 —— 它一天最多跑几次，多花点 token 换不碎片化是划算的。
+REFLECTION_INDEX_CHARS = 60000
+
 # 文件名里绝不能出现的字符（Windows 比 Linux 严格，按 Windows 取交集）。
 _UNSAFE = re.compile(r'[/\\:*?"<>|\x00-\x1f]')
 
@@ -601,23 +615,39 @@ def index_digest(limit: int = MAX_INDEX_CHARS, *, scope: str = "") -> str:
     by_cat: Dict[str, List[Entry]] = {}
     for e in active:
         by_cat.setdefault(e.category, []).append(e)
-    parts: List[str] = []
+
+    # 预算分两轮发，**保底在先**。
+    #
+    # 只按 CATEGORIES 顺序先到先得的话，条目多的类别会把预算吃光，排在后面的类别
+    # 一条都露不出来（实测：120 条 project 挤得 6 条 domain 全部消失）。先给每类留
+    # RESERVED_PER_CATEGORY 个名额，剩下的再按原顺序补 —— 这样"少而重要"的类别
+    # 不会随着别的类别变多而安静消失。
     used = 0
     truncated = 0
+    picked: Dict[str, List[Entry]] = {cat: [] for cat in CATEGORIES}
     for cat in CATEGORIES:
-        items = by_cat.get(cat)
-        if not items:
-            continue
-        chunk = [f"## {cat}"]
-        for e in items:
+        for e in (by_cat.get(cat) or [])[:RESERVED_PER_CATEGORY]:
             line = e.index_line()
             if used + len(line) > limit:
                 truncated += 1
                 continue
-            chunk.append(line)
+            picked[cat].append(e)
             used += len(line)
-        if len(chunk) > 1:
-            parts.append("\n".join(chunk))
+    for cat in CATEGORIES:
+        for e in (by_cat.get(cat) or [])[RESERVED_PER_CATEGORY:]:
+            line = e.index_line()
+            if used + len(line) > limit:
+                truncated += 1
+                continue
+            picked[cat].append(e)
+            used += len(line)
+
+    parts: List[str] = []
+    for cat in CATEGORIES:
+        items = picked.get(cat) or []
+        if not items:
+            continue
+        parts.append("\n".join([f"## {cat}"] + [e.index_line() for e in items]))
     hidden = truncated + archived_count
     if hidden:
         parts.append(f"（另有 {hidden} 条不常用的记忆未列出，用 memory_search 仍可检索到）")

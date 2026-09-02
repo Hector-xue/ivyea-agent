@@ -217,7 +217,11 @@ def reflect(provider, *, force: bool = False, limit: int = MAX_EPISODES) -> Dict
     if not rows:
         return {"ok": True, "applied": [], "skipped": [], "message": "没有新的经历可供反思。"}
 
-    index = memory_store.index_digest() or "（当前没有任何分类记忆）"
+    # 反思要的是**全量**目录，不是给主脑看的那份摘要。它靠这份目录判断"这条记忆
+    # 已经有了，该 update 不该 add"——看不全就会重复建记忆，而碎片化正是这套东西
+    # 最怕的失败方式。反思一天最多跑几次，多花点 token 换不碎片化划算。
+    index = memory_store.index_digest(memory_store.REFLECTION_INDEX_CHARS) \
+        or "（当前没有任何分类记忆）"
     user = (f"# 现有记忆索引\n{index}\n\n"
             f"{_render_pending()}"
             f"# 本次要巩固的经历（{len(rows)} 条，按时间正序）\n{_render_episodes(rows)}")
@@ -481,7 +485,11 @@ def reflect_on_text(text: str, provider=None) -> Dict[str, Any]:
     provider = provider or _default_provider()
     if provider is None:
         return {"ok": False, "applied": [], "skipped": [], "message": "没有可用的模型配置。"}
-    index = memory_store.index_digest() or "（当前没有任何分类记忆）"
+    # 反思要的是**全量**目录，不是给主脑看的那份摘要。它靠这份目录判断"这条记忆
+    # 已经有了，该 update 不该 add"——看不全就会重复建记忆，而碎片化正是这套东西
+    # 最怕的失败方式。反思一天最多跑几次，多花点 token 换不碎片化划算。
+    index = memory_store.index_digest(memory_store.REFLECTION_INDEX_CHARS) \
+        or "（当前没有任何分类记忆）"
     user = f"# 现有记忆索引\n{index}\n\n# 这次要巩固的会话摘要\n{text[:6000]}"
     try:
         raw = provider.complete(_SUMMARY_SYS, user, json_mode=True, temperature=0.2, timeout=120.0)
