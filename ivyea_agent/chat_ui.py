@@ -34,7 +34,13 @@ def _is_amazon_domain(query: str) -> bool:
 _CODE_HINTS = re.compile(
     r"\.(py|js|ts|tsx|jsx|go|rs|java|kt|rb|php|cs|cpp|cc|hpp|sh|sql|ya?ml|toml|ini|css|html?|vue)\b"
     r"|docstring|traceback|stack ?trace|函数|方法|变量|类型|形参|参数列表|报错|异常|栈|仓库|repo\b"
-    r"|分支|commit|merge|pull ?request|\bdef \b|\bclass \b|\bimport \b|编译|断点|单元测试|代码|脚本",
+    r"|分支|commit|merge|pull ?request|\bdef \b|\bclass \b|\bimport \b|编译|断点|单元测试|代码|脚本"
+    # 界面/交互类故障也是工程任务。少了这一组，"这个图片点不开"会被当成运营问题，
+    # 于是塞进两份 Listing 图片审计手册（实测）。
+    # 放在这里是安全的：调用方的判据是 `亚马逊信号 or 不像工程任务`，真正的运营问题
+    # 会在前半句就被放行，不会走到这里。
+    r"|前端|后端|界面|页面|样式|渲染|按钮|输入框|弹窗|白屏|崩溃|闪退|卡死"
+    r"|点不开|打不开|加载不出|显示不出|没反应|配置文件|日志|端口|进程|数据库|接口",
     re.I,
 )
 

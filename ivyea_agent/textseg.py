@@ -108,3 +108,88 @@ def overlap_score(query: str, text: str) -> float:
     if not t:
         return 0.0
     return len(q & t) / len(q)
+
+
+# ── 强信号词：判"这条真的相关"而不是"碰巧撞到一个字" ────────────────────────
+#
+# 自动注入（每轮无条件塞进上下文）的失败方式不是漏，是**乱**。实测三例：
+#   · 「版本号写在哪个位置」→ 召回「DeepSeek harness 凭据配置位置」（只对上"位置"）
+#   · 「把改动推送合并发版」→ 召回「console 双卡合并口径」（"合并"是另一个意思）
+#   · 「给 ivyea-agent 加功能」→ 召回一堆 ivyea-note 的记忆（对上"ivyea"）
+#
+# 光靠库内文档频率（DF）挡不住：实测「位置」只出现在 14% 的记忆里、「合并」7%，
+# DF 再低它们也不能作为"相关"的唯一凭据。所以要两层：
+#
+#   ① 这张表 —— **语言层**的弱信号词：出现在哪都不说明这句话是关于什么的。
+#      注意它和 `skills._STOP_GRAMS` 不是一回事：那张表是虚词（什么/怎么/这个），
+#      这张表里的全是实词，只是**单独出现时不足以证明相关**。
+#   ② 调用方给的库内高频词（DF ≥ 阈值）—— 那是每个库自己的"万能词"，
+#      比如记忆库里的 ivyea(86%)、note(57%)。
+#
+# 判据是"**至少一个**强信号重合"，不是"全部重合词都得强"：一句话里出现
+# 「harness 的配置位置」时，harness 是强信号，位置是弱的，这条该召回。
+WEAK_TERMS = frozenset("""
+位置 地方 东西 内容 信息 配置 设置 选项 参数 功能 方案 方式 方法 要点 说明 记录
+数据 结果 结论 状态 情况 进度 版本 更新 变更 改动 修改 调整 优化 分析 处理 操作
+文件 目录 路径 项目 工程 代码 页面 界面 图片 照片 图像 时候 时间 日期 名字 名称
+问题 错误 异常 报错 需求 任务 工作 内容 部分 地址 链接 合并 提交 推送 发布 发版
+""".split())
+
+
+#: 虚词/碎渣：出现在哪都不说明任何事。原来只长在 `skills._STOP_GRAMS` 里，
+#: 但记忆那条路同样需要 —— 实测「我想给 ivyea-agent 加**一个**导出会话的功能」
+#: 里的"一个"被当成了强信号。词法层的常识就该住在词法层。
+STOP_GRAMS = frozenset("""
+为什 什么 怎么 么办 如何 是否 可以 能否 需要 应该 这个 那个 这些 那些 一下 一个
+我的 我们 你的 你们 他的 它的 帮我 帮忙 请问 麻烦 谢谢 你好 现在 目前 已经 还有
+问题 情况 时候 之后 之前 上面 下面 里面 外面 出现 发生 导致 造成 提示 显示 告诉
+不能 不了 没有 无法 不对 不行 怎样 多少 哪些 哪个 什麼 為什
+""".split())
+
+#: 中文按 2-gram 切，跨词边界会切出"话的""的功"这种碎片 —— 它们在两段文本里
+#: 都出现纯属巧合。带虚字的 2-gram 一律不算信号，这比穷举碎片可靠。
+_FUNCTION_CHARS = set("的了是在和与也都就而及或把被让给对从向为以之其")
+
+
+def _is_fragment(token: str) -> bool:
+    """跨词边界切出来的碎渣：两字片段里含虚字。"""
+    return len(token) == 2 and any(c in _FUNCTION_CHARS for c in token)
+
+
+def is_weak_term(token: str) -> bool:
+    """这个词单独出现时，够不够证明"这条记忆/技能和这句话相关"。"""
+    return token in WEAK_TERMS or token in STOP_GRAMS or _is_fragment(token)
+
+
+def strong_overlap(query: str, text: str, *, common: frozenset | set = frozenset()) -> list[str]:
+    """query 和 text 之间**有信息量**的重合词。空列表 = 只是碰巧撞到通用词。
+
+    `common` 由调用方给：它是那个库自己的高频词集合（DF ≥ 阈值），各库不同 ——
+    「图片」在技能库里是万能词（多个技能名都有），在记忆库里一次都没出现过。
+    """
+    q = set(tokenize(query))
+    if not q:
+        return []
+    hit = q & set(tokenize(text))
+    return [t for t in hit
+            if len(t) >= 2 and not is_weak_term(t) and t not in common
+            # 纯数字/纯年份不算信号：2026、08、24 在记忆库里 DF 高达 93%
+            and not t.isdigit()]
+
+
+def common_terms(docs, *, ratio: float = 0.30, min_docs: int = 5) -> frozenset:
+    """语料里的"万能词"：出现在 ≥ratio 比例文档中的 token。
+
+    `min_docs` 是样本量下限：库里只有三五条时，DF 统计纯属噪音（一个词出现两次
+    就是 40%），这种情况下直接返回空集，只靠 WEAK_TERMS 那一层兜着。
+    """
+    docs = list(docs)
+    if len(docs) < min_docs:
+        return frozenset()
+    from collections import Counter
+    df: Counter = Counter()
+    for d in docs:
+        for t in set(tokenize(d)):
+            df[t] += 1
+    cut = max(2, int(len(docs) * ratio))
+    return frozenset(t for t, c in df.items() if c >= cut)

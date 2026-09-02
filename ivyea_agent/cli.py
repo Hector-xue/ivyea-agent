@@ -2830,6 +2830,16 @@ def _record_turn_memory(args, user_text: str, assistant_text: str, sid: str) -> 
         memory.index_turn("assistant", assistant_text, sid)
         from . import memory_reflect
         memory_reflect.maybe_reflect_async()
+        # 留观区的当面确认。终端这条路可以放在轮末：菜单走的是 stdin，
+        # 不像 serve 那样依赖一条会关掉的连接（那边必须赶在 final 之前问）。
+        # 只在真 tty 上问：管道/无人值守里弹菜单等于白问一次还把冷却给用掉了。
+        try:
+            import sys as _sys
+            if _sys.stdin and _sys.stdin.isatty():
+                from . import ask as _ask
+                memory_reflect.maybe_confirm_pending(_ask.TerminalAsk().ask)
+        except Exception:  # noqa: BLE001
+            pass
     except Exception:  # noqa: BLE001 —— 记忆是副作用，绝不能吃掉这一轮
         pass
 

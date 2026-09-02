@@ -47,6 +47,12 @@ def _conn() -> sqlite3.Connection:
         last_hit   REAL,
         first_seen REAL,
         pinned     INTEGER NOT NULL DEFAULT 0)""")
+    # misses：被人判为"这条不相关"的次数。老库没有这一列，补上（SQLite 的
+    # ADD COLUMN 是常数时间，重复执行会抛错，吞掉即可）。
+    try:
+        conn.execute("ALTER TABLE mem_usage ADD COLUMN misses INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass       # 已经有了
     return conn
 
 
@@ -85,6 +91,31 @@ def usage(category: str = "", name: str = "") -> Dict[str, Any]:
                                (_key(category, name),)).fetchone()
             return dict(row) if row else {}
         return {r["key"]: dict(r) for r in conn.execute("SELECT * FROM mem_usage").fetchall()}
+    finally:
+        conn.close()
+
+
+def record_irrelevant(category: str, name: str) -> Dict[str, Any]:
+    """有人明说"这条跟我问的没关系"。
+
+    **为什么必须有这条反向通道**：打分只认"被检索命中"，而误召同样会加分 ——
+    实测 `reference/DeepSeek harness 凭据配置位置` 因为标题里的"配置""位置"被反复
+    误召，hits 涨到 4、最近命中就是今天，于是在遗忘打分里成了**全库第一**，
+    越误召越牢固，用户几天没碰它反而越站越稳。没有反向信号，这个循环停不下来。
+
+    做两件事：扣掉一次 hits（那一次本来就不该记）、记一笔 misses（打分时惩罚）。
+    hits 不会扣成负数 —— 那会让"被误召过"比"从没被召过"还惨，不合理。
+    """
+    conn = _conn()
+    try:
+        k = _key(category, name)
+        conn.execute(
+            "INSERT INTO mem_usage (key, hits, last_hit, first_seen, misses) VALUES (?,0,NULL,?,1) "
+            "ON CONFLICT(key) DO UPDATE SET hits = MAX(0, hits - 1), misses = misses + 1",
+            (k, time.time()))
+        conn.commit()
+        row = conn.execute("SELECT * FROM mem_usage WHERE key=?", (k,)).fetchone()
+        return dict(row) if row else {}
     finally:
         conn.close()
 
@@ -142,6 +173,11 @@ def score(entry: Any, stats: Dict[str, Any], now: float = 0.0) -> Dict[str, Any]
     # 天天用得上的推断被判死——它是不是猜的，和它有没有用，是两件事。
     usage_score = 0.6 * rec + 0.4 * freq
     total = usage_score * (0.5 + 0.5 * conf)
+    # 被人判过"不相关"的，按次数打折。用乘法而不是减法：减法会把一条本来分很高的
+    # 记忆一次打到底，而"有人说过一次不相关"只该让它退一步，不是判死刑。
+    misses = int(row.get("misses") or 0)
+    if misses:
+        total *= max(0.2, 1.0 - 0.25 * misses)
 
     fresh = False
     first_seen = row.get("first_seen")

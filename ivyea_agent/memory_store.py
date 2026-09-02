@@ -518,6 +518,29 @@ def find_similar(text: str, exclude: str = "", scope: str = "") -> Optional[Tupl
 # 这对一份"目录"来说完全可以接受。
 _DIGEST_CACHE: Dict[tuple, tuple] = {}
 
+# 库内高频词缓存。和索引层共用同一个廉价指纹 —— 它俩失效的时机完全一致：
+# 只要没有新记忆写入，"哪些词是这个库的万能词"就不会变。
+_COMMON_CACHE: Dict[tuple, frozenset] = {}
+
+
+def common_terms(scope: str = "") -> frozenset:
+    """这个记忆库自己的"万能词"（出现在 ≥30% 记忆里的 token）。
+
+    给 `textseg.strong_overlap` 当第二层闸用：语言层的弱信号词表是固定的，
+    而每个库还有自己的一批万能词 —— 这个库里 `ivyea` 出现在 86% 的记忆中、
+    `note` 57%，光靠它们对上不能说明"这条记忆和这句话有关"。
+    """
+    sig = _digest_signature() + (scope,)
+    cached = _COMMON_CACHE.get(sig)
+    if cached is not None:
+        return cached
+    docs = [f"{e.name} {e.description} {getattr(e, 'keywords', '')} {e.body}"
+            for e in list_entries(scope=scope)]
+    out = textseg.common_terms(docs)
+    _COMMON_CACHE.clear()          # 只留最新一份，签名变了旧的就没用了
+    _COMMON_CACHE[sig] = out
+    return out
+
 
 def _digest_signature() -> tuple:
     """记忆目录的廉价指纹：条数 + 最新 mtime + 总字节 + 当天日期。
