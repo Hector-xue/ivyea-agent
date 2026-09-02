@@ -1293,6 +1293,48 @@ _MECHANISM_CLAIM_TERMS = (
 )
 
 
+def _source_key(hit: dict[str, Any]) -> str:
+    """这条证据来自哪一份材料。同一份材料的不同切片要能归到一起。
+
+    判据**只认一种情形**：上传类卡（`ivyea-upload://`）且标题完全相同。要治的是
+    "同一篇长文被重复上传、切成多张近似卡霸榜"，不是"同一来源的不同侧面"。
+
+    两条边界都是被测试打出来的，别再放宽：
+
+    * 不能按 url 归组 —— 两张讲不同事的官方卡合法地共享同一个帮助页
+      （`policies.ip_complaint_evidence` 和 `policies.intellectual_property_policy`
+      都出自 G201361070），归到一起会把其中一张删掉。
+    * 不能按标题**前缀**归组 —— 官方卡标题成系列，"Sponsored Products report…"
+      和 "Sponsored Products bidding…" 前十几个字一样，按前缀判会把讲竞价的那张
+      当重复删掉（实测让 `ops.no_impressions` 丢了 bid 证据）。
+    """
+    url = str(hit.get("source_url") or "").strip()
+    title = re.sub(r"\s+", "", str(hit.get("title") or ""))
+    if url.startswith("ivyea-upload://") and title:
+        return f"upload-title:{title}"
+    return f"id:{hit.get('id')}"
+
+
+def _one_slot_per_source(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """同一份材料在一次召回里最多占一席。
+
+    实测「亚马逊图片怎么优化」的前四条里有三条是同一篇长文的不同切片 —— 那不是
+    "证据充分"，是把四个证据位浪费在同一句话上，真正相关的规范卡被挤了出去。
+    保留每组里排最前的那条（调用方已经排好序）。
+
+    **不去重不同来源**：两份材料说同一件事是相互印证，那是好事。
+    """
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for hit in hits:
+        key = _source_key(hit)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(hit)
+    return out
+
+
 def _ensure_evidence_standard(query: str, hits: list[dict[str, Any]],
                               requested: int) -> list[dict[str, Any]]:
     """按需把"证据标准"那张护栏卡挂进证据里。
@@ -1434,7 +1476,7 @@ def evidence_context(query: str, limit: int = 4, max_chars: int = 2600) -> dict[
         -evidence_priority(hit)[0], -evidence_priority(hit)[1],
         -evidence_priority(hit)[2], evidence_priority(hit)[3],
     ))
-    hits = hits[:requested]
+    hits = _one_slot_per_source(hits)[:requested]
     # 证据强度要在挂护栏卡**之前**记：护栏卡自己是 internal_governance 档，
     # 挂上之后再看就永远是"有权威证据"。
     # 证据强度要在挂护栏卡**之前**取一份快照：护栏卡自己是 internal_governance 档，

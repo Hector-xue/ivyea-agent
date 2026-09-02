@@ -69,6 +69,12 @@ _SYS = """你是一个记忆巩固器。输入是一段时间内的零散经历�
 - 只在当次任务里成立的细节
 - 你不确定的推测
 
+**留观区要复检**：输入里会给你一份「留观中的洞察」清单——那是之前几次反思提出、但还没
+攒够观察次数的结论。逐条对照这批新经历：如果这批经历**再次支持**其中某条，就把它原样写进
+输出（operation="add"，**name 一字不差地照抄**，content 可以补充新证据）——名字对不上就
+会被当成一条新洞察，观察次数永远停在 1，那条洞察也就永远转不了正。如果这批经历**反驳**了
+某条，用 operation="delete" 把它撤掉。没有新证据的就别提，留着继续观察。
+
 **合并优先于新建**：输入里会给你现有记忆的索引目录。如果某条洞察讲的是目录里已有的那件事，
 用 operation="update" 更新那一条（content 要写**合并后的完整正文**，不是增量），
 不要新建一条内容雷同的。事实被推翻时用 operation="delete"。没有值得沉淀的东西就返回空列表。
@@ -144,6 +150,33 @@ def should_reflect() -> bool:
     return len(pending()) >= _min_episodes()
 
 
+def _render_pending(limit: int = 20) -> str:
+    """留观区清单，喂给反思做复检。
+
+    **不给这份清单，转正在结构上就不可能发生**：反思每次只读最近 120 条情景记忆，
+    一个话题被总结过一次之后就不会被第二次提炼到，于是 sightings 永远停在 1/3。
+    实测 13 条待定洞察跨了半个月，**全部** 1/3，包括一条有 7 条证据支撑的用户偏好。
+
+    带上名字和描述就够，正文不给 —— 复检要判的是"这批新经历支不支持它"，
+    不是"它写得对不对"。
+    """
+    try:
+        pending = memory_store.list_pending()
+    except Exception:  # noqa: BLE001
+        return ""
+    if not pending:
+        return ""
+    lines = []
+    for e in pending[:limit]:
+        seen = ""
+        kw = getattr(e, "keywords", "") or ""
+        if "sightings=" in kw:
+            seen = f"（已观察 {kw.split('sightings=')[-1].split(',')[0]} 次）"
+        lines.append(f"- [{e.name}]{seen} {e.description}")
+    return ("# 留观中的洞察（这批经历若再次支持某条，name 原样照抄写进输出）\n"
+            + "\n".join(lines) + "\n\n")
+
+
 def _render_episodes(rows: List[Dict[str, Any]]) -> str:
     out = []
     for r in rows:
@@ -184,8 +217,13 @@ def reflect(provider, *, force: bool = False, limit: int = MAX_EPISODES) -> Dict
     if not rows:
         return {"ok": True, "applied": [], "skipped": [], "message": "没有新的经历可供反思。"}
 
-    index = memory_store.index_digest() or "（当前没有任何分类记忆）"
+    # 反思要的是**全量**目录，不是给主脑看的那份摘要。它靠这份目录判断"这条记忆
+    # 已经有了，该 update 不该 add"——看不全就会重复建记忆，而碎片化正是这套东西
+    # 最怕的失败方式。反思一天最多跑几次，多花点 token 换不碎片化划算。
+    index = memory_store.index_digest(memory_store.REFLECTION_INDEX_CHARS) \
+        or "（当前没有任何分类记忆）"
     user = (f"# 现有记忆索引\n{index}\n\n"
+            f"{_render_pending()}"
             f"# 本次要巩固的经历（{len(rows)} 条，按时间正序）\n{_render_episodes(rows)}")
     try:
         raw = provider.complete(_SYS, user, json_mode=True, temperature=0.2, timeout=120.0)
@@ -447,7 +485,11 @@ def reflect_on_text(text: str, provider=None) -> Dict[str, Any]:
     provider = provider or _default_provider()
     if provider is None:
         return {"ok": False, "applied": [], "skipped": [], "message": "没有可用的模型配置。"}
-    index = memory_store.index_digest() or "（当前没有任何分类记忆）"
+    # 反思要的是**全量**目录，不是给主脑看的那份摘要。它靠这份目录判断"这条记忆
+    # 已经有了，该 update 不该 add"——看不全就会重复建记忆，而碎片化正是这套东西
+    # 最怕的失败方式。反思一天最多跑几次，多花点 token 换不碎片化划算。
+    index = memory_store.index_digest(memory_store.REFLECTION_INDEX_CHARS) \
+        or "（当前没有任何分类记忆）"
     user = f"# 现有记忆索引\n{index}\n\n# 这次要巩固的会话摘要\n{text[:6000]}"
     try:
         raw = provider.complete(_SUMMARY_SYS, user, json_mode=True, temperature=0.2, timeout=120.0)
@@ -492,3 +534,99 @@ def wait_for_idle(timeout: float = 5.0) -> bool:
     while _RUNNING and time.time() < deadline:
         time.sleep(0.05)
     return not _RUNNING
+
+
+# ── 当面确认：把留观区的判断权交回给用户，但不指望他主动去翻 ──────────────────
+#
+# 留观区原本只有一条出路：跨 3 次反思还得出同一结论就自动转正。实测这条路走不通
+# （见 _render_pending 的说明），而**指望用户自己去看待定列表更走不通** —— 没有人
+# 会去翻一个需要主动打开的队列。用户原话："用户应该不会经常性的去看哪些记忆待转正吧"。
+#
+# 所以改成主动问：在合适的时机弹一张选项卡（和 ask_user_question 同一条通道），
+# 一次点击定终身。三条纪律：
+#   · **只问画像类**（user / feedback）。项目状态类自动转正没关系，猜错了下次覆盖就是；
+#     而"你这个人是怎么工作的"猜错了会一直按错的方式行事，必须本人点头。
+#   · **不点 ≠ 转正**。超时或跳过一律保持留观 —— 这类东西宁可永远不转，也不能替他定。
+#   · **有冷却**。一天最多问一次，问的是"最值得问的那一条"。
+
+#: 两次主动确认之间至少隔多久（秒）。一天一次是上限，不是节奏 —— 没有够格的条目就不问。
+CONFIRM_COOLDOWN_S = 24 * 3600
+#: 够格被问的最低证据条数。证据太少说明这个规律本身还没站稳，先留着观察。
+CONFIRM_MIN_EVIDENCE = 3
+
+
+def _evidence_count(entry: Any) -> int:
+    m = re.search(r"(\d+)\s*条支撑", str(getattr(entry, "evidence", "") or ""))
+    return int(m.group(1)) if m else 0
+
+
+def pick_confirmable(entries: Optional[List[Any]] = None) -> Optional[Any]:
+    """挑一条最值得当面问的留观洞察。没有够格的就返回 None。
+
+    排序：证据多的优先，其次观察次数多的 —— 两者都是"这个规律反复出现"的证据，
+    而证据条数更能反映它在**这一批**经历里站得住。
+    """
+    if entries is None:
+        entries = memory_store.list_pending()
+    ready = [e for e in entries
+             if getattr(e, "category", "") in ("user", "feedback")
+             and _evidence_count(e) >= CONFIRM_MIN_EVIDENCE]
+    if not ready:
+        return None
+    def _seen(e: Any) -> int:
+        kw = getattr(e, "keywords", "") or ""
+        try:
+            return int(kw.split("sightings=")[-1].split(",")[0]) if "sightings=" in kw else 0
+        except ValueError:
+            return 0
+    ready.sort(key=lambda e: (-_evidence_count(e), -_seen(e), e.name))
+    return ready[0]
+
+
+def _confirm_due(now: float) -> bool:
+    try:
+        last = float(config.get_setting("memory_last_confirm_ts", 0) or 0)
+    except (TypeError, ValueError):
+        last = 0.0
+    return (now - last) >= CONFIRM_COOLDOWN_S
+
+
+def maybe_confirm_pending(ask_fn: Optional[Any], *, now: Optional[float] = None) -> Dict[str, Any]:
+    """到点了就当面问一条留观洞察。返回 {"asked": bool, ...}。
+
+    `ask_fn` 就是 `ask.AskFn`（工作台弹选项卡 / 终端弹菜单）。**没有通道就不问** ——
+    无人值守时弹卡等于自问自答按推荐项走，而这类东西恰恰不能自动定。
+    """
+    now = time.time() if now is None else now
+    if ask_fn is None or not _confirm_due(now):
+        return {"asked": False, "reason": "no_channel" if ask_fn is None else "cooldown"}
+    entry = pick_confirmable()
+    if entry is None:
+        return {"asked": False, "reason": "nothing_ready"}
+
+    from . import ask as ask_mod
+    questions = ask_mod.normalize([{
+        "question": f"我注意到一件事：{entry.description or entry.name}。以后就按这个来？",
+        "header": "长期偏好",
+        "options": [
+            {"label": "就这么定", "description": "记成长期偏好，以后默认按它做"},
+            {"label": "只是那几次", "description": "当时确实这样，但不用当成长期规矩",
+             "recommended": True},
+            {"label": "不对，删掉", "description": "这个总结不对，别再留着了"},
+        ],
+    }])
+    # 注意推荐项是"只是那几次"：没人回答时**不能**默认转正。这类东西猜错了会一直
+    # 按错的方式行事，宁可留观。
+    got = ask_fn(questions, float(config.get_setting("ask_timeout_seconds", 0) or 300))
+    config.set_setting("memory_last_confirm_ts", str(now))
+    answer = ""
+    if isinstance(got, dict):
+        answers = got.get("answers") if isinstance(got.get("answers"), dict) else got
+        answer = str((answers or {}).get(questions[0]["question"], "") or "")
+    if answer.startswith("就这么定"):
+        res = memory_store.promote_pending(entry.name, confirmed_by_user=True)
+        return {"asked": True, "decision": "promoted", "name": entry.name, **res}
+    if answer.startswith("不对"):
+        res = memory_store.reject_pending(entry.name)
+        return {"asked": True, "decision": "rejected", "name": entry.name, **res}
+    return {"asked": True, "decision": "kept", "name": entry.name}

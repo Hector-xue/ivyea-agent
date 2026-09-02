@@ -688,6 +688,18 @@ def auto_recall_text(query: str, *, exclude=None, scope: str = "",
         # （它把"这个再改改"改写成带实词的问句，正好把词法信号还回来）。
         if float(h.get("score") or 0.0) <= 0.0:
             continue
+        # 光有"重合"不够，得看重合的是**什么词**。
+        #
+        # 实测三例误注，全都过了上面那道 score>0：
+        #   「版本号写在哪个位置」→「DeepSeek harness 凭据配置位置」（只对上"位置"）
+        #   「把改动推送合并发版」→「console 双卡合并口径」（"合并"是另一个意思）
+        #   「给 ivyea-agent 加功能」→ 一堆 ivyea-note 的记忆（对上"ivyea"）
+        # 而库内文档频率单独也挡不住：「位置」只出现在 14% 的记忆里、「合并」7%。
+        # 所以判据是"至少一个**强信号**重合"——既不在语言层弱信号词表里，
+        # 也不是这个库的万能词（ivyea 86%、note 57%）。见 textseg.strong_overlap。
+        hay = f"{h.get('name', '')} {h.get('description', '')} {h.get('body', '')}"
+        if not textseg.strong_overlap(query, hay, common=memory_store.common_terms(scope)):
+            continue
         key = f"{h['category']}/{h['name']}"
         if key in exclude:
             continue                      # 这条本会话早注入过了，别再占一次位置

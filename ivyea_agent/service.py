@@ -336,6 +336,8 @@ def manifest() -> dict[str, Any]:
             {"method": "POST", "path": "/v1/memory/write", "description": "human add/update/delete of a curated memory"},
             {"method": "POST", "path": "/v1/memory/confirm", "description": "promote a pending inference (human confirmed)"},
             {"method": "POST", "path": "/v1/memory/reject", "description": "reject a pending inference"},
+            {"method": "POST", "path": "/v1/memory/irrelevant",
+             "description": "mark a recalled memory as not relevant to that turn"},
             {"method": "POST", "path": "/v1/memory/core", "description": "edit a core memory block"},
             {"method": "POST", "path": "/v1/memory/reflect", "description": "run consolidation now (async)"},
             {"method": "POST", "path": "/v1/memory/prune", "description": "prune expired conversation episodes"},
@@ -1867,7 +1869,9 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
     # 闲聊路线不选技能：一句问候配一本 1600 字的运营手册，除了把模型往
     # "按手册做审计"带没有别的作用。
     if (payload.get("auto_skill") and not str(payload.get("skill") or "").strip()
-            and not route.is_chat and not route.is_quick):
+            and not route.is_chat and not route.is_quick
+            # 同一道领域闸：写代码的轮次不该被塞进一本运营手册
+            and _wants_domain_context(task_scope._user_said(message), ctx)):
         matched = _auto_skill_context(message, messages)
         if matched:
             send("skill_match", stream_json.skill_match_event(ctx.session_id, matched))
@@ -2124,6 +2128,16 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
     # 这一轮的时刻表。前端拿它画"结束于 09:49 · 用时 3 分 12 秒" —— 时间必须是
     # **服务端的事实**：客户端自己掐表在断链/换页面/换机器之后就对不上了，而这
     # 一轮跑完前端还会重新去拉存档，纯前端记的数会被那次拉取冲掉。
+    # 留观区的当面确认。**必须放在 final 之前**：它走的是选项卡那条通道，而通道
+    # 依赖这条还活着的 SSE —— 轮末那个"记情景 + 触发反思"的钩子里连接已经关了，
+    # 在那儿弹卡等于弹给空气。有冷却（一天一次），没有够格的条目就什么都不做。
+    try:
+        confirm = memory_reflect.maybe_confirm_pending(getattr(ctx, "ask_fn", None))
+        if confirm.get("asked"):
+            data["memory_confirm"] = {k: confirm.get(k) for k in ("decision", "name")}
+    except Exception:  # noqa: BLE001 —— 记忆是副作用，绝不能吃掉这一轮的回答
+        pass
+
     ended_at = time.time()
     data["started_ms"] = int(turn_started * 1000)
     data["ended_ms"] = int(ended_at * 1000)
@@ -2258,6 +2272,27 @@ def memory_write(payload: dict[str, Any]) -> dict[str, Any]:
         valid_until=str(payload.get("valid_until") or ""),
         source="user", confidence=1.0)
     return {"ok": bool(res.get("ok")), **res}
+
+
+def memory_irrelevant(body: dict[str, Any]) -> dict[str, Any]:
+    """有人在界面上点了"这条跟我问的没关系"。
+
+    这是**唯一可持续的误召来源**：靠人手工翻日志找误召不可能长期做下去，而每轮
+    召回了什么本来就画在界面上，顺手点一下的成本几乎为零。收到之后做两件事 ——
+    扣掉那一次不该记的命中、记一笔 misses（遗忘打分会按次数打折）。
+
+    key 用 "category/name"，就是界面上显示的那个串。
+    """
+    from . import memory_decay
+
+    key = str(body.get("key") or "").strip()
+    if not key:
+        return {"ok": False, "error": "缺少 key"}
+    category, _, name = key.partition("/")
+    if not name:
+        return {"ok": False, "error": f"key 要写成 category/name，收到 {key!r}"}
+    row = memory_decay.record_irrelevant(category, name)
+    return {"ok": True, "key": key, "usage": row}
 
 
 def memory_pending_decide(payload: dict[str, Any], action: str) -> dict[str, Any]:
@@ -3212,6 +3247,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/memory/reject":
             self._json(200, memory_pending_decide(body, "reject"))
             return
+        if parsed.path == "/v1/memory/irrelevant":
+            self._json(200, memory_irrelevant(body))
+            return
         if parsed.path == "/v1/memory/core":
             self._json(200, memory_core_write(body))
             return
@@ -3442,6 +3480,24 @@ def _int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _wants_domain_context(said: str, ctx: Any = None) -> bool:
+    """这一轮该不该注入亚马逊领域上下文（知识证据 / 技能手册）。
+
+    和 CLI 用的是同一套判据（chat_ui 的那两个函数），不另写一套 —— 两条路的行为
+    分叉过一次：工作台里"图片点不开"这种前端 bug 会被塞两份 Listing 图片审计手册，
+    终端里同一句话被挡掉了。
+
+    放行条件任满足其一：绑了 ASIN、句子里有亚马逊域信号、或者**不像**工程任务。
+    最后那条是保守兜底 —— 判不出来就注，漏注的代价（该查的没查）比误注更大。
+    """
+    from .chat_ui import _is_amazon_domain, _looks_like_code_task
+
+    if getattr(ctx, "asin", ""):
+        return True
+    said = str(said or "")
+    return _is_amazon_domain(said) or not _looks_like_code_task(said)
 
 
 def _tools_for(payload: dict[str, Any], route: "routing.Route | None" = None) -> list | None:
@@ -3687,7 +3743,13 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext,
     # 「你好」配上几百字亚马逊证据。
     # `trivial` 是同一个道理再往前一步：连"好的""收到"这种应答也别查。
     # 它本来就白跑一趟，此前一直在跑。
-    if payload.get("inject_retrieval", True) and not trivial and not (route is not None and route.is_chat):
+    # 领域闸：工程/代码任务不注亚马逊知识。
+    #
+    # 这道闸 CLI 一直有（chat_ui._looks_like_code_task），**serve 一直没有** —— 而
+    # 工作台走的正是 serve。于是同一句"帮我看下这个图片点不开的问题"，在终端里被挡掉，
+    # 在工作台里照注一堆亚马逊证据。两条路的行为必须一致。
+    if payload.get("inject_retrieval", True) and not trivial \
+            and not (route is not None and route.is_chat) and _wants_domain_context(said, ctx):
         evidence = knowledge.evidence_context(message, limit=4)
         ctx.knowledge_citations = list(evidence.get("citations") or [])
         ctx.knowledge_retrieval_expected = bool(evidence.get("should_retrieve"))

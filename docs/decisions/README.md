@@ -55,6 +55,7 @@ git log 记得住「改了什么」，记不住「为什么不选另一条路」
 | [0035](./0035-knowledge-gaps-must-build-their-own-priority-list.md) | 补哪些知识卡，让数据自己排，别替人判 | 2026-08-30 |
 | [0036](./0036-illustrations-come-from-og-image.md) | 回答里的配图去网页上找，不去模型里画 | 2026-09-02 |
 | [0037](./0037-quick-lane-for-knowledge-questions.md) | 知识型提问单开一条车道，只挂只读检索工具 | 2026-09-02 |
+| [0038](./0038-injection-precision-over-recall.md) | 注入精度优先于召回率，且必须先能度量 | 2026-09-02 |
 
 相关的工作台侧决策见
 [IvyeaOps 的 ADR 目录](https://github.com/Hector-xue/IvyeaOps/tree/main/docs/decisions)，

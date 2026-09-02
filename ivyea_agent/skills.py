@@ -16,7 +16,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from . import config, knowledge
+from . import config, knowledge, textseg
 
 
 @dataclass(frozen=True)
@@ -637,6 +637,39 @@ def _is_noise(gram: str) -> bool:
     return len(gram) == 2 and gram in _STOP_GRAMS
 
 
+_COMMON_CACHE: dict = {}
+
+
+def _library_common() -> frozenset:
+    """技能库自己的万能词（出现在 ≥25% 技能元信息里的片段）。
+
+    实测这一层能捞出 amazon(100%)、listing(46%)、优化/分析(23%) 这类 —— 它们出现在
+    技能名里纯属这个库全是亚马逊技能，不代表"这句话点名要这个技能"。
+    库很小（十几条），所以配合 textseg.WEAK_TERMS 那一层用：「图片」只占 15%，
+    DF 挡不住，靠语言层的弱信号词表兜住。
+    """
+    all_sk = list_skills()
+    sig = (len(all_sk), tuple(sorted(sk.id for sk in all_sk))[:1])
+    hit = _COMMON_CACHE.get(sig)
+    if hit is None:
+        metas = [" ".join([sk.id, sk.title, sk.description, " ".join(sk.triggers)])
+                 for sk in all_sk]
+        hit = textseg.common_terms(metas, ratio=0.25)
+        _COMMON_CACHE.clear()
+        _COMMON_CACHE[sig] = hit
+    return hit
+
+
+def _is_signal(term: str, common: frozenset) -> bool:
+    """这个片段够不够格作为"点名了这条技能"的凭据。
+
+    三层都要过：不是虚词碎渣（_is_noise）、不是语言层弱信号词（图片/分析/配置…）、
+    也不是这个库的万能词（amazon/listing/优化…）。任缺一层都出过事：
+    「帮我看下这个图片点不开的问题」曾靠"图片"两个字命中两份 Listing 图片审计手册。
+    """
+    return not _is_noise(term) and not textseg.is_weak_term(term) and term not in common
+
+
 def _score_parts(sk: "Skill", terms: list[str], raw_terms: list[str], ql: str) -> tuple[int, int]:
     """返回 (总分, 名义分)。
 
@@ -646,12 +679,14 @@ def _score_parts(sk: "Skill", terms: list[str], raw_terms: list[str], ql: str) -
     """
     meta = " ".join([sk.id, sk.title, sk.description, " ".join(sk.triggers)]).lower()
     # 名义分只认**有信息量的片段**：通用疑问词/人称撞上触发词是噪音，不是命中。
+    # 「有信息量」是三层判据，见 _is_signal —— 只挡虚词那一层不够，实测栽过。
+    common = _library_common()
     named = _META_WEIGHT * sum(min(meta.count(t), _META_HIT_CAP)
-                               for t in terms if not _is_noise(t))
+                               for t in terms if _is_signal(t, common))
     bonus = 0
     for trigger in sk.triggers:
         tl = trigger.lower()
-        if any(t in tl or tl in ql for t in raw_terms if not _is_noise(t)):
+        if any(t in tl or tl in ql for t in raw_terms if _is_signal(t, common)):
             bonus += _TRIGGER_BONUS
     named += min(bonus, _TRIGGER_BONUS_CAP)
     total = named + sum(min(sk.body.lower().count(t), _BODY_HIT_CAP)
