@@ -953,6 +953,8 @@ def _t_ask_user_question(args: dict, ctx: ToolContext) -> str:
     if out.get("auto"):
         why = {
             "timeout": f"用户在 {int(timeout // 60)} 分钟内没有选择",
+            # 跳过是用户**主动放权**，不是没人理 —— 说成"没有选择"就是冤枉他。
+            "skipped": "用户跳过了这些问题，把决定权交给你",
             "no_channel": "当前没有可以弹选项的界面（无人值守运行）",
             "error": "提问通道出错",
         }.get(reason, "没能拿到用户的选择")
