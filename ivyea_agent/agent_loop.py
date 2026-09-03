@@ -14,9 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import (budget as budget_mod, config, context, evidence_ledger, knowledge, loop_guard,
-               panels, plan_store, progress_reporting, stream_json, task_scope, thinking, traces,
-               transcript, ui)
+from . import (budget as budget_mod, config, context, evidence_ledger, goal_mode as goal_mod,
+               goal_store, knowledge, loop_guard, panels, plan_store, progress_reporting,
+               stream_json, task_scope, thinking, traces, transcript, ui)
 from .agent_tools import PARALLEL_SAFE, TOOL_SCHEMAS, ToolContext, ToolResult, dispatch_result
 from .providers import LLMProvider
 
@@ -45,6 +45,9 @@ SYSTEM_PROMPT += """
 - **分类记忆**（memory_write / memory_search / memory_read）：一事一文件的中期记忆。你的上下文里有一份**记忆索引目录**，列出记忆的名字和一句话描述；先看目录判断哪条相关，需要正文时才 memory_read 取——不要一上来就把所有记忆都读一遍。**目录只列了一部分**（按常用度排，每类都留了名额，但库大了就列不全，末尾会写还有多少条没列）：没出现在目录里**不等于没有**，涉及用户偏好、过往决定、某个项目的历史结论时，拿不准就先 memory_search 查一次，别因为目录里没看到就当它不存在。写入时只记**用户的问题/指令要点、关键过程、最终结论**，不要把整段对话抄进去。同一件事有新结论就 update 那一条，别新建第二条；事实被推翻就 delete。
 - **情景记忆**（remember / recall）：零散事件、某个 ASIN 的单次结论。跨会话模糊回忆用 recall。
 判断标准：**"下次对话我不知道这件事会不会犯错？"** 会且是关于用户/长期规则的 → 核心记忆；会但属于某个具体主题 → 分类记忆；只是一次性事实 → 情景记忆或干脆不记。用户说"记住…"或"更新某某记忆"时，先判断属于哪一层再落盘。"""
+
+#: 目标模式追加进 system prompt 的一段（与 PLAN_NOTE 同级，cli / service 各自拼）。
+GOAL_NOTE = goal_mod.GOAL_SYSTEM_NOTE
 
 PLAN_NOTE = ("\n\n[计划模式] 当前为只读计划模式：可以巡检/分析/提动作，但**不要调用 execute_actions 写入**。"
              "先给出清晰的行动计划，待用户 /approve 批准后再执行。")
@@ -128,6 +131,9 @@ class TurnStatus:
     citation_gate_rounds: int = 0
     critique_rounds: int = 0       # 收尾自查门禁已经逼修正过几轮（封顶 1）
     self_critiqued: bool = False   # 模型自己调过 self_critique —— 调过就不再由运行时代劳
+    goal_gate_rounds: int = 0      # 目标验收门禁已经把这一轮打回几次
+    goal_fingerprint: str = ""     # 上一次判定的未达成集合指纹（无进展熔断用）
+    goal_stalls: int = 0           # 连着几次判定完全没变
     compact_warned: bool = False   # 已就"越过压缩阈值但压不动"提醒过一次（每轮至多一次）
 
     def before_model_step(self, step_idx: int, narrate: Callable[[str], None]) -> None:
@@ -172,13 +178,14 @@ class TurnStatus:
             self.runtime_validated = True
 
 
-def _resolve_max_steps(value: int | None, setting_key: str) -> int:
+def _resolve_max_steps(value: int | None, setting_key: str, default: int | None = None) -> int:
+    fallback = DEFAULT_MAX_TOOL_STEPS if default is None else int(default)
     if value is not None:
         return max(1, int(value))
     try:
-        return max(1, int(config.get_setting(setting_key, DEFAULT_MAX_TOOL_STEPS)))
+        return max(1, int(config.get_setting(setting_key, fallback)))
     except (TypeError, ValueError):
-        return DEFAULT_MAX_TOOL_STEPS
+        return fallback
 
 
 #: 模型步数的硬天花板 = 预算步数 × 这个倍数。
@@ -472,6 +479,7 @@ def _record_tool_result(ctx: ToolContext, messages: list, tc: dict, res, duratio
         except Exception:   # noqa: BLE001 —— 台账坏了不该连累工具调用
             pass
     progress_reporting.observe_tool_result(ctx, tc.get("name") or "", res)
+    _note_goal_evidence(ctx, tc, res, blocked)
     result = res.text
     payload = {"arguments": tc.get("arguments") or {}}
     if res.error:
@@ -812,6 +820,327 @@ def _inject_plan_note(ctx: ToolContext, messages: list) -> None:
         return
 
 
+# ── 目标模式 ────────────────────────────────────────────────────────────────
+#
+# 一句话交出去，达成之前不停。三件事分别归谁管：
+#   · 及格线   → goal_store（落盘，跨压缩不丢，模型改不了）
+#   · 判定     → _goal_gate_feedback（运行时验收，模型说完成不算）
+#   · 什么时候真的停 → 用户喊停 / 成本闸 / 无进展熔断（下面这几个常量）
+#
+# 没有 session_id 时（只读子 agent、裸 ToolContext 的单测）整套契约空转，只剩
+# system prompt 里那段纪律 —— 与 plan_store 的降级契约一致。
+
+#: 目标模式的默认步数预算。常规轮次是 200，这里给到 600 —— "一句话跑到底"本来
+#: 就要更多步，而步数从来只是防跑飞的安全阀，不是常规停止点。
+GOAL_MAX_TOOL_STEPS = 600
+#: 步数配额最多自动续几次。续期只加步数不加钱（见 budget.renew_steps）——
+#: 真正的刹车是成本闸（`chat_max_cost_cny`），不是这个数。
+GOAL_MAX_CONTINUATIONS = 5
+#: 验收门禁最多把一轮打回几次。到顶就停下汇报，剩下的写进目标台账供续跑。
+GOAL_MAX_GATE_ROUNDS = 12
+#: 连着几次判定结果一模一样就熔断。判定要花一次模型调用 + 一整圈干活，
+#: 三次原地踏步足以说明模型在这个环境里过不去这一关，再转就是纯烧钱。
+_GOAL_STALL_CAP = 2
+#: 整行**就是**这几句时才算"接着上一件事干"，不是新目标 —— 不重新立约，否则已经
+#: 判过的进度会被抹掉，用户说一句"继续"反而让目标退回原点。
+#:
+#: 用整行精确匹配、不用包含匹配（与 `cli._plan_mode_intent` 同一套判据）：
+#: 「继续优化首页」是一个**新目标**，按包含匹配会被当成续做，于是它顶着上一个目标
+#: 的验收标准跑 —— 那比重新立约错得离谱。
+_GOAL_CONTINUATIONS = frozenset({
+    "继续", "继续做", "继续跑", "接着", "接着做", "接着干", "往下做", "别停", "再试一次",
+    "go on", "continue", "keep going", "carry on",
+})
+
+
+def _goal_active(ctx: ToolContext) -> bool:
+    """目标契约这一轮到底生不生效。**没有会话 id 就没有契约**（落不了盘）。"""
+    return bool(getattr(ctx, "goal_mode", False)) and bool(getattr(ctx, "session_id", ""))
+
+
+def _goal_setting(key: str, default: int) -> int:
+    try:
+        return max(1, int(config.get_setting(key, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_goal_continuation(query: str) -> bool:
+    return (query or "").strip().strip("。.!！?？，, 　").lower() in _GOAL_CONTINUATIONS
+
+
+def _goal_publish(ctx: ToolContext, phase: str, note: str = "",
+                  narrate: Callable[[str], None] | None = None,
+                  emit: Callable[[dict], None] | None = None,
+                  goal: dict | None = None) -> None:
+    """把目标状态同时送给人（narrate）和界面（结构化事件）。
+
+    界面读的是 `goal_store.public_state` 的投影，不去解析正文 —— 进度指示器必须是
+    确定性的，这条教训 todo/阶段汇报已经交过一次学费了。
+    """
+    sid = getattr(ctx, "session_id", "") or ""
+    try:
+        state = goal_store.public_state(sid, goal=goal)
+    except Exception:   # noqa: BLE001
+        state = {}
+    ctx.goal_state = state
+    if narrate is not None and note:
+        narrate(ui.message("info" if phase != "stopped" else "warn", note))
+    _emit_safe(emit, stream_json.goal_event(sid, phase, state, note))
+
+
+def _prepare_goal(ctx: ToolContext, status: TurnStatus, provider,
+                  narrate: Callable[[str], None],
+                  emit: Callable[[dict], None] | None = None) -> None:
+    """立约：把这一轮的指令拆成可验收的标准并落盘。
+
+    同一句指令（或"继续"这类续做）复用已有契约 —— 重新立约会把判过的进度抹掉。
+    换了一句新指令则重新立约：用户改口了，旧的及格线就作废了。
+    """
+    if not _goal_active(ctx):
+        return
+    sid = ctx.session_id
+    query = (getattr(ctx, "progress_query", "") or "").strip()
+    existing = goal_store.load(sid)
+    continuation = _is_goal_continuation(query)
+    # 「继续」这类话里没有目标，**永远不能拿它去立新约** —— 那会把一句"继续"
+    # 拆成一份莫名其妙的验收标准，把真正欠着的活挤掉。
+    if existing and (continuation or goal_store.same_query(existing, query)):
+        if existing.get("status") == "stopped" and continuation:
+            # 上一轮是撞预算/熔断停的，用户说继续 = 把它接回来。不重新激活的话，
+            # "说继续可以接着做"就是空话：台账还在，门禁却一律不生效。
+            existing = goal_store.resume(sid) or existing
+        if existing.get("status") == "active":
+            ctx.goal_query = str(existing.get("query") or query)
+            _goal_publish(ctx, "start", "", None, emit, goal=existing)
+            return
+        if continuation:
+            return          # 目标已达成，"继续"没有新目标可立
+    res = goal_mod.derive(query, provider)
+    _charge_side_call(status, provider, res.get("usage"))
+    contract = res.get("contract") or {}
+    goal = goal_store.start(
+        sid, query=query, objective=contract.get("objective", ""),
+        criteria=contract.get("criteria"), out_of_scope=contract.get("out_of_scope"),
+        risks=contract.get("risks"), task_id=getattr(ctx, "task_id", "") or "",
+        derived_by="model" if res.get("ok") else "fallback")
+    if not goal:
+        return
+    ctx.goal_query = str(goal.get("query") or query)
+    # 这里**刻意不打开** `progress_required`（阶段汇报闭环）。
+    #
+    # 第一次真机冒烟就栽在这上面：一个"写个 add.py 并跑通"的小目标，28 次工具调用里
+    # 19 次是记账，两次撞上 loop_guard 的"连续 4 次全在记账"，钱烧完了**验收判定
+    # 一次都没跑上**。两套仪式叠加的结果是谁都没走完 —— 而目标模式自己已经提供了
+    # 结构（验收清单 + 那张进度卡），比阶段汇报更贴近"还差什么"。
+    # 该不该做阶段汇报仍由 routing 按这句话的性质决定，和不开目标模式时一样。
+    lines = [f"目标模式已立约：{goal.get('objective') or query}"]
+    for item in goal.get("criteria") or []:
+        lines.append(f"  {item.get('index')}. {item.get('text')}")
+    lines.append("达成之前我不会停；随时可以打断我。")
+    if res.get("note"):
+        lines.append("（" + str(res["note"]) + "）")
+    _goal_publish(ctx, "start", "\n".join(lines), narrate, emit, goal=goal)
+    traces.record(sid, getattr(ctx, "turn_id", ""), "goal", "start", ok=True,
+                  summary=str(goal.get("objective") or query)[:1000])
+
+
+#: 每条证据留多少字（命令原文 + 输出头）。验收员只需要"这条命令跑了、输出是什么"，
+#: 整篇日志灌进去只会把判定淹掉，而且这一次调用的钱是真花的。
+_GOAL_EVIDENCE_CHARS = 320
+#: 最多留几条。取最近的 —— 目标模式一轮可能跑几十步，早期的探索对验收没有帮助。
+_GOAL_EVIDENCE_MAX = 30
+#: 哪些工具的结果算验收证据。判定问的是"做到没有"，读文件/搜索只是过程。
+_GOAL_EVIDENCE_TOOLS = frozenset({
+    "run_command", "run_python", "run_tests", "bash_output", "code_apply_patch",
+    "write_file", "edit_file", "read_file", "web_fetch", "mcp_call_tool",
+    "ivyea_ops_call_tool", "execute_actions",
+})
+
+
+def _note_goal_evidence(ctx: ToolContext, tc: dict, res, blocked: bool = False) -> None:
+    """把一次工具调用记成验收员看得懂的一行：`工具(目标) → 结果 | 输出`。
+
+    被护栏拦下的不记（那是待办，不是证据），失败的**要记** —— "跑了但没过"正是
+    某条标准未达成的直接依据。
+    """
+    if blocked or not _goal_active(ctx):
+        return
+    name = str(tc.get("name") or "")
+    if name not in _GOAL_EVIDENCE_TOOLS:
+        return
+    try:
+        target = evidence_ledger._target_for(name, tc.get("arguments") or {})
+    except Exception:   # noqa: BLE001
+        target = ""
+    body = " ".join(str(getattr(res, "text", "") or "").split())[:_GOAL_EVIDENCE_CHARS]
+    head = f"{name}({target})" if target else name
+    line = f"{head} → {'成功' if getattr(res, 'ok', False) else '失败'}：{body}"
+    rows = list(getattr(ctx, "goal_evidence", []) or [])
+    if line not in rows:
+        rows.append(line)
+    ctx.goal_evidence = rows[-_GOAL_EVIDENCE_MAX:]
+
+
+def _goal_note(ctx: ToolContext) -> str:
+    if not _goal_active(ctx):
+        return ""
+    try:
+        return goal_store.render_note(ctx.session_id)
+    except Exception:   # noqa: BLE001 —— 目标台账坏了不能连累这一轮
+        return ""
+
+
+def _inject_goal_note(ctx: ToolContext, messages: list) -> None:
+    """把目标契约注回最后一条 user 消息（与 `_inject_plan_note` 同一机制、同一理由）。"""
+    note = _goal_note(ctx)
+    if not note:
+        return
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        text = content if isinstance(content, str) else str(content or "")
+        if goal_store.GOAL_NOTE_MARKER in text:
+            return
+        if isinstance(content, list):
+            msg["content"] = list(content) + [{"type": "text", "text": note}]
+        else:
+            msg["content"] = (text + "\n\n" + note) if text else note
+        return
+
+
+def _goal_stop(ctx: ToolContext, reason: str, narrate: Callable[[str], None],
+               emit: Callable[[dict], None] | None = None) -> None:
+    try:
+        goal = goal_store.stop(ctx.session_id, reason)
+    except Exception:   # noqa: BLE001
+        goal = None
+    _goal_publish(ctx, "stopped", reason, narrate, emit, goal=goal)
+
+
+def _goal_gate_feedback(ctx: ToolContext, status: TurnStatus, content: str,
+                        narrate: Callable[[str], None], provider=None,
+                        emit: Callable[[dict], None] | None = None) -> str | None:
+    """目标验收门禁：逐条对照证据判定，没达成就把差距注回去接着干。
+
+    挂在四道门禁**之后**：便宜的确定性门（自验证/汇报/引证/自查）先把能修的修掉，
+    再花一次模型调用问"目标到底达没达成"。
+
+    放行的三种情况，都要留下痕迹，绝不静默：
+      · 全部标准进终态 → 真的达成了；
+      · 验收员没上班（没 provider / 调用失败 / 返回读不懂）→ 不能把用户永远关在门里；
+      · 打回次数到顶或连续无进展 → 停下汇报，把剩下的写进台账供续跑。
+    """
+    if not _goal_active(ctx):
+        return None
+    goal = goal_store.load(ctx.session_id)
+    if not goal or not (goal.get("criteria") or []) or goal.get("status") != "active":
+        return None
+    # provider 由调用方直接传进来，`ctx.provider` 只兜底。
+    #
+    # 这不是多余的谨慎：v1.16.8 之前 serve 压根没给 ctx 挂 provider，只认 ctx 的
+    # `_critique_gate_feedback` 因此在 IvyeaOps 侧一直静默空转（同版本已修）。
+    # 验收是这个模式的全部意义，它不能取决于"某条入口有没有记得挂那一行"。
+    provider = provider if provider is not None else getattr(ctx, "provider", None)
+    if provider is None:
+        return None
+    cap = _goal_setting("goal_max_gate_rounds", GOAL_MAX_GATE_ROUNDS)
+    if status.goal_gate_rounds >= cap:
+        _goal_stop(ctx, f"验收门禁已把这一轮打回 {cap} 次仍未达成，先停下汇报。"
+                        "剩余标准留在目标台账里，说“继续”可以接着做。", narrate, emit)
+        return None
+    # 优先喂带命令原文和输出的那份；它空着（这一轮一个实质工具都没跑）时退回
+    # 汇报证据，聊胜于无。
+    evidence = (list(getattr(ctx, "goal_evidence", []) or [])
+                or list(getattr(ctx, "progress_tool_evidence", []) or []))
+    res = goal_mod.judge(goal, content, evidence=evidence,
+                         attention=list(getattr(ctx, "progress_attention", []) or []),
+                         provider=provider)
+    _charge_side_call(status, provider, res.get("usage"))
+    if not res.get("ok"):
+        # 验收员自己都没上班就放行，但要说清楚 —— 用户按下的是"达成才停"，
+        # 这一轮实际上没被验过，不说一声等于骗他。
+        narrate(ui.message("warn", "目标验收这次没跑成（" + str(res.get("note") or "原因未知")
+                                   + "），本轮按普通轮次收尾，请自行核对结果。"))
+        return None
+    goal = goal_store.record_judgment(ctx.session_id, res["verdict"]) or goal
+    traces.record(ctx.session_id, getattr(ctx, "turn_id", ""), "goal", "judge",
+                  ok=goal_store.achieved(goal),
+                  summary=str(res["verdict"].get("note") or "")[:1000])
+    if goal_store.achieved(goal):
+        met = sum(1 for i in goal.get("criteria") or [] if i.get("status") == "met")
+        _goal_publish(ctx, "achieved",
+                      f"目标验收通过：{met}/{len(goal.get('criteria') or [])} 条标准拿到真实证据。",
+                      narrate, emit, goal=goal)
+        return None
+    # 无进展熔断：判定结果和上一次一模一样，说明这一圈干活没有推动任何一条标准。
+    fingerprint = goal_store.fingerprint(goal)
+    status.goal_stalls = status.goal_stalls + 1 if fingerprint == status.goal_fingerprint else 0
+    status.goal_fingerprint = fingerprint
+    if status.goal_stalls >= _GOAL_STALL_CAP:
+        _goal_stop(ctx, "连续几轮验收判定完全没有推进，先停下来汇报卡点，"
+                        "避免在同一处空转烧钱。", narrate, emit)
+        return None
+    status.goal_gate_rounds += 1
+    left = goal_store.unmet(goal)
+    _goal_publish(ctx, "judged",
+                  f"目标还差 {len(left)}/{len(goal.get('criteria') or [])} 条没达成，继续干。",
+                  narrate, emit, goal=goal)
+    return transcript.gate_text(transcript.GOAL_GATE, goal_mod.gate_body(goal, res["verdict"]))
+
+
+def _turn_max_steps(ctx: ToolContext, value: int | None) -> int:
+    """本轮的步数预算。目标模式有自己的键（默认 600），普通轮次一字不变。
+
+    这里看的是 `ctx.goal_mode` 而不是 `_goal_active` —— 没有会话 id 时契约虽然空转，
+    但用户按下的开关仍然是"跑到底"，预算不该悄悄缩回 200。
+    """
+    if getattr(ctx, "goal_mode", False):
+        return _resolve_max_steps(value, "goal_max_tool_steps", GOAL_MAX_TOOL_STEPS)
+    return _resolve_max_steps(value, "chat_max_tool_steps")
+
+
+def _goal_ceiling(ctx: ToolContext, max_steps: int) -> int:
+    """模型步数天花板。目标模式把续期的份额一并算进去，否则 for 循环会先于预算走完。"""
+    ceiling = _hard_step_ceiling(max_steps)
+    if not _goal_active(ctx):
+        return ceiling
+    return ceiling * (1 + _goal_setting("goal_max_continuations", GOAL_MAX_CONTINUATIONS))
+
+
+def _goal_renew_budget(ctx: ToolContext, status: TurnStatus,
+                       budget: "budget_mod.TurnBudget", narrate: Callable[[str], None],
+                       emit: Callable[[dict], None] | None = None) -> bool:
+    """步数预算见底时，目标模式自动续一轮配额。续了返回 True。
+
+    **成本闸不续**：`renew_steps` 只把步数加满，钱一路累加，所以 `chat_max_cost_cny`
+    始终是真正的刹车。没设成本上限时，续期次数就是唯一的兜底 —— 这一点必须让用户
+    知道，所以每次续期都明说。
+    """
+    if not _goal_active(ctx):
+        return False
+    goal = goal_store.load(ctx.session_id)
+    if not goal or goal.get("status") != "active" or goal_store.achieved(goal):
+        return False
+    if budget.cost_exhausted():
+        _goal_stop(ctx, f"本轮已花到成本上限（¥{budget.cost_cny:.4f}），目标未达成先停下。"
+                        "剩余标准留在目标台账里，提高 chat_max_cost_cny 或说“继续”可以接着做。",
+                   narrate, emit)
+        return False
+    limit = _goal_setting("goal_max_continuations", GOAL_MAX_CONTINUATIONS)
+    if budget.renewals >= limit:
+        _goal_stop(ctx, f"步数配额已自动续跑 {limit} 轮仍未达成目标，先停下汇报。"
+                        "剩余标准留在目标台账里，说“继续”可以接着做。", narrate, emit)
+        return False
+    nth = budget.renew_steps()
+    left = len(goal_store.unmet(goal))
+    narrate(ui.message("info",
+                       f"目标未达成（还剩 {left} 条），步数配额自动续期（第 {nth}/{limit} 次，"
+                       f"已花 ¥{budget.cost_cny:.4f}）。想停就直接打断我。"))
+    return True
+
+
 def _charge_side_call(status: "TurnStatus | None", provider, usage) -> None:
     """把运行时自己发起的模型调用（自查、压缩）记进本轮成本。
 
@@ -874,15 +1203,18 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
     _inject_plan_note(ctx, messages)
     thinking.apply_to(provider, ctx)
     tool_schemas = TOOL_SCHEMAS if tools is None else tools
-    max_steps = _resolve_max_steps(max_steps, "chat_max_tool_steps")
+    max_steps = _turn_max_steps(ctx, max_steps)
     turn_budget = budget_mod.from_settings(max_steps)
     status = TurnStatus(max_steps=max_steps, budget=turn_budget,
                         behavioral_task=bool(getattr(ctx, "behavioral_task", False)))
+    # 立约要在第一次模型调用之前：及格线是这一轮的输入，不是收尾时才补的说明。
+    _prepare_goal(ctx, status, provider, narrate)
+    _inject_goal_note(ctx, messages)
     guard = _new_loop_guard()
     silent_steps = 0                 # 连着多少步只干活没说话（见 _nudge_progress_narration）
-    _ceiling = _hard_step_ceiling(max_steps)
+    _ceiling = _goal_ceiling(ctx, max_steps)
     for step_idx in range(_ceiling):
-        if turn_budget.exhausted():
+        if turn_budget.exhausted() and not _goal_renew_budget(ctx, status, turn_budget, narrate):
             break
         if step_idx == _ceiling - 1:
             # 最后一格：跑完这一步就没了，且预算还没用完 —— 记成撞天花板，
@@ -903,6 +1235,8 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
                 fb = _citation_gate_feedback(ctx, content, status, narrate)
             if fb is None:
                 fb = _critique_gate_feedback(ctx, status, content, narrate)
+            if fb is None:
+                fb = _goal_gate_feedback(ctx, status, content, narrate, provider)
             if fb is not None:
                 messages.append({"role": "user", "content": fb})
                 continue
@@ -988,7 +1322,7 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
     （引用校验最多来回 2 次）——终端是一条向下的日志、叠着看没问题，但网页把
     token 顺序拼进同一个气泡，用户看到的就是同一张表连出三遍。给了这个回调的
     调用方（serve → 网页）会收到边界，把气泡清空重画；不给（CLI）则一个字都不变。
-    reason: tool_call | gate:verify | gate:progress | gate:citation | gate:critique。
+    reason: tool_call | gate:verify | gate:progress | gate:citation | gate:critique | gate:goal。
 
     inject_check()：**用户在这一轮跑着的时候又说了话**。返回一批 {id, text} 就把它们
     作为真实的 user 消息追加进上下文，模型下一步就看得见 —— 这是"任务跑起来之后还能
@@ -1035,16 +1369,19 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
         total_usage["prompt_cache_hit_tokens"] += int(
             u.get("prompt_cache_hit_tokens") or (u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
 
-    max_steps = _resolve_max_steps(max_steps, "chat_max_tool_steps")
+    max_steps = _turn_max_steps(ctx, max_steps)
     turn_budget = budget_mod.from_settings(max_steps)
     status = TurnStatus(max_steps=max_steps, budget=turn_budget,
                         behavioral_task=bool(getattr(ctx, "behavioral_task", False)))
+    _prepare_goal(ctx, status, provider, narrate, emit)
+    _inject_goal_note(ctx, messages)
     guard = _new_loop_guard()
     silent_steps = 0                 # 连着多少步只干活没说话（见 _nudge_progress_narration）
-    _ceiling = _hard_step_ceiling(max_steps)
+    _ceiling = _goal_ceiling(ctx, max_steps)
     for step_idx in range(_ceiling):
         _drain_injections(messages, inject_check, on_inject, narrate, guard)
-        if turn_budget.exhausted():
+        if turn_budget.exhausted() and not _goal_renew_budget(ctx, status, turn_budget,
+                                                              narrate, emit):
             break
         if step_idx == _ceiling - 1:
             # 最后一格：跑完这一步就没了，且预算还没用完 —— 记成撞天花板，
@@ -1106,6 +1443,10 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
                 fb = _critique_gate_feedback(ctx, status, content, narrate)
                 if fb is not None:
                     gate = "critique"
+            if fb is None:
+                fb = _goal_gate_feedback(ctx, status, content, narrate, provider, emit)
+                if fb is not None:
+                    gate = "goal"
             if fb is not None:
                 messages.append({"role": "user", "content": fb})
                 # 门禁要求的是**整篇重写**，所以刚吐出去的那一稿到此作废。

@@ -45,6 +45,7 @@ class TurnBudget:
         self.steps_refunded = 0      # 记账调用数（照常执行，不占配额）
         self.cost_cny = 0.0
         self.hit_ceiling = False     # 是不是撞模型步数天花板停的（≠ 预算用完）
+        self.renewals = 0            # 步数配额续过几次（目标模式的自动续跑）
 
     # ── 步数 ────────────────────────────────────────────────────────────────
     def consume(self, tool_name: str = "") -> None:
@@ -74,6 +75,18 @@ class TurnBudget:
     def exhausted(self) -> bool:
         return self.steps_exhausted() or self.cost_exhausted()
 
+    def renew_steps(self) -> int:
+        """把步数配额重新加满，返回这是第几次续期。**成本不清零。**
+
+        目标模式专用：用户按下那个开关的意思就是"达成之前别停"，而步数上限本来只是
+        防跑飞的安全阀 —— 撞上它就收摊，等于把"不达成不停"改成"跑 600 步就停"。
+        所以步数可以续，钱不能续：`cost_cny` 一路累加，成本闸因此始终是真正的刹车。
+        """
+        with self._lock:
+            self.steps_used = 0
+            self.renewals += 1
+            return self.renewals
+
     def mark_ceiling(self) -> None:
         """标记这一轮是撞**模型步数天花板**停的，而不是把预算用完了。
 
@@ -95,6 +108,8 @@ class TurnBudget:
 
     def render(self) -> str:
         parts = [f"{self.steps_used}/{self.max_steps} 步"]
+        if self.renewals:
+            parts.append(f"已续跑 {self.renewals} 轮配额")
         if self.steps_refunded:
             parts.append(f"另有 {self.steps_refunded} 次记账调用未计入")
         if self.max_cost_cny:

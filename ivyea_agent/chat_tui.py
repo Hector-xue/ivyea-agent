@@ -161,6 +161,8 @@ class ChatTUI:
                  slash_commands: list | None = None,
                  plan_intent_fn: Callable[[str], str] | None = None,
                  set_plan_mode: Callable[[bool], str] | None = None,
+                 goal_intent_fn: Callable[[str], str] | None = None,
+                 set_goal_mode: Callable[[bool], str] | None = None,
                  cycle_mode: Callable[[], str] | None = None,
                  mode_label_fn: Callable[[], str] | None = None,
                  slash_handlers: dict | None = None,
@@ -176,6 +178,9 @@ class ChatTUI:
         self._mode_label_fn = mode_label_fn   # ()->当前模式文字 或 None
         self._plan_intent = plan_intent_fn or (lambda _t: None)
         self._set_plan = set_plan_mode        # (on)->msg 或 None
+        # 目标模式与计划模式同一路数：整行就是那句命令时不进模型轮，直接切模式。
+        self._goal_intent = goal_intent_fn or (lambda _t: None)
+        self._set_goal = set_goal_mode        # (on)->msg 或 None
         self._cycle = cycle_mode              # ()->label 或 None
         self.instruction = ""
         self.blocks: list[str] = [intro] if intro else []   # banner+欢迎框作首块
@@ -337,6 +342,11 @@ class ChatTUI:
         if pi is not None:
             if self._set_plan is not None:
                 self._emit_line("\033[2m" + self._set_plan(pi == "enter") + "\033[0m")
+            return "handled"
+        gi = self._goal_intent(text)                       # 自然语言进/出目标模式
+        if gi is not None:
+            if self._set_goal is not None:
+                self._emit_line("\033[2m" + self._set_goal(gi == "enter") + "\033[0m")
             return "handled"
         head = text.split()[0] if text.split() else text
         handler = self._slash_handlers.get(head)           # 全量斜杠命令（/model /compact /rewind /paste …）
@@ -722,6 +732,8 @@ def run(status_fn: Callable[[], str], slash_commands: list,
         render_markdown: Callable[[str], str] | None = None,
         plan_intent_fn: Callable[[str], str] | None = None,
         set_plan_mode: Callable[[bool], str] | None = None,
+        goal_intent_fn: Callable[[str], str] | None = None,
+        set_goal_mode: Callable[[bool], str] | None = None,
         cycle_mode: Callable[[], str] | None = None,
         mode_label_fn: Callable[[], str] | None = None,
         slash_handlers: dict | None = None,
@@ -731,7 +743,8 @@ def run(status_fn: Callable[[], str], slash_commands: list,
     保留原生滚轮/复制）；False → alt-screen 全屏 TUI。turn_fn 跑真正一轮。"""
     tui = ChatTUI(status_fn=status_fn, turn_fn=turn_fn or (lambda *a, **k: {"text": ""}),
                   render_markdown=render_markdown, slash_commands=slash_commands,
-                  plan_intent_fn=plan_intent_fn, set_plan_mode=set_plan_mode, cycle_mode=cycle_mode,
+                  plan_intent_fn=plan_intent_fn, set_plan_mode=set_plan_mode,
+                  goal_intent_fn=goal_intent_fn, set_goal_mode=set_goal_mode, cycle_mode=cycle_mode,
                   mode_label_fn=mode_label_fn, slash_handlers=slash_handlers,
                   scrollback=scrollback, intro=intro)
     from . import tui as _tui_mod

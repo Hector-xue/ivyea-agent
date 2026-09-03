@@ -1659,6 +1659,7 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
     )
     if auto_approval and not plan_mode:
         ctx.perm.accept_edits = True
+    ctx.goal_mode = bool(payload.get("goal_mode")) and not bool(plan_mode)
     if isinstance(payload.get("ops_bridge"), dict):
         ctx.ops_bridge = dict(payload.get("ops_bridge") or {})
     if isinstance(payload.get("ops_context"), dict):
@@ -1682,6 +1683,13 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
 
     try:
         provider = provider or build_chain(model_cfg, api_key, narrate=narrate)
+        # 主脑挂到 ctx 上。**这一行缺了三年**，代价是三样东西在 IvyeaOps 侧
+        # 悄悄失效：收尾自查门禁（`agent_loop._critique_gate_feedback`）一律空转、
+        # `self_critique` 工具回一句"自我批判不可用"、`dispatch_subagent` 直接回
+        # "当前环境无可用主脑 provider，无法派子 agent"。三处都是 `getattr(ctx,
+        # "provider", None)` 拿不到就静默降级 —— 没有报错、没有事件，终端里跑得
+        # 好好的同一个能力，网页端从来没生效过。
+        ctx.provider = provider
         text = agent_loop.run_turn(provider, ctx, messages, max_steps=(_int(payload.get("max_steps"), 0) or None),
                                    narrate=narrate, tools=_tools_for(payload))
     except LLMError as exc:
@@ -1699,6 +1707,9 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
         "read_only": bool(plan_mode),
         "todos": list(ctx.todos or []),
         "progress": progress_reporting.public_state(ctx),
+        # 目标模式的验收清单。**确定性投影**：不开目标模式时是空 dict，
+        # 老前端读不到这个键也不会有任何变化。
+        "goal": dict(getattr(ctx, "goal_state", {}) or {}),
     }
     if ctx.vision_tier:
         result["vision_tier"] = dict(ctx.vision_tier)
@@ -1793,6 +1804,10 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
         workspace=str(payload.get("workspace") or ""),
         task_id=str(payload.get("task_id") or ""),
     )
+    # 目标模式（agent ≥ v1.16.8）：把这一句拆成可验收的标准，达成之前不收尾。
+    # **计划模式下不生效**：只读档里写不了任何东西，目标自然也达不成，开了它只会
+    # 让模型在门禁前反复空转。老调用方不传这个字段 → 行为逐字不变。
+    ctx.goal_mode = bool(payload.get("goal_mode")) and not bool(plan_mode)
     if isinstance(payload.get("ops_bridge"), dict):
         ctx.ops_bridge = dict(payload.get("ops_bridge") or {})
     if isinstance(payload.get("ops_context"), dict):
@@ -1871,6 +1886,7 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
     if payload.get("persist", True):
         holder["live"] = live_turn.begin(ctx.session_id)
     send("start", {"ok": True, "session_id": ctx.session_id, "read_only": bool(plan_mode),
+                   "goal_mode": bool(getattr(ctx, "goal_mode", False)),
                    "approval": approval_mode,
                    "lane": route.lane, "lane_reason": route.reason,
                    "model": _model_snapshot(model_cfg)})
@@ -1944,7 +1960,7 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
         # 步骤类事件：assistant/tool_result 的内容前端已经能从 token/final 拿到，
         # 再发一份就是重复。
         kind = str(ev.get("type") or "")
-        if kind in ("step", "skill_match", "file_change"):
+        if kind in ("step", "skill_match", "file_change", "goal"):
             send(kind, ev)
         # 计划变了就**当场**播一份。step 事件里带不了它：_slim_args 只留标量键，
         # todos 是个列表，一路上早被裁掉了（前端因此只能等 final 才拿到计划，
@@ -2055,6 +2071,13 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
         # 而不是怀疑本地卡住了。
         stage("model", "等待模型响应")
         provider = provider or build_chain(model_cfg, api_key, narrate=narrate)
+        # 主脑挂到 ctx 上。**这一行缺了三年**，代价是三样东西在 IvyeaOps 侧
+        # 悄悄失效：收尾自查门禁（`agent_loop._critique_gate_feedback`）一律空转、
+        # `self_critique` 工具回一句"自我批判不可用"、`dispatch_subagent` 直接回
+        # "当前环境无可用主脑 provider，无法派子 agent"。三处都是 `getattr(ctx,
+        # "provider", None)` 拿不到就静默降级 —— 没有报错、没有事件，终端里跑得
+        # 好好的同一个能力，网页端从来没生效过。
+        ctx.provider = provider
         out = agent_loop.run_turn_stream(
             provider,
             ctx,
@@ -2142,6 +2165,9 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
         "readonly_blocked": int(getattr(ctx, "readonly_blocks", 0) or 0),
         "todos": list(ctx.todos or []),
         "progress": progress_reporting.public_state(ctx),
+        # 目标模式的验收清单。**确定性投影**：不开目标模式时是空 dict，
+        # 老前端读不到这个键也不会有任何变化。
+        "goal": dict(getattr(ctx, "goal_state", {}) or {}),
         # 收尾再算一次：本轮的工具结果全都留在上下文里了，进度条要走到本轮之后的
         # 真实位置 —— 下一轮就是从这里起步的。
         "context": context.snapshot(messages, turn_tools, model_cfg.get("model", "")),
@@ -3685,6 +3711,8 @@ def _chat_messages(message: str, payload: dict[str, Any], ctx: ToolContext,
             pass
     if ctx.plan_mode:
         system += agent_loop.PLAN_NOTE
+    if getattr(ctx, "goal_mode", False):
+        system += agent_loop.GOAL_NOTE
     # 这句必须跟着审批档位走。**曾经它是无条件拼上去的** —— 于是用户在界面上选了
     # 「逐项审批」「完全放行」，系统提示词里却还写着"当前默认只读、不要在本轮直接
     # 执行"，模型照着这句话只给方案不动手，看起来就是那两档开关坏了。

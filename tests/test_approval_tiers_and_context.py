@@ -238,3 +238,38 @@ def test_chat_stream_emits_context_before_tokens_and_in_final(ivyea_home):
     final_ctx = result["context"]
     assert final_ctx["used"] >= ctx_event["used"], "收尾时上下文只会更长"
     json.dumps(final_ctx)      # 必须能原样进 SSE
+
+
+# ── 主脑要挂到 ctx 上 ───────────────────────────────────────────────────────
+
+def test_serve_attaches_the_provider_to_the_context(ivyea_home):
+    """serve 必须把主脑挂到 ctx 上，两条入口都要。
+
+    这一行缺失时没有任何报错：三个消费方都是 `getattr(ctx, "provider", None)`
+    拿不到就静默降级 —— 收尾自查门禁空转、`self_critique` 回"自我批判不可用"、
+    `dispatch_subagent` 回"当前环境无可用主脑 provider"。于是同一个能力在终端里
+    好好的，网页端从来没生效过，而且看不出来。
+    """
+    from ivyea_agent import service
+
+    captured: list = []
+    real_messages = service._chat_messages
+
+    def _spy(message, payload, ctx, route=None):
+        captured.append(ctx)
+        return real_messages(message, payload, ctx, route)
+
+    service._chat_messages = _spy
+    try:
+        stream_provider = _EchoProvider()
+        service.chat_stream({"message": "你好", "persist": False, "max_steps": 1},
+                            lambda e, d: None, provider=stream_provider)
+        run_provider = _EchoProvider()
+        service.chat_run({"message": "你好", "persist": False, "max_steps": 1},
+                         provider=run_provider)
+    finally:
+        service._chat_messages = real_messages
+
+    stream_ctx, run_ctx = captured
+    assert stream_ctx.provider is stream_provider
+    assert run_ctx.provider is run_provider
