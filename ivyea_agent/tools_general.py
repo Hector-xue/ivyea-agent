@@ -171,7 +171,16 @@ def t_web_fetch(args: dict, ctx) -> str:
         text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", "", text)
         text = re.sub(r"(?s)<[^>]+>", " ", text)
         text = re.sub(r"[ \t]+", " ", re.sub(r"\n\s*\n+", "\n", text)).strip()
-    return _truncate(text)
+    # 末尾把**这一页的地址**再交给模型一次，并说清楚引用它的写法。
+    # 起因：用户看完一份网页调研的回答说"末尾的引用来源还是不能直接点击跳转"——
+    # 那份来源清单长这样：「ccaf101.com《FDE 薪资：分档与数据》（2026）」，八条里
+    # 一个 URL 都没有。地址一直在模型手上（就在它自己那次 web_fetch 的入参里），
+    # 它只是没写进回答。所以把地址放到**结果这一侧**、紧挨着内容，并直说要 markdown
+    # 链接 —— 屏幕上的来源能不能点，取决于回答里有没有这个链接。
+    return _truncate(text) + (
+        f"\n\n[来源] {url}\n"
+        "（回答里引用这一页时，把来源写成可点击的 markdown 链接 "
+        f"`[网站或文章名]({url})`，不要只写站名。）")
 
 
 def _search_results(q: str, limit: int = 8) -> list[tuple[str, str]]:
@@ -208,8 +217,12 @@ def t_web_search(args: dict, ctx) -> str:
         rows = _search_results(q, 8)
     except Exception as e:  # noqa: BLE001
         return f"搜索失败（尽力而为）：{e}"
+    if not rows:
+        return "（无结果，或搜索源受限）"
     out = [f"  · {title}\n    {href}" for title, href in rows]
-    return "\n".join(out) if out else "（无结果，或搜索源受限）"
+    # 同 web_fetch 末尾那句：来源要能点。搜索结果本来就带 URL，缺的只是"写进回答"。
+    out.append("（引用其中任何一条时，在回答里写成可点击的 markdown 链接 `[标题](URL)`。）")
+    return "\n".join(out)
 
 
 # ── 配图（og:image）─────────────────────────────────────────────────────────
