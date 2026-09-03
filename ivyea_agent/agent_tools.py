@@ -92,6 +92,18 @@ class ToolContext:
     # 此前正是因为没人知道降级发生过，Listing 的图片分析静默空转了很久。
     vision_tier: dict[str, Any] = field(default_factory=dict)
     vision_notes: list[str] = field(default_factory=list)
+    # ── 目标模式 ────────────────────────────────────────────────────────────
+    # 「一句话交出去，达成之前不停」。开关本身在这里，验收标准落在 goal_store
+    # （跨上下文压缩不丢），判定由 agent_loop._goal_gate_feedback 做 —— 三样东西
+    # 都在运行时手上，模型改不了自己的及格线。
+    goal_mode: bool = False
+    goal_query: str = ""                                       # 立约时用的那句指令（换指令要重新立约）
+    goal_state: dict[str, Any] = field(default_factory=dict)   # 给界面的确定性投影（goal_store.public_state）
+    # 交给验收员看的证据。**必须带命令原文和输出**：`progress_tool_evidence` 每条只留
+    # 结果的第一行，而 run_command 的第一行恰好是「[退出码 0]」—— 验收员因此看不到
+    # 跑的是哪条命令、输出是什么，只能一遍遍判"只有声称、无证据"（真机冒烟实测，
+    # 连判三轮相同后撞上无进展熔断）。判定的上限是证据通道的上限。
+    goal_evidence: list[str] = field(default_factory=list)
 
 
 # OpenAI function-calling schema

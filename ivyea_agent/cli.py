@@ -1641,6 +1641,7 @@ SLASH_COMMANDS = [
     ("/reflect", "把最近的零散经历提炼成分类记忆（会话结束也会自动跑）"),
     ("/profile", "查看/配置运营画像（目标 ACoS/保护词/核心词）"),
     ("/plan", "进入/退出计划模式（只读，不写入）；/plan show 看当前计划"),
+    ("/goal", "进入/退出目标模式（拆成验收标准，达成前不停）；/goal show 看当前目标"),
     ("/resume", "接着上一轮没做完的继续（计划 + 已有证据一起带上）"),
     ("/approve", "批准并退出计划模式，继续执行"),
     ("/cost", "本会话 token 用量与成本估算"),
@@ -1660,7 +1661,7 @@ SLASH_COMMANDS = [
 _SLASH_GROUPS = [
     ("模型 / 配置", ["/model", "/config", "/status", "/mcp"]),
     ("代码 / 工程", ["/diff", "/workspace", "/patch", "/gitops", "/tools"]),
-    ("会话控制", ["/plan", "/approve", "/resume", "/auto-edit", "/raw", "/stream", "/compact", "/cost", "/clear"]),
+    ("会话控制", ["/plan", "/goal", "/approve", "/resume", "/auto-edit", "/raw", "/stream", "/compact", "/cost", "/clear"]),
     ("知识 / 记忆", ["/knowledge", "/skill", "/learn", "/memory", "/reflect", "/init"]),
     ("系统", ["/help", "/exit"]),
 ]
@@ -1756,6 +1757,40 @@ def _plan_mode_intent(line: str) -> str | None:
     return None
 
 
+_GOAL_ENTER_PHRASES = {"进入目标模式", "开启目标模式", "打开目标模式", "开始目标模式",
+                       "目标模式", "goal mode", "enter goal mode"}
+_GOAL_EXIT_PHRASES = {"退出目标模式", "关闭目标模式", "结束目标模式", "停止目标模式",
+                      "退出目标", "exit goal mode"}
+#: 「一句话进模式并直接开跑」的前缀。必须带分隔符或"用/以"这类介词 ——
+#: 光凭"目标模式"三个字开头就切模式的话，「目标模式是怎么实现的」会被当成命令。
+_GOAL_PREFIXES = ("目标模式：", "目标模式:", "目标模式，", "目标模式,",
+                  "用目标模式", "以目标模式", "按目标模式", "goal mode:", "goal mode：")
+
+
+def _goal_mode_intent(line: str) -> str | None:
+    """整行精确匹配 → 'enter'/'exit'/None（与 `_plan_mode_intent` 同一套判据）。"""
+    s = line.strip().strip("。.!！?？：:，, 　").lower()
+    if s in _GOAL_ENTER_PHRASES:
+        return "enter"
+    if s in _GOAL_EXIT_PHRASES:
+        return "exit"
+    return None
+
+
+def _goal_mode_prompt(line: str) -> str:
+    """「目标模式：把 X 修好」→ 返回 "把 X 修好"（同时意味着要进目标模式）。
+
+    没命中前缀、或者前缀后面什么都没有，一律返回空串 —— 空指令进模式没有意义，
+    那种情况交给 `_goal_mode_intent` 当成纯粹的切模式。
+    """
+    text = (line or "").strip()
+    low = text.lower()
+    for pre in _GOAL_PREFIXES:
+        if low.startswith(pre.lower()):
+            return text[len(pre):].strip(" ：:，,、")
+    return ""
+
+
 def _welcome_box_str(lines: list, width: int = 58) -> str:
     """Claude Code 风格圆角欢迎框（按显示宽度对齐中英文混排），返回字符串。"""
     try:
@@ -1838,6 +1873,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         task_id=getattr(args, "task_id", "") or "")
     if getattr(args, "asin", None):
         ctx.asin = args.asin
+    # `--goal`：非交互（-p / cron）也能进目标模式 —— 自然语言入口在终端里好用，
+    # 但脚本调用方打不了那句话，缺了这个开关就等于"只有人能用"。
+    if getattr(args, "goal", False):
+        ctx.goal_mode = True
     # 终端里的「拿不准就弹选项」通道：tty 上是个菜单；管道/非交互（-p、cron）里
     # 直接回 None，由 ask.resolve 立刻按推荐项继续 —— 决不在没人看的终端上干等。
     ctx.ask_fn = _ask_mod.TerminalAsk().ask
@@ -1864,6 +1903,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         content = agent_loop.SYSTEM_PROMPT + agent_loop.runtime_context_note()
         if ctx.plan_mode:
             content += agent_loop.PLAN_NOTE
+        if ctx.goal_mode:
+            content += agent_loop.GOAL_NOTE
         if profile_context:
             content += "\n\n" + profile_context
         if instructions:
@@ -2014,10 +2055,11 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
     def _status() -> str:
         plan = "计划模式 · " if ctx.plan_mode else ""
+        goal = "◎目标模式 · " if ctx.goal_mode else ""
         auto = "⚡自动放行 · " if ctx.perm.accept_edits else ""
         cost = f"¥{meter.cost:.4f} · " if meter.turns else ""
         turns = f"{meter.turns} 轮 · " if meter.turns else ""
-        return (f" ivyea · {_label()} · {plan}{auto}"
+        return (f" ivyea · {_label()} · {goal}{plan}{auto}"
                 f"{'真实写' if args.execute else 'dry-run'} · {turns}{_ctx_bar()}{cost}shift+tab 切模式 ")
 
     def _cycle_mode() -> str:
@@ -2033,6 +2075,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         return label
 
     def _mode_label() -> str:      # 输入框上边线右端显示的当前模式（对标 Claude）
+        # 目标模式排在最前：它决定的是"这一轮什么时候才算完"，比"能不能写"更靠上。
+        if ctx.goal_mode:
+            return "◎ 目标模式"
         if ctx.plan_mode:
             return "⏸ 计划模式"
         if ctx.perm.accept_edits:
@@ -2073,6 +2118,49 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         if (line or "").split()[1:2] == ["show"]:
             return _sh_plan_show(line)
         _set_plan_mode(not ctx.plan_mode); return True
+
+    def _set_goal_mode_msg(on: bool) -> str:
+        """进/出目标模式并返回提示消息（不打印）。/goal、自然语言、TUI 共用。"""
+        if on == ctx.goal_mode:
+            return ui.message("info", "已在目标模式。" if on else "当前不在目标模式。")
+        ctx.goal_mode = on
+        messages[0] = _sys_msg()
+        if on:
+            return ui.message(
+                "info",
+                "已进入目标模式：下一句指令我会先拆成可验收的标准，然后一直干到全部达成为止"
+                "（自己测、自己修、再自己测）。中途随时可以打断，或说“退出目标模式”。\n"
+                "  写操作仍按当前审批设置走 —— 想让我无人值守跑完，先 /auto-edit on。")
+        # 退出 = 用户不再要这个目标了。台账里那份标记成停止，免得下次误当成"还欠着的活"。
+        from . import goal_store as _gs
+        _gs.stop(sid or "", "用户退出目标模式。")
+        return ui.message("success", "已退出目标模式，回到普通轮次。")
+
+    def _set_goal_mode(on: bool) -> None:
+        print(_set_goal_mode_msg(on))
+
+    def _sh_goal(line):
+        sub = ((line or "").split()[1:2] or [""])[0].lower()
+        if sub == "show":
+            from . import goal_store as _gs
+            print(_gs.render_human(sid or "")); return True
+        if sub in ("off", "stop", "exit"):
+            _set_goal_mode(False); return True
+        if sub == "on":
+            _set_goal_mode(True); return True
+        _set_goal_mode(not ctx.goal_mode); return True
+
+    def _goal_line(line: str, say=print) -> str:
+        """「目标模式：把 X 修好」这类一句话入口：开模式 + 把真正的指令留下来。
+
+        三条输入路径（TUI / 行式循环 / -p 一次性）都要过这一道，所以收在这里 ——
+        此前 `plan_intent` 各写一份的教训就在隔壁。"""
+        goal_text = _goal_mode_prompt(line)
+        if not goal_text:
+            return line
+        if not ctx.goal_mode:
+            say(_set_goal_mode_msg(True))
+        return goal_text
 
     def _approve_plan_note() -> str:
         """给当前会话的计划盖批准戳，返回一句可以直接接在提示后面的说明。"""
@@ -2370,7 +2458,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
     _SLASH_HANDLERS = {
         "/help": _sh_help, "/": _sh_help, "/?": _sh_help, "/profile": _sh_profile,
-        "/clear": _sh_clear, "/plan": _sh_plan, "/approve": _sh_approve, "/cost": _sh_cost,
+        "/clear": _sh_clear, "/plan": _sh_plan, "/goal": _sh_goal, "/approve": _sh_approve, "/cost": _sh_cost,
         "/raw": _sh_raw, "/stream": _sh_stream, "/auto-edit": _sh_auto_edit, "/compact": _sh_compact,
         "/diff": _sh_diff, "/init": _sh_init, "/mcp": _sh_mcp, "/knowledge": _sh_knowledge,
         "/skill": _sh_skill, "/tools": _sh_tools, "/memory": _sh_memory, "/reflect": _sh_reflect,
@@ -2386,6 +2474,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         cancel_check：运行中请求中断的钩子（TUI 用）。emit(event)：stream-json 结构化事件回调。
         返回 {text, usage, cost, blocked}。"""
         nonlocal messages
+        line = _goal_line(line, narrate)   # 「目标模式：…」一句话进模式并开跑
         api_key = cfg.get_active_key()
         cms = cfg.load_settings()
         if (cms.get("kind") in ("native", "oauth", "login")
@@ -2569,6 +2658,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             return _chat_tui.run(_status, SLASH_COMMANDS, turn_fn=_execute_turn,
                                  render_markdown=markdown.render,
                                  plan_intent_fn=_plan_mode_intent,
+                                 goal_intent_fn=_goal_mode_intent,
+                                 set_goal_mode=_set_goal_mode_msg,
                                  set_plan_mode=_set_plan_mode_msg,
                                  cycle_mode=_cycle_mode, mode_label_fn=_mode_label,
                                  slash_handlers=_SLASH_HANDLERS, scrollback=_live_on, intro=_intro)
@@ -2628,6 +2719,10 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             _pi = _plan_mode_intent(line)   # 自然语言进/出计划模式（整行精确匹配，不进模型轮）
             if _pi is not None:
                 _set_plan_mode(_pi == "enter"); continue
+            _gi = _goal_mode_intent(line)   # 同上：自然语言进/出目标模式
+            if _gi is not None:
+                _set_goal_mode(_gi == "enter"); continue
+            line = _goal_line(line)         # 「目标模式：…」一句话进模式并开跑
 
             # 自然语言 → Agent 循环
             api_key = cfg.get_active_key()
@@ -4959,6 +5054,9 @@ def build_parser() -> argparse.ArgumentParser:
                      choices=["default", "policy", "approve-all"], default="default",
                      help="-p 无人值守审批档位：default=写工具即终止（现状）；policy=按 ~/.ivyea/policy.json "
                           "的 allow/deny 自动判定（单工具拒绝不终止整轮）；approve-all=全放行")
+    pch.add_argument("--goal", action="store_true",
+                     help="目标模式：先把指令拆成可验收的标准，然后自测自修循环到全部达成才停"
+                          "（配合 -p 无人值守时建议同时给 --approve-all 和 config set chat_max_cost_cny）")
     pch.add_argument("--progress", action="store_true",
                      help="-p 模式下把步骤进度(工具调用/阶段/todo)打到 stderr（stdout 仍只放最终结果；"
                           "默认关，因部分调用方会把 stderr 并入 stdout）")

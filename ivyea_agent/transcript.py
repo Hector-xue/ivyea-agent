@@ -26,6 +26,7 @@ CITATION_GATE = "[知识引用门禁]"        # agent_loop._citation_gate_feedba
 COMPLETION_GATE = "[完成门禁]"          # agent_loop._verify_gate_feedback（行为类改动）
 PROGRESS_GATE = "[汇报门禁]"            # progress_reporting.completion_feedback
 CRITIQUE_GATE = "[收尾自查]"            # agent_loop._critique_gate_feedback
+GOAL_GATE = "[目标验收]"                # agent_loop._goal_gate_feedback（目标模式）
 VERIFY_GATE = "⚠ 完成前自验证发现问题"   # verify.gate 的反馈首行
 COMPACT_SUMMARY = "[此前对话摘要，请据此继续]"   # context.compact 压缩后的摘要
 
@@ -34,6 +35,7 @@ _USER_MARKERS: tuple[str, ...] = (
     COMPLETION_GATE,
     PROGRESS_GATE,
     CRITIQUE_GATE,
+    GOAL_GATE,
     VERIFY_GATE,
     COMPACT_SUMMARY,
 )

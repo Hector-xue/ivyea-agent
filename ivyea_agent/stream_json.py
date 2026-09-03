@@ -156,6 +156,17 @@ def skill_match_event(session_id: str, skills: list) -> dict:
     return {"type": "skill_match", "session_id": session_id, "skills": list(skills or [])}
 
 
+def goal_event(session_id: str, phase: str, state: dict, note: str = "") -> dict:
+    """目标模式的进度事件：契约立好了、验收判定完了、或者停了。
+
+    phase: start（立约）| judged（一次验收判定）| achieved（全部达成）| stopped（收摊）。
+    state 是 `goal_store.public_state` 的投影 —— **界面读它自己画进度，不要去解析正文**。
+    此前 todo/阶段汇报都栽在"指望模型在回答里顺口提一句"，这里不再犯。
+    """
+    return {"type": "goal", "session_id": session_id, "phase": str(phase),
+            "note": str(note or ""), "goal": dict(state or {})}
+
+
 def result_event(session_id: str, text: str, usage: dict, cost_cny: float,
                  duration_ms: int, num_turns: int = 1, is_error: bool = False) -> dict:
     """收尾事件：最终答案 + 用量/花费汇总。is_error 覆盖 blocked/异常收尾。"""
