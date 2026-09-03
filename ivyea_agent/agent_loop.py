@@ -300,6 +300,58 @@ def _append_tool_call_msg(messages: list, content, tool_calls: list) -> None:
     })
 
 
+# ── 边干边说：连着只干活不吭声时，要一句阶段汇报 ──────────────────────────
+#
+# 模型连跑几十步一句话不说是一种真实的失败模式：实测 glm-5.3-flash 回答"介绍 FDE
+# 这个岗位 + 国内各城市薪资"时连跑 30 步（20 次抓网页、6 分钟），**中间一个字都
+# 没有**，用户盯着一列滚动的工具名等到最后。用户原话："30 步执行，中间就没有一点
+# 思考汇报吗？就一个劲的干活？"
+#
+# 这不是界面能补的。那一轮的会话存档里，25 条 assistant 消息的 content **全是空**
+# —— 界面只能画它收到的东西，没发生的话画不出来。所以要在**模型这一侧**要这句话。
+#
+# 做法沿用本文件已有的护栏惯例（见 _observe_tool_discipline 的 `[执行护栏]`）：把
+# 要求追加在**最后一条工具结果**的末尾。这条路不额外发一次模型请求 —— 模型下一步
+# 本来就要读这批结果，顺手就把话说了；多数模型会在同一步里既说话又接着调工具，
+# 一步都不多花，最坏也只是多花一步说话。
+#
+# 阈值不设成 1、2：那会把"读个文件就回答"的普通对话也变成流水账。汇报是给长任务
+# 用的，短任务里最好的汇报就是直接把答案给出来。
+_SILENT_STEPS_BEFORE_NUDGE = 4
+
+_NARRATION_MARKER = "[阶段汇报]"
+_NARRATION_NOTE = (
+    f"{_NARRATION_MARKER} 你已经连着 {_SILENT_STEPS_BEFORE_NUDGE} 步只调工具、"
+    "没跟用户说过一句话。下一步**先用一两句话**说清楚：目前查到/做完了什么、"
+    "还缺什么、接下来这一步要干什么，然后照常继续调用工具。"
+    "只说这一段的新进展 —— 别重复前面已经说过的内容，也别在这里写最终答案。"
+)
+
+
+def _nudge_progress_narration(ctx: ToolContext, messages: list, silent_steps: int) -> bool:
+    """连着 `_SILENT_STEPS_BEFORE_NUDGE` 步没说话时，向模型要一句阶段汇报。
+
+    返回是否真的追加了（追加了就把计数清零，否则下一步会一直重复要）。
+    `progress_required` 的轮次跳过：那种任务已经有一整套强制的汇报生命周期
+    （todo_write / progress_update，见 progress_reporting），再插一句是两套话。
+    """
+    if silent_steps < _SILENT_STEPS_BEFORE_NUDGE:
+        return False
+    if getattr(ctx, "progress_required", False):
+        return False
+    for msg in reversed(messages):
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str):
+            return False
+        if _NARRATION_MARKER in content:      # 这一批结果已经带过话了，别叠第二遍
+            return False
+        msg["content"] = content + "\n\n" + _NARRATION_NOTE
+        return True
+    return False
+
+
 def _emit_safe(emit: Callable[[dict], None] | None, ev: dict) -> None:
     """结构化事件回调（stream-json 等）：best-effort，消费端断管/异常不打断主循环。"""
     if emit is None:
@@ -827,6 +879,7 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
     status = TurnStatus(max_steps=max_steps, budget=turn_budget,
                         behavioral_task=bool(getattr(ctx, "behavioral_task", False)))
     guard = _new_loop_guard()
+    silent_steps = 0                 # 连着多少步只干活没说话（见 _nudge_progress_narration）
     _ceiling = _hard_step_ceiling(max_steps)
     for step_idx in range(_ceiling):
         if turn_budget.exhausted():
@@ -859,6 +912,9 @@ def run_turn(provider: LLMProvider, ctx: ToolContext, messages: list,
         _append_tool_call_msg(messages, msg.get("content"), tool_calls)
         _dispatch_tool_calls(ctx, messages, status, tool_calls, step_idx, max_steps, narrate,
                              guard=guard)
+        silent_steps = 0 if str(msg.get("content") or "").strip() else silent_steps + 1
+        if _nudge_progress_narration(ctx, messages, silent_steps):
+            silent_steps = 0
     return _finalize_limit(ctx, messages, status, max_steps)
 
 
@@ -984,6 +1040,7 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
     status = TurnStatus(max_steps=max_steps, budget=turn_budget,
                         behavioral_task=bool(getattr(ctx, "behavioral_task", False)))
     guard = _new_loop_guard()
+    silent_steps = 0                 # 连着多少步只干活没说话（见 _nudge_progress_narration）
     _ceiling = _hard_step_ceiling(max_steps)
     for step_idx in range(_ceiling):
         _drain_injections(messages, inject_check, on_inject, narrate, guard)
@@ -1081,5 +1138,10 @@ def run_turn_stream(provider: LLMProvider, ctx: ToolContext, messages: list,
         _append_tool_call_msg(messages, final.get("content"), tool_calls)
         _dispatch_tool_calls(ctx, messages, status, tool_calls, step_idx, max_steps, narrate,
                              emit=emit, guard=guard)
+        # 这一步到底说没说话，看模型这一步的正文 —— 不看 printed_any：带引证的轮次
+        # 正文是压到最后一次性输出的（defer_text），那种"说了但没渲染"不算沉默。
+        silent_steps = 0 if str(final.get("content") or "").strip() else silent_steps + 1
+        if _nudge_progress_narration(ctx, messages, silent_steps):
+            silent_steps = 0
     text = _finalize_limit(ctx, messages, status, max_steps, extra_payload={"usage": total_usage})
     return {"text": text, "usage": total_usage}
