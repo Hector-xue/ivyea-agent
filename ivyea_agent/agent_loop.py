@@ -1037,9 +1037,11 @@ def _goal_gate_feedback(ctx: ToolContext, status: TurnStatus, content: str,
     goal = goal_store.load(ctx.session_id)
     if not goal or not (goal.get("criteria") or []) or goal.get("status") != "active":
         return None
-    # provider 由调用方直接传进来，**不走 `ctx.provider`** —— serve 那条路根本没给
-    # ctx 挂 provider（`_critique_gate_feedback` 因此在 IvyeaOps 侧一直是空转的）。
-    # 目标模式两个入口都必须真验收，不能重蹈这个覆辙。
+    # provider 由调用方直接传进来，`ctx.provider` 只兜底。
+    #
+    # 这不是多余的谨慎：v1.16.8 之前 serve 压根没给 ctx 挂 provider，只认 ctx 的
+    # `_critique_gate_feedback` 因此在 IvyeaOps 侧一直静默空转（同版本已修）。
+    # 验收是这个模式的全部意义，它不能取决于"某条入口有没有记得挂那一行"。
     provider = provider if provider is not None else getattr(ctx, "provider", None)
     if provider is None:
         return None

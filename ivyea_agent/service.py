@@ -1683,6 +1683,13 @@ def chat_run(payload: dict[str, Any], provider: Any | None = None) -> dict[str, 
 
     try:
         provider = provider or build_chain(model_cfg, api_key, narrate=narrate)
+        # 主脑挂到 ctx 上。**这一行缺了三年**，代价是三样东西在 IvyeaOps 侧
+        # 悄悄失效：收尾自查门禁（`agent_loop._critique_gate_feedback`）一律空转、
+        # `self_critique` 工具回一句"自我批判不可用"、`dispatch_subagent` 直接回
+        # "当前环境无可用主脑 provider，无法派子 agent"。三处都是 `getattr(ctx,
+        # "provider", None)` 拿不到就静默降级 —— 没有报错、没有事件，终端里跑得
+        # 好好的同一个能力，网页端从来没生效过。
+        ctx.provider = provider
         text = agent_loop.run_turn(provider, ctx, messages, max_steps=(_int(payload.get("max_steps"), 0) or None),
                                    narrate=narrate, tools=_tools_for(payload))
     except LLMError as exc:
@@ -1797,7 +1804,7 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
         workspace=str(payload.get("workspace") or ""),
         task_id=str(payload.get("task_id") or ""),
     )
-    # 目标模式（agent ≥ v1.17）：把这一句拆成可验收的标准，达成之前不收尾。
+    # 目标模式（agent ≥ v1.16.8）：把这一句拆成可验收的标准，达成之前不收尾。
     # **计划模式下不生效**：只读档里写不了任何东西，目标自然也达不成，开了它只会
     # 让模型在门禁前反复空转。老调用方不传这个字段 → 行为逐字不变。
     ctx.goal_mode = bool(payload.get("goal_mode")) and not bool(plan_mode)
@@ -2064,6 +2071,13 @@ def _chat_stream(payload: dict[str, Any], send_to_client: Any, provider: Any | N
         # 而不是怀疑本地卡住了。
         stage("model", "等待模型响应")
         provider = provider or build_chain(model_cfg, api_key, narrate=narrate)
+        # 主脑挂到 ctx 上。**这一行缺了三年**，代价是三样东西在 IvyeaOps 侧
+        # 悄悄失效：收尾自查门禁（`agent_loop._critique_gate_feedback`）一律空转、
+        # `self_critique` 工具回一句"自我批判不可用"、`dispatch_subagent` 直接回
+        # "当前环境无可用主脑 provider，无法派子 agent"。三处都是 `getattr(ctx,
+        # "provider", None)` 拿不到就静默降级 —— 没有报错、没有事件，终端里跑得
+        # 好好的同一个能力，网页端从来没生效过。
+        ctx.provider = provider
         out = agent_loop.run_turn_stream(
             provider,
             ctx,
