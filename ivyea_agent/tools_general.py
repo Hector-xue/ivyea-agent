@@ -972,6 +972,62 @@ def _spill_output(ctx, out: str) -> str:
         return ""
 
 
+# 扫描命令产物时跳过的目录。不跳的话，一次 `npm install` 就能把事件流灌爆，
+# 而那几万个文件里没有一个是用户要的"任务产物"。
+_SCAN_SKIP_DIRS = {
+    ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build", ".next",
+    "target", ".cache", ".idea", ".vscode", "site-packages", ".tox", "coverage",
+}
+
+# 扫描的硬上限。工作区可能是个几十万文件的仓库，扫穿它比命令本身还慢。
+_SCAN_MAX_FILES = 4000
+_SCAN_MAX_DEPTH = 5
+
+
+def _scan_command_outputs(ctx, workdir: str, since: float) -> None:
+    """把命令**写出来的文件**记成文件变更。
+
+    存在的理由：``file_change`` 事件原本只有 write_file / edit_file 会发。可是真实
+    任务里，报表和图表大多是 `run_python` 跑脚本、`run_command` 跑命令写出来的 ——
+    那些产物一条都没被记上，界面上的「文件」那格于是永远是空的，功能等于不存在。
+
+    判据是 mtime 晚于命令开始的时间。没有 diff（拿不到改之前的内容），所以 action
+    记 ``write``：不知道是新建还是覆盖就别猜，UI 上照实说"写出"。
+    """
+    changes = getattr(ctx, "file_changes", None)
+    if changes is None or len(changes) >= _MAX_FILE_CHANGES:
+        return
+    root = Path(workdir)
+    if not root.is_dir():
+        return
+    seen = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            rel_depth = len(Path(dirpath).relative_to(root).parts)
+            if rel_depth >= _SCAN_MAX_DEPTH:
+                dirnames[:] = []
+            # 原地改 dirnames 才能真的不下钻（os.walk 的约定）
+            dirnames[:] = [d for d in dirnames
+                           if d not in _SCAN_SKIP_DIRS and not d.startswith(".")]
+            for fname in filenames:
+                seen += 1
+                if seen > _SCAN_MAX_FILES:
+                    return
+                fpath = Path(dirpath) / fname
+                try:
+                    if fpath.stat().st_mtime < since:
+                        continue
+                except OSError:
+                    continue
+                changes.append({"path": str(fpath), "action": "write",
+                                "scope": "file", "diff": ""})
+                if len(changes) >= _MAX_FILE_CHANGES:
+                    return
+    except Exception:  # noqa: BLE001 — 扫描失败绝不能影响命令本身的结果
+        return
+
+
 def _run(cmd, args, ctx, kind: str, preview: str, *, auto_ok: bool = False,
          detail: dict | None = None) -> str:
     if not auto_ok:   # 只读命令(auto_ok)免审批，也可在计划模式下跑（本就只读）
@@ -980,6 +1036,9 @@ def _run(cmd, args, ctx, kind: str, preview: str, *, auto_ok: bool = False,
             return msg
     workdir = getattr(ctx, "workspace", "") or os.getcwd()
     timeout = int(args.get("timeout") or _EXEC_TIMEOUT)
+    # 减 1 秒：文件系统的 mtime 粒度和这里取的时间可能差一点，卡太紧会漏掉
+    # 命令一开始就写出来的那个文件。宁可多扫一个也别漏。
+    started = time.time() - 1.0
     try:
         proc = subprocess.run(cmd, cwd=workdir, timeout=timeout,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -989,6 +1048,7 @@ def _run(cmd, args, ctx, kind: str, preview: str, *, auto_ok: bool = False,
         return f"超时（>{timeout}s）已终止。"
     except Exception as e:  # noqa: BLE001
         return f"执行失败：{e}"
+    _scan_command_outputs(ctx, workdir, started)
     out = proc.stdout or ""
     head = f"[退出码 {proc.returncode}]\n"
     if not out:
