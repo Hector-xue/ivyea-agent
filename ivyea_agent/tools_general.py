@@ -1052,6 +1052,13 @@ def _run(cmd, args, ctx, kind: str, preview: str, *, auto_ok: bool = False,
     out = proc.stdout or ""
     head = f"[退出码 {proc.returncode}]\n"
     if not out:
+        # **别只说"（无输出）"**。用户实测里，一段成功写了文件的 Python 脚本因为
+        # 自己没 print，模型看到这三个字就断定"沙箱不通、复制根本没执行"，放弃了
+        # 一条本来可行的路，改去和 PowerShell 的引号转义死磕，白烧掉好几轮。
+        # 退出码 0 就是成功，把这件事说清楚，别让模型自己脑补失败。
+        if proc.returncode == 0:
+            return (head + "（执行成功，但没有任何标准输出 —— 通常是脚本本身没有 print/echo，"
+                           "不是执行失败。要确认结果就再读一次文件或目录。）")
         return head + "（无输出）"
     body = _truncate(out)
     if len(out) > _MAX_OUT:   # 被截断：全量落盘，模型可 read_file 续读剩余部分

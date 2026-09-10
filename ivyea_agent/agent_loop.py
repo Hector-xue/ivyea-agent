@@ -6,6 +6,7 @@ provider.chat(messages, tools) → 若有 tool_calls 则逐个派发(写工具�
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -17,7 +18,8 @@ from typing import Callable
 from . import (budget as budget_mod, config, context, evidence_ledger, goal_mode as goal_mod,
                goal_store, knowledge, loop_guard, panels, plan_store, progress_reporting,
                stream_json, task_scope, thinking, traces, transcript, ui)
-from .agent_tools import PARALLEL_SAFE, TOOL_SCHEMAS, ToolContext, ToolResult, dispatch_result
+from .agent_tools import (PARALLEL_SAFE, READONLY_TOOLS, TOOL_SCHEMAS, ToolContext,
+                          ToolResult, dispatch_result)
 from .providers import LLMProvider
 
 SYSTEM_PROMPT = """你是 Ivyea Agent：既是资深亚马逊运营专家，也是合格的编码/工程助手——两类任务都是你的一等本职。按用户当前需求自然切换：运营就按运营流程走，写代码就按工程流程走。
@@ -70,6 +72,36 @@ def runtime_context_note(now: datetime | None = None) -> str:
         "凡涉及\"今天/现在/最近/最新/本周/今年\"等相对时间，一律以此为准；"
         "不要凭记忆假设年份。web_search/web_fetch 抓到的网页可能是旧闻，"
         "务必对照此日期核对时效，发现结果不在目标时间范围内时，应调整查询重搜或明确告知用户。"
+        + platform_note()
+    )
+
+
+def platform_note() -> str:
+    """把"你跑在什么系统上、run_command 用的是哪个 shell"直接告诉模型。
+
+    **为什么必须写进提示词**：这一段原来只有日期。模型于是按 Linux 习惯上手，在
+    Windows 上连着撞 `/tmp` 不存在、`find` 被 find.exe 接管、`&&` 和 `~` 被 cmd 改写
+    —— 一次"下载几个文件"的任务里光试错就烧掉十来次调用。这些是**确定的事实**，
+    查一次 `os.name` 就有，没有任何理由让模型用工具调用去试出来。
+    """
+    import platform as _platform
+    import shutil
+
+    system = _platform.system() or os.name
+    if os.name == "nt":
+        return (
+            f"\n[运行环境] 操作系统：{system} {_platform.release()}。"
+            "run_command 执行的是 `cmd /c <命令>`，**不是 bash**："
+            "没有 /tmp（临时目录用 %TEMP%），`~` 不会展开成主目录；"
+            "`find`/`sort`/`more` 是 Windows 同名程序而不是 GNU 工具；"
+            "`&&`、`;`、`*` 通配符和引号的行为都和 bash 不同。"
+            "**别靠试错摸边界**：一条短命令搞不定就直接用 write_file 写个 .py 或 .ps1 "
+            "脚本再执行，那条路稳定得多。路径用反斜杠或让 Python 处理。"
+        )
+    shell = shutil.which("bash") or "/bin/sh"
+    return (
+        f"\n[运行环境] 操作系统：{system} {_platform.release()}。"
+        f"run_command 执行的是 `{shell} -lc <命令>`，路径分隔符是 /，临时目录 /tmp 可用。"
     )
 
 # 单轮工具调用预算。设得高，让 agent 像 Claude Code / Codex 那样一口气把任务做完，
@@ -404,13 +436,30 @@ def _guard_tool_call(ctx: ToolContext, tc: dict,
                                      "请把计划完整讲清楚，等用户 /approve 之后再执行写操作。")
     if getattr(ctx, "scope_ambiguous", False) and name in (_NAVIGATION_TOOLS | _PROJECT_MUTATION_TOOLS):
         return ToolResult(False, "已拦截：当前任务同时指向多个项目，目标尚未锁定。请先向用户确认要修改哪个项目。")
-    if getattr(ctx, "progress_required", False) and progress_reporting.is_substantive_tool(name):
+    if (getattr(ctx, "progress_required", False)
+            and progress_reporting.is_substantive_tool(name)
+            and name not in READONLY_TOOLS):
+        # **只读工具不拦**：原来连 read_file / list_dir / grep 都要等汇报闭环开完才
+        # 放行，于是计划只能靠猜着写 —— 而"先看一眼再定计划"本来就是更好的做法。
+        # 拦的是真会改动状态、花时间的那些。
+        missing = []
         if not getattr(ctx, "todos", []):
-            return ToolResult(False, "已拦截：复杂/多步任务实际执行前必须先用 todo_write 列出阶段计划。")
+            missing.append("① todo_write 列出阶段计划")
         if not getattr(ctx, "progress_started", False):
-            return ToolResult(False, "已拦截：请先 progress_update(kind='start')，向用户说明目标、范围、阶段和完成标准。")
+            missing.append("② progress_update(kind='start') 说明目标、范围、阶段和完成标准")
         if not int(getattr(ctx, "progress_active_phase", 0) or 0):
-            return ToolResult(False, "已拦截：当前没有已汇报开始的阶段。先将下一 Todo 标为 in_progress，再 progress_update(kind='phase_start')。")
+            missing.append("③ 把下一条 Todo 标为 in_progress，再 progress_update(kind='phase_start')")
+        if missing:
+            # **一次说完，不要拦三遍**。这三道原来是三个独立的 return，模型每补一步
+            # 就被下一道拦一次，一个任务光在这上面就烧掉三轮"思考+调用+被拒+重试"。
+            # 同一条 assistant 消息里的多个 tool_calls 是顺序执行的，所以把缺的几步
+            # 一并说清，它可以一轮补完。
+            return ToolResult(False,
+                              "已拦截：这是被判为多步任务的轮次，实际动手前要先开汇报闭环。"
+                              "还缺：" + "；".join(missing)
+                              + "。可以在同一条消息里连着发这几个调用，然后再执行 "
+                              + f"{name}。若这其实是个一步就能做完的小任务，"
+                              "用 todo_write 开**一条** Todo 即可，别拆成多阶段。")
     if name in _NAVIGATION_TOOLS and getattr(ctx, "search_recovery_required", False):
         root = getattr(ctx, "workspace", "") or "."
         return ToolResult(False, f"已拦截重复搜索：上一轮扫描进入死胡同。下一步先 list_dir(path={root!r})核对项目根，再继续搜索。")
