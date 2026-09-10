@@ -108,7 +108,10 @@ def test_guard_rejection_reports_blocked_not_error(tmp_path):
     ctx = ToolContext(workspace=str(tmp_path), progress_required=True, session_id="sid-guard")
     events = []
     status = agent_loop.TurnStatus(max_steps=10)
-    call = {"id": "g1", "name": "read_file", "arguments": {"path": str(tmp_path / "a.py")}}
+    # 用写工具触发：只读工具已经不受汇报门禁管了（先看一眼再定计划本来就更对），
+    # 这条用例要的是"被护栏拦下"这个状态本身，不是拦谁。
+    call = {"id": "g1", "name": "write_file",
+            "arguments": {"path": str(tmp_path / "a.py"), "content": "x"}}
     agent_loop._dispatch_tool_calls(ctx, [], status, [call], 0, 10,
                                     lambda _s: None, emit=events.append)
     steps = [e for e in events if e["type"] == "step"]

@@ -216,3 +216,67 @@ def test_short_command_stays_simple_even_with_skill_injected():
     injected = "测试\n\n[Ivyea Skill：本轮相关可复用流程]\n" + body
     assert len(injected) > 200, "这条用例的前提就是注入块很长"
     assert requires_progress_reporting(injected) is False
+
+
+# ── 意图判定不许把 URL / 路径 / 代码当成用户的话 ─────────────────────────────
+#
+# 真实事故：用户说"把 https://github.com/…/Forward-Deployed-Engineer.git 这里面的
+# .md 文件给我下载下来"。URL 里的 "Deployed" 命中了动作词 deploy，URL 本身又让整句
+# 超过 60 字 —— 两条一凑就被判成"需要全套多阶段汇报的复杂工程"。这个下载任务实测
+# 跑了 14 分钟，十几次工具调用全花在被汇报门禁拦下后补记账上。
+
+def test_repo_url_does_not_make_a_download_a_multi_phase_project():
+    q = ("把https://github.com/xdash/FDE-the-Guidance-Book-of-Forward-Deployed-Engineer.git"
+         "这里面的.md文件给我下载下来")
+    assert task_scope.requires_progress_reporting(q) is False
+
+
+def test_intent_text_strips_url_without_eating_the_sentence():
+    """URL 后面紧跟中文正文（中间没空格）是中文输入的常态，不能连正文一起吞掉。"""
+    q = "把https://example.com/a/b.git这里面的文件下载下来"
+    out = task_scope.intent_text(q)
+    assert "example.com" not in out
+    assert "这里面的文件下载下来" in out
+
+
+def test_intent_text_strips_paths_and_code():
+    assert "deploy" not in task_scope.intent_text(
+        "读一下 /root/app/routers/deploy_test.py").lower()
+    assert "refactor" not in task_scope.intent_text("这段 `refactor(x)` 是干嘛的").lower()
+
+
+def test_paths_inside_a_query_do_not_trigger_the_lifecycle():
+    assert task_scope.requires_progress_reporting(
+        "帮我把 /root/ivyea-ops/server/app/routers/deploy_test.py 这个文件读一下") is False
+
+
+def test_real_multi_step_work_still_triggers_the_lifecycle():
+    """收窄判据不能把真正的多步任务也放过去。"""
+    assert task_scope.requires_progress_reporting(
+        "先把广告数据拉下来，然后分析一下哪些词该否，最后给我一份优化方案") is True
+    assert task_scope.requires_progress_reporting("全面检查一下这个仓库") is True
+    assert task_scope.requires_progress_reporting("修复一下这个 bug 并且跑测试验证") is True
+
+
+def test_a_merely_long_sentence_is_not_a_project():
+    """长度是三条判据里最弱的一条：一句话长不等于是个多阶段工程。
+
+    原来 60 字就够 —— 一句稍微交代清楚点的话就被判成复杂任务。
+    """
+    q = "帮我看一下这个接口为什么偶尔会返回空，我怀疑是缓存那块的问题，你先分析一下原因"
+    assert len(q) < 120
+    assert task_scope.requires_progress_reporting(q) is False
+
+
+def test_platform_note_states_the_shell_and_os():
+    """运行环境提示必须写清系统和 shell —— 这些是查一次就有的确定事实，
+    没有理由让模型用工具调用去试出来（Windows 上实测撞了五六次）。"""
+    from ivyea_agent import agent_loop
+    note = agent_loop.platform_note()
+    assert "[运行环境]" in note and "操作系统" in note
+    assert "run_command" in note
+    import os as _os
+    if _os.name == "nt":
+        assert "cmd /c" in note and "/tmp" in note
+    else:
+        assert "-lc" in note

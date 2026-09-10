@@ -43,19 +43,39 @@ def test_progress_tool_registered():
     assert "progress_update" in names
 
 
-def test_substantive_tool_blocked_until_plan_and_start(tmp_path):
+def test_readonly_tools_are_not_blocked_by_the_reporting_gate(tmp_path):
+    """看一眼不用先写计划。
+
+    原来连 read_file / list_dir / grep 都要等汇报闭环开完才放行 —— 于是计划只能
+    靠猜着写，而"先看一眼再定计划"本来就是更好的做法。
+    """
     ctx = ToolContext(workspace=str(tmp_path), progress_required=True)
     call = {"id": "r", "name": "read_file", "arguments": {"path": str(tmp_path / "a.py")}}
-    blocked, _, _guarded = agent_loop._run_one(call, ctx)
-    assert blocked.ok is False and "todo_write" in blocked.text
+    assert agent_loop._guard_tool_call(ctx, call) is None
+
+
+def test_write_tool_blocked_until_plan_and_start(tmp_path):
+    """真会改动状态的工具才要求先开汇报闭环 —— 而且**一次把缺的几步说完**。
+
+    这三道原来是三个独立的拦截：模型每补一步就被下一道拦一次，一个任务光在这上面
+    就烧掉三轮"思考+调用+被拒+重试"。用户实测到的那个 14 分钟的下载任务里，
+    十几次工具调用全花在这种补记账的往返上。
+    """
+    ctx = ToolContext(workspace=str(tmp_path), progress_required=True)
+    call = {"id": "w", "name": "write_file",
+            "arguments": {"path": str(tmp_path / "a.txt"), "content": "x"}}
+    blocked = agent_loop._guard_tool_call(ctx, call)
+    assert blocked is not None and blocked.ok is False
+    # 一条消息里把三步都点出来，模型可以在同一条 assistant 消息里连着补完
+    assert "todo_write" in blocked.text
+    assert "progress_update" in blocked.text
+    assert "phase_start" in blocked.text
+    # 并且给出退路：判错了的小任务允许只开一条 Todo，别被逼着拆成多阶段
+    assert "一条" in blocked.text
 
     _plan(ctx)
-    blocked, _, _guarded = agent_loop._run_one(call, ctx)
-    assert blocked.ok is False and "progress_update" in blocked.text
-
     assert "开始执行" in _start(ctx)
-    allowed = agent_loop._guard_tool_call(ctx, call)
-    assert allowed is None
+    assert agent_loop._guard_tool_call(ctx, call) is None
 
 
 def test_todo_cannot_finish_without_matching_phase_report():

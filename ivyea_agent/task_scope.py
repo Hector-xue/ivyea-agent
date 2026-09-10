@@ -77,6 +77,33 @@ def _cut_injected(text: str) -> str:
     return body[:cut].strip()
 
 
+# URL 只可能由 ASCII 可打印字符组成。不能写成 `\S+` —— 中文句子里 URL 后面常常
+# 紧跟着正文没有空格（"把 https://…/Forward-Deployed-Engineer.git 这里面的.md下载下来"
+# 里那个 .git 和"这里面"之间就没有），`\S+` 会把后半句一起吞掉。
+_URL_RE = re.compile(r"(?:https?|ftp|git|ssh)://[!-~]+", re.I)
+# 反引号代码、三反引号代码块
+_CODE_RE = re.compile(r"```.*?```|`[^`]*`", re.S)
+# 裸路径：/a/b/c、D:\x\y、./rel/path。至少两段才算，免得把"3/5"这种误伤。
+_PATH_RE = re.compile(r"(?:[A-Za-z]:)?(?:[\\/][\w.\-+@]+){2,}[\\/]?")
+
+
+def intent_text(text: str) -> str:
+    """判"用户想干什么"时该看的那部分文字 —— 剥掉 URL、代码和路径。
+
+    **为什么必须剥**：这里所有的意图判据都是子串匹配。一个仓库地址
+    `github.com/…/Forward-Deployed-Engineer.git` 里的 "deploy" 会命中动作词，
+    而 URL 本身又长，两条一凑就满足了"有动作词且长度≥60"——于是"下载几个 md
+    文件"被判成需要全套多阶段汇报的复杂工程。用户实测：这个任务跑了 14 分钟，
+    其中十几次工具调用全花在被汇报门禁拦下后补记账上。
+
+    仓库名、文件路径、粘进来的代码，都是**素材**，不是用户的意图表达。
+    """
+    cleaned = _URL_RE.sub(" ", text or "")
+    cleaned = _CODE_RE.sub(" ", cleaned)
+    cleaned = _PATH_RE.sub(" ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _clean_query(text: str) -> str:
     return _cut_injected(text)
 
@@ -234,19 +261,28 @@ def _user_said(text: str) -> str:
 
 
 def requires_progress_reporting(text: str) -> bool:
-    """Conservatively identify work that benefits from a reporting lifecycle."""
-    clean = _clean_query(_user_said(text)).lower()
+    """Conservatively identify work that benefits from a reporting lifecycle.
+
+    判据只看**意图正文**：URL、路径、代码块先剥掉（见 intent_text）。
+    """
+    clean = intent_text(_clean_query(_user_said(text))).lower()
     if not clean:
         return False
     if any(term in clean for term in _STRONG_PROGRESS_HINTS):
         return True
     actions = sum(1 for term in _ACTION_PROGRESS_HINTS if term in clean)
     sequence = sum(1 for term in _SEQUENCE_PROGRESS_HINTS if term in clean)
-    return actions >= 2 or (actions >= 1 and sequence >= 2) or (actions >= 1 and len(clean) >= 60)
+    # 长度这一条要保守：它是三条里最弱的信号 —— 一句话长不等于是个多阶段工程，
+    # 而误判的代价很实在（全套汇报闭环会在每个实质工具调用前把它拦下来补记账）。
+    # 原来是 60 字，一句稍微交代清楚点的话就够；提到 120 字，配合上面剥掉 URL，
+    # 才真的对应"一段有前因后果的长需求"。
+    return (actions >= 2
+            or (actions >= 1 and sequence >= 2)
+            or (actions >= 1 and len(clean) >= 120))
 
 
 def _is_continuation(text: str) -> bool:
-    clean = _clean_query(text).strip().lower()
+    clean = intent_text(_clean_query(text)).strip().lower()
     return len(clean) <= 32 and any(term in clean for term in _CONTINUATION_HINTS)
 
 
@@ -256,12 +292,14 @@ def resolve(query: str, base: str | os.PathLike[str], *, messages: list[dict[str
     clean = _clean_query(query)
     lower = clean.lower()
     candidates = _project_candidates(base)
+    # 意图判据一律看剥过的正文；下面的项目名匹配仍然用原文（路径和仓库名正是它要找的）。
+    intent = intent_text(clean).lower()
     result = ScopeResolution(
-        behavioral=any(term in lower for term in _BEHAVIOR_HINTS),
-        visual=any(term in lower for term in _VISUAL_HINTS),
-        relevant=any(term in lower for term in _ENGINEERING_HINTS),
+        behavioral=any(term in intent for term in _BEHAVIOR_HINTS),
+        visual=any(term in intent for term in _VISUAL_HINTS),
+        relevant=any(term in intent for term in _ENGINEERING_HINTS),
         progress_required=requires_progress_reporting(clean),
-        execution_expected=any(term in lower for term in _EXECUTION_EXPECTED_HINTS),
+        execution_expected=any(term in intent for term in _EXECUTION_EXPECTED_HINTS),
         candidates=[str(path) for path in candidates],
     )
     current_matches = _matches(clean, candidates)

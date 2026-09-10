@@ -104,3 +104,26 @@ def test_no_workspace_is_harmless(tmp_path):
     ctx = _Ctx(tmp_path / "does-not-exist")
     tools_general._scan_command_outputs(ctx, str(tmp_path / "nope"), time.time())
     assert ctx.file_changes == []
+
+
+# ── 工具结果不能把模型引到沟里 ───────────────────────────────────────────────
+
+def test_successful_silent_script_is_not_reported_as_nothing_happened(tmp_path):
+    """退出码 0 但没打印，要说清"成功了只是没输出"。
+
+    真实事故：一段成功写了文件的 Python 脚本因为自己没 print，模型看到"（无输出）"
+    就断定"沙箱不通、复制根本没执行"，放弃了一条本来可行的路，改去和 PowerShell 的
+    引号转义死磕，白烧掉好几轮调用。
+    """
+    ctx = _Ctx(tmp_path)
+    out = tools_general.t_run_python({"code": "open('a.txt','w').write('x')"}, ctx)
+    assert "[退出码 0]" in out
+    assert "执行成功" in out and "不是执行失败" in out
+    assert (tmp_path / "a.txt").exists()
+
+
+def test_failing_command_is_not_dressed_up_as_success(tmp_path):
+    ctx = _Ctx(tmp_path)
+    out = _run_cmd(ctx, "exit 3")
+    assert "[退出码 3]" in out
+    assert "执行成功" not in out
