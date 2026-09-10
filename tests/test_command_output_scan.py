@@ -27,7 +27,7 @@ def test_file_written_by_command_is_recorded(tmp_path):
     ctx = _Ctx(tmp_path)
     _run_cmd(ctx, "echo hello > report.md")
     paths = [c["path"] for c in ctx.file_changes]
-    assert str(tmp_path / "report.md") in paths
+    assert any(p.endswith("report.md") for p in paths)
     entry = next(c for c in ctx.file_changes if c["path"].endswith("report.md"))
     # 拿不到改之前的内容，就别猜是新建还是覆盖 —— 照实说"写出"
     assert entry["action"] == "write"
@@ -35,37 +35,50 @@ def test_file_written_by_command_is_recorded(tmp_path):
 
 
 def test_untouched_files_are_not_recorded(tmp_path):
+    import os
+
     old = tmp_path / "old.txt"
     old.write_text("x", encoding="utf-8")
     # 把旧文件的 mtime 推到很久以前，模拟"上一轮留下的文件"
     long_ago = time.time() - 3600
-    import os
     os.utime(old, (long_ago, long_ago))
 
     ctx = _Ctx(tmp_path)
+    # `echo x > f` 在 bash 和 cmd 下行为一致，这条可以真走 shell
     _run_cmd(ctx, "echo new > fresh.txt")
     paths = [c["path"] for c in ctx.file_changes]
-    assert str(tmp_path / "fresh.txt") in paths
+    assert any(p.endswith("fresh.txt") for p in paths)
     assert str(old) not in paths, "没动过的文件不该被记成这一轮的产物"
 
 
+# 下面两条直接调 _scan_command_outputs，不经过 shell。
+# **这本身就是这次要修的那个毛病**：第一版用 `mkdir -p`/`touch`/`for … in $(seq)`
+# 造现场，在 Windows 的 `cmd /c` 下这些命令根本不存在，整条链失败、文件没生成，
+# 断言随之落空 —— CI 的 windows-latest 三个 Python 版本全挂。给"别假设是 Linux"
+# 写的测试自己假设了 Linux。造现场用 pathlib，跨平台才是真的一致。
+
 def test_noise_directories_are_skipped(tmp_path):
     """一次 npm install 能写几万个文件，全记下来等于把事件流灌爆。"""
+    (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
+    (tmp_path / "node_modules" / "pkg" / "index.js").write_text("x", encoding="utf-8")
+    (tmp_path / ".git" / "objects").mkdir(parents=True)
+    (tmp_path / ".git" / "objects" / "abc").write_text("x", encoding="utf-8")
+    (tmp_path / "result.csv").write_text("ok", encoding="utf-8")
+
     ctx = _Ctx(tmp_path)
-    _run_cmd(ctx, "mkdir -p node_modules/pkg .git/objects && "
-                  "touch node_modules/pkg/index.js .git/objects/abc && "
-                  "echo ok > result.csv")
+    tools_general._scan_command_outputs(ctx, str(tmp_path), time.time() - 60)
     paths = [c["path"] for c in ctx.file_changes]
     assert any(p.endswith("result.csv") for p in paths)
     assert not any("node_modules" in p for p in paths)
-    assert not any("/.git/" in p for p in paths)
+    assert not any("objects" in p for p in paths)
 
 
 def test_recording_is_capped(tmp_path):
+    for i in range(tools_general._MAX_FILE_CHANGES + 20):
+        (tmp_path / f"f{i}.txt").write_text("x", encoding="utf-8")
     ctx = _Ctx(tmp_path)
-    _run_cmd(ctx, f"for i in $(seq 1 {tools_general._MAX_FILE_CHANGES + 20}); "
-                  "do echo x > f$i.txt; done")
-    assert len(ctx.file_changes) <= tools_general._MAX_FILE_CHANGES
+    tools_general._scan_command_outputs(ctx, str(tmp_path), time.time() - 60)
+    assert len(ctx.file_changes) == tools_general._MAX_FILE_CHANGES
 
 
 def test_python_output_is_recorded(tmp_path):
