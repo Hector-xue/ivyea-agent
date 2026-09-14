@@ -5,8 +5,6 @@
 """
 from __future__ import annotations
 
-import tempfile
-
 from ivyea_agent import rule_engine
 
 # 样例 search-term-report 的冻结决策快照（实现退化即变红）
@@ -18,15 +16,16 @@ GOLDEN = {
 }
 
 
-def test_vendored_engine_decisions_stable():
-    out = rule_engine.run(str(rule_engine.SAMPLE_CSV), site="US", output_dir=tempfile.mkdtemp())
+def test_vendored_engine_decisions_stable(tmp_path):
+    # 用 pytest 的 tmp_path 而不是 tempfile.mkdtemp()：后者没人删，每跑一次往 /tmp 漏一个
+    out = rule_engine.run(str(rule_engine.SAMPLE_CSV), site="US", output_dir=str(tmp_path))
     s = out["summary"]
     for k, v in GOLDEN.items():
         assert s.get(k) == v, f"决策回归：{k} 期望 {v}，实际 {s.get(k)}"
 
 
-def test_report_has_required_sections():
-    out = rule_engine.run(str(rule_engine.SAMPLE_CSV), site="US", output_dir=tempfile.mkdtemp())
+def test_report_has_required_sections(tmp_path):
+    out = rule_engine.run(str(rule_engine.SAMPLE_CSV), site="US", output_dir=str(tmp_path))
     md = out["report_md"]
     # 报告分区不应丢失（否词/放量/降bid 任一分区缺失即退化）
     assert "否" in md and ("放量" in md or "加" in md or "bid" in md.lower())

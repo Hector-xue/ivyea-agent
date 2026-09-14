@@ -41,11 +41,16 @@ def test_relay_has_no_top_level_imports_of_its_siblings():
 
 
 def test_state_dir_is_not_inside_the_installed_package():
-    """会话映射默认落 ~/.ivyea。落在模块目录下的话，root 装、普通用户跑就直接崩。"""
+    """会话映射默认落 ~/.ivyea（IVYEA_HOME 覆盖时跟着走）。落在模块目录下的话，root 装、普通用户跑就直接崩。"""
+    import os
+
     from ivyea_agent.feishu_relay import config
 
     assert "site-packages" not in config.STATE_DIR
-    assert ".ivyea" in config.STATE_DIR
+    # conftest 把整个会话的 IVYEA_HOME 指到了临时目录，所以断言"跟着 IVYEA_HOME 走"，
+    # 而不是字面上的 ".ivyea"——后者只有在读真实 ~/.ivyea 时才成立，那正是要避免的
+    home = os.environ.get("IVYEA_HOME") or os.path.join(os.path.expanduser("~"), ".ivyea")
+    assert config.STATE_DIR == os.path.join(home, "relay-state")
 
 
 def test_sdk_is_optional_but_the_hint_is_actionable():
