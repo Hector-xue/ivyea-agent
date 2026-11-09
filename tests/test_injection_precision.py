@@ -188,12 +188,17 @@ def test_index_layer_reserves_a_slot_for_every_category(ivyea_home):
 
     root = memory_store.mem_dir()
 
+    # 用今天的日期：这里测的是"每类保底名额"，要求全部条目都还在新记忆保护期内（GRACE_DAYS）。
+    # 曾写死 2026-09-02，过了保护期后 130 条全被衰减归档，索引层一条不剩，测试就自己挂了。
+    import time
+    today = time.strftime("%Y-%m-%d")
+
     def write(cat: str, name: str, desc: str) -> None:
         d = root / cat
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{memory_store.slugify(name)}.md").write_text(
             f"---\nname: {name}\ndescription: {desc}\ncategory: {cat}\nkeywords: \n"
-            f"created: 2026-09-02\nupdated: 2026-09-02\nsource: user\nconfidence: 1.00\n---\n\n内容\n",
+            f"created: {today}\nupdated: {today}\nsource: user\nconfidence: 1.00\n---\n\n内容\n",
             encoding="utf-8")
 
     for i in range(120):
