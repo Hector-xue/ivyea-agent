@@ -193,9 +193,14 @@ def test_a_blocked_worker_still_gets_a_heartbeat(ivyea_home, monkeypatch):
     threading.Thread(target=sw._heartbeat_loop, args=(stop, {"relay": alive}),
                      daemon=True).start()
     try:
-        time.sleep(0.2)
+        # 轮询而不是固定 sleep：CI 机器忙的时候心跳线程可能 0.2 秒都抢不到调度
+        #（ubuntu · py3.9 实测撞到过 ts 前后完全相等），测的是"会续"而不是"多快续"。
+        deadline = time.time() + 3
+        while "relay" not in sw.status() and time.time() < deadline:
+            time.sleep(0.02)
         first = sw.status()["relay"]["ts"]
-        time.sleep(0.2)
+        while sw.status()["relay"]["ts"] <= first and time.time() < deadline:
+            time.sleep(0.02)
         assert sw.status()["relay"]["ts"] > first, "心跳没有在续"
         assert sw.status()["relay"]["running"] is True
     finally:
