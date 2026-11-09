@@ -12,7 +12,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # ubuntu 钉 24.04：ubuntu-latest 已是 26.04，setup-python 在上面没有 3.9，而本项目声明支持 3.9
+        os: [ubuntu-24.04, macos-latest, windows-latest]
         python: ["3.9", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
